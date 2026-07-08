@@ -1,0 +1,39 @@
+{
+  "items": [
+    {
+      "title": "台積電 2330 法說會優於預期，AI 需求強勁",
+      "description": "台積電 (TSMC) 公布最新一季財報，毛利率創新高，AI 晶片訂單成長強勁。",
+      "link": "https://news.cnyes.com/news/id/abc123",
+      "pubDate": "2026-07-08T09:30:00+00:00",
+      "feed": "cnyes_headline"
+    },
+    {
+      "title": "半導體產業展望樂觀，伺服器需求回溫",
+      "description": "Research firm reports strong demand for AI 伺服器，半導體 stocks rally.",
+      "link": "https://news.cnyes.com/news/id/def456",
+      "pubDate": "2026-07-08T11:00:00+00:00",
+      "feed": "cnyes_headline"
+    },
+    {
+      "title": "央行升息一碼，市場利空出盡",
+      "description": "中央銀行宣布升息 1 碼，金融類股表現疲弱，銀行股下跌。",
+      "link": "https://news.cnyes.com/news/id/ghi789",
+      "pubDate": "2026-07-08T13:00:00+00:00",
+      "feed": "cnyes_headline"
+    },
+    {
+      "title": "廣達 2382 切入新興市場，訂單能見度延伸至明年",
+      "description": "廣達 (Quanta) 看好新興市場需求成長，預期明年訂單將延續成長動能。",
+      "link": "https://news.cnyes.com/news/id/jkl012",
+      "pubDate": "2026-07-08T14:30:00+00:00",
+      "feed": "cnyes_headline"
+    },
+    {
+      "title": "天氣預報：今日各地多雲偶陣雨",
+      "description": "中央氣象署發布天氣預報，全台各地多雲，午後有局部陣雨。",
+      "link": "https://news.cnyes.com/news/id/mno345",
+      "pubDate": "2026-07-08T15:00:00+00:00",
+      "feed": "cnyes_headline"
+    }
+  ]
+}

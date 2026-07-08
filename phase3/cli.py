@@ -361,6 +361,242 @@ def cmd_graph_trace(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------- Phase 3B ingest-signals ----------
+
+#: Canonical adapter name → registry key. ``all`` means "run every
+#: registered adapter against its corresponding input (or skip if no
+#: input was provided)". The mapping is duplicated here (instead of
+#: derived from ``sources.yaml``) so the CLI remains usable when the
+#: YAML config is missing — a deliberate Phase 3A-friendly default.
+_INGEST_ALL_ADAPTERS: tuple[str, ...] = (
+    "fixture", "yfinance", "rss", "t86", "macro",
+)
+
+
+def cmd_ingest_signals(args: argparse.Namespace) -> int:
+    """Run one or more adapters and (optionally) persist the resulting Signals.
+
+    Modes:
+      * ``--dry-run`` — adapt and print a summary, do not touch any DB.
+        Always allowed; no feature flag check.
+      * persist mode — gated behind ``PHASE3B_ENABLED=1`` or
+        ``--force``, same pattern as ``init-db``.
+
+    Inputs:
+      * ``--input PATH``   — single file. Used by every adapter named
+                             via ``--source`` (or by all adapters if
+                             ``--source all``).
+      * ``--input-dir PATH`` — directory; the CLI looks for
+                             ``<adapter>.json`` inside (and
+                             ``macro.json``, ``yfinance.json`` ...).
+                             If neither is set, each adapter is run
+                             with an empty input (yields no signals
+                             for most adapters; useful as a smoke
+                             test for the registry wiring).
+      * ``--config-path PATH`` — path to a sources.yaml override
+                             (default: ``config/phase3/sources.yaml``
+                             via :func:`phase3.config.sources.load_sources`).
+
+    Persistence:
+      * ``--db-path PATH`` — defaults to
+        ``phase3/data/intelligence.db`` (same default as init-db).
+        The path is refused if it resolves to ``macro_history.db``.
+
+    Safety:
+      * No network calls. Adapters take whatever payload is passed
+        to them.
+      * No writes unless ``--dry-run`` is NOT set AND the feature
+        flag (or ``--force``) is set.
+    """
+    # Late imports: keep the rest of the CLI fast and avoid pulling
+    # persistence on every invocation.
+    from phase3.config.sources import load_sources
+    from phase3.persistence import sqlite as sqlite_mod
+    from phase3.persistence.signal_repo import SignalRecord, SignalRepository
+    from phase3.signals.adapters import registry as adapter_registry
+
+    source = (args.source or "all").lower()
+    if source == "all":
+        adapter_names = list(_INGEST_ALL_ADAPTERS)
+    else:
+        if not adapter_registry.has(source):
+            print(
+                f"unknown source {source!r}; known: "
+                f"{', '.join(adapter_registry.names())}",
+                file=sys.stderr,
+            )
+            return 2
+        adapter_names = [source]
+
+    sources_config = load_sources(args.config_path)
+    dry_run = bool(getattr(args, "dry_run", False))
+    enabled = _phase3b_enabled(args)
+
+    # Refuse persist mode if not enabled. Dry-run is always allowed.
+    if not dry_run and not enabled:
+        print(
+            f"refusing to run: Phase 3B ingest is gated behind "
+            f"{PHASE3B_ENV_FLAG}=1 (or pass --force). "
+            f"Use --dry-run for a safe preview.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Path guard up front so we fail fast even in dry-run.
+    # Default DB path mirrors init-db. CRITICAL: we must NOT treat a
+    # user-supplied forbidden name as "use the default" — that would
+    # silently bypass the path guard for ``--db-path macro_history.db``.
+    user_db_path = getattr(args, "db_path", None)
+    if user_db_path:
+        db_path = user_db_path
+    else:
+        db_path = "phase3/data/intelligence.db"
+    # Validate path now (raises PathGuardError if forbidden)
+    try:
+        resolved_db = sqlite_mod._check_path(db_path)
+    except sqlite_mod.PathGuardError as exc:
+        print(f"refusing to write DB: {exc}", file=sys.stderr)
+        return 1
+
+    # Resolve inputs
+    input_path = getattr(args, "input", None)
+    input_dir = getattr(args, "input_dir", None)
+    if input_path and input_dir:
+        print(
+            "refusing to run: --input and --input-dir are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Run each adapter
+    total_new = 0
+    total_updated = 0
+    total_signals = 0
+    total_warnings = 0
+    per_adapter_summary: list[dict[str, Any]] = []
+    store_for_persist: Any = None
+    repo: SignalRepository | None = None
+    if not dry_run:
+        from phase3.persistence.sqlite import SQLiteStore
+        store_for_persist = SQLiteStore(resolved_db)
+        repo = SignalRepository(store_for_persist)
+
+    try:
+        for adapter_name in adapter_names:
+            payload: Any = None
+            # Prefer per-source default from sources.yaml
+            entry = sources_config.get(adapter_name)
+            if entry and entry.default_input:
+                payload = entry.default_input
+            if input_path:
+                payload = input_path
+            elif input_dir:
+                from pathlib import Path as _P
+                candidate = _P(input_dir) / f"{adapter_name}.json"
+                if candidate.exists():
+                    payload = candidate
+                else:
+                    # No file for this adapter — skip silently
+                    per_adapter_summary.append(
+                        {"adapter": adapter_name, "skipped": True,
+                         "reason": f"no {candidate.name} in {input_dir}"}
+                    )
+                    continue
+            adapter_cls = adapter_registry.get(adapter_name)
+            adapter = adapter_cls()
+            signals = adapter.adapt(payload)
+            n = len(signals)
+            total_signals += n
+            warnings: list[str] = []
+            # All adapters return a list, but the *with_stats variants
+            # also expose warnings / parsed / skipped. We re-derive
+            # warnings cheaply by re-running the with_stats variant
+            # only when input was provided. For None / empty input we
+            # keep warnings=[].
+            if payload is not None:
+                # Run the with_stats variant if available; otherwise
+                # fall back to a plain adapt.
+                stats_method = getattr(adapter, "adapt_with_stats", None)
+                if callable(stats_method):
+                    try:
+                        stats = stats_method(payload)
+                        warnings = list(getattr(stats, "warnings", []))
+                    except Exception as exc:  # noqa: BLE001
+                        warnings = [f"with_stats raised: {exc!r}"]
+            n_new = 0
+            n_updated = 0
+            if repo is not None and signals:
+                records = [_signal_to_record(s) for s in signals]
+                n_new = repo.upsert_many(records)
+                n_updated = len(records) - n_new
+            total_new += n_new
+            total_updated += n_updated
+            total_warnings += len(warnings)
+            per_adapter_summary.append({
+                "adapter": adapter_name,
+                "input": str(payload) if payload is not None else None,
+                "n_signals": n,
+                "n_new": n_new,
+                "n_updated": n_updated,
+                "n_warnings": len(warnings),
+                "warnings": warnings,
+            })
+    finally:
+        if store_for_persist is not None:
+            store_for_persist.close()
+
+    # Print summary
+    print(f"=== ingest-signals ({source})  dry_run={dry_run} ===")
+    for row in per_adapter_summary:
+        if row.get("skipped"):
+            print(f"  - {row['adapter']:<10}  SKIPPED ({row['reason']})")
+            continue
+        print(
+            f"  - {row['adapter']:<10}  signals={row['n_signals']:>4}  "
+            f"new={row['n_new']:>4}  updated={row['n_updated']:>4}  "
+            f"warnings={row['n_warnings']:>3}"
+        )
+        for w in row.get("warnings", []):
+            print(f"      warn: {w}")
+    print()
+    print(
+        f"total: signals={total_signals}  new={total_new}  "
+        f"updated={total_updated}  warnings={total_warnings}"
+    )
+    if not dry_run:
+        print(f"persisted to: {resolved_db}")
+    return 0
+
+
+def _signal_to_record(sig: Signal) -> Any:
+    """Convert a :class:`Signal` to a :class:`SignalRecord` for the repository.
+
+    Defined as a module-level helper so the CLI is testable in
+    isolation (the CLI does NOT import the converter at module load
+    time to keep import cost low).
+    """
+    from phase3.persistence.signal_repo import SignalRecord
+    return SignalRecord(
+        signal_id=sig.signal_id,
+        entity_type=sig.entity_type,
+        entity_id=sig.entity_id,
+        signal_type=sig.signal_type,
+        value=sig.value,
+        unit=sig.unit,
+        direction=sig.direction,
+        timestamp=sig.timestamp.isoformat(),
+        date_bucket=sig.date_bucket,
+        source_id=sig.source.source_id,
+        source_type=sig.source.source_type,
+        ref=sig.source.ref,
+        fetched_at=sig.source.fetched_at.isoformat(),
+        fetch_id="",
+        schema_version=sig.schema_version,
+        metadata=dict(sig.metadata or {}),
+        raw_payload=dict(sig.metadata or {}),
+    )
+
+
 # ---------- argparse ----------
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -421,6 +657,63 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Bypass the PHASE3B_ENABLED env-var gate. Use with care.",
     )
     p7.set_defaults(func=cmd_init_db)
+
+    # Phase 3B ingest subcommand. Same gating pattern as init-db:
+    # ``--dry-run`` is always allowed; persist mode requires
+    # ``PHASE3B_ENABLED=1`` or ``--force``.
+    p8 = sub.add_parser(
+        "ingest-signals",
+        help="Phase 3B: adapt one or more source payloads into Signals and "
+             "(optionally) persist them. --dry-run is always allowed; "
+             "persist mode is gated behind PHASE3B_ENABLED=1 or --force.",
+    )
+    p8.add_argument(
+        "--source",
+        default="all",
+        choices=("all", "fixture", "yfinance", "rss", "t86", "macro"),
+        help="Adapter source to run. Default 'all' runs every registered "
+             "adapter (each one against its own input or a no-op when no "
+             "input is supplied).",
+    )
+    p8.add_argument(
+        "--input",
+        default=None,
+        help="Path to a single JSON input file. Used by every selected "
+             "adapter. Mutually exclusive with --input-dir.",
+    )
+    p8.add_argument(
+        "--input-dir",
+        default=None,
+        help="Directory containing <adapter>.json files. The CLI runs each "
+             "selected adapter against the matching file (skips adapters "
+             "whose file is missing). Mutually exclusive with --input.",
+    )
+    p8.add_argument(
+        "--db-path",
+        default=None,
+        help="Override the default database path "
+             "(default: phase3/data/intelligence.db). The path is "
+             "refused if it resolves to macro_history.db.",
+    )
+    p8.add_argument(
+        "--config-path",
+        default=None,
+        help="Path to a sources.yaml override. Default: "
+             "config/phase3/sources.yaml.",
+    )
+    p8.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Adapt and print a summary; do not write to the DB. Always "
+             "allowed, even without PHASE3B_ENABLED.",
+    )
+    p8.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass the PHASE3B_ENABLED env-var gate for persist mode. "
+             "Use with care.",
+    )
+    p8.set_defaults(func=cmd_ingest_signals)
 
     return p
 

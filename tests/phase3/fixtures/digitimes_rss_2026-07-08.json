@@ -1,0 +1,25 @@
+{
+  "items": [
+    {
+      "title": "Digitimes: 半導體設備出貨回溫，AI 晶片需求帶動",
+      "description": "Industry sources report rising shipments of semiconductor equipment, driven by AI chip demand.",
+      "link": "https://www.digitimes.com.tw/tech/article/1234",
+      "pubDate": "2026-07-08T08:00:00+00:00",
+      "feed": "digitimes_industry"
+    },
+    {
+      "title": "伺服器 OEM 拉貨動能強勁，PCB 供應鏈受惠",
+      "description": "Server makers are ramping up orders, benefiting the PCB supply chain.",
+      "link": "https://www.digitimes.com.tw/tech/article/5678",
+      "pubDate": "2026-07-08T10:00:00+00:00",
+      "feed": "digitimes_industry"
+    },
+    {
+      "title": "電子業庫存調整接近尾聲",
+      "description": "Industry analysts note that the electronics inventory correction is nearing its end.",
+      "link": "https://www.digitimes.com.tw/tech/article/9012",
+      "pubDate": "2026-07-08T12:00:00+00:00",
+      "feed": "digitimes_industry"
+    }
+  ]
+}

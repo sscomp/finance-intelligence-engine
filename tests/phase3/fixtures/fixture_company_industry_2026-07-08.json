@@ -1,0 +1,46 @@
+{
+  "signals": [
+    {
+      "entity_type": "company",
+      "entity_id": "1101",
+      "signal_type": "ttm_eps",
+      "value": 12.5,
+      "unit": "twd",
+      "direction": "bullish",
+      "timestamp": "2026-07-08T00:00:00+00:00",
+      "date_bucket": "2026-07-08",
+      "source_id": "fixture.ttm_eps.1101",
+      "source_type": "fixture",
+      "ref": "fixture://ttm_eps/1101",
+      "metadata": {"field": "ttm_eps"}
+    },
+    {
+      "entity_type": "company",
+      "entity_id": "2330",
+      "signal_type": "pe_ratio",
+      "value": 21.5,
+      "unit": "ratio",
+      "direction": "neutral",
+      "timestamp": "2026-07-08T00:00:00+00:00",
+      "date_bucket": "2026-07-08",
+      "source_id": "fixture.pe.2330",
+      "source_type": "fixture",
+      "ref": "fixture://pe/2330",
+      "metadata": {"field": "pe_ratio"}
+    },
+    {
+      "entity_type": "industry",
+      "entity_id": "半導體",
+      "signal_type": "industry_growth",
+      "value": 0.08,
+      "unit": "ratio",
+      "direction": "bullish",
+      "timestamp": "2026-07-08T00:00:00+00:00",
+      "date_bucket": "2026-07-08",
+      "source_id": "fixture.industry_growth.半導體",
+      "source_type": "fixture",
+      "ref": "fixture://industry/半導體",
+      "metadata": {"field": "industry_growth"}
+    }
+  ]
+}

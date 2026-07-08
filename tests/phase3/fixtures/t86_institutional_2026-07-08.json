@@ -1,0 +1,32 @@
+{
+  "rows": [
+    {
+      "code": "2330",
+      "date_bucket": "2026-07-08",
+      "foreign_net": 15000,
+      "prop_net": 2500,
+      "dealer_net": -800,
+      "industry_id": "半導體"
+    },
+    {
+      "code": "2454",
+      "date_bucket": "2026-07-08",
+      "foreign_net": 3200,
+      "prop_net": -500,
+      "dealer_net": 150,
+      "industry_id": "半導體"
+    },
+    {
+      "code": "2881",
+      "date_bucket": "2026-07-08",
+      "investment_trust_net": 1200,
+      "foreign_net": 4500
+    },
+    {
+      "code": "2892",
+      "date_bucket": "2026-07-08",
+      "foreign_net": -2000,
+      "dealer_net": 600
+    }
+  ]
+}

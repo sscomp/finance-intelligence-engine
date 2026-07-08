@@ -1,0 +1,16 @@
+{
+  "timestamp": "2026-07-08T00:00:00+00:00",
+  "date_bucket": "2026-07-08",
+  "fed_rate": 0.0525,
+  "us10y": 0.0430,
+  "us2y": 0.0445,
+  "dxy": 102.3,
+  "vix": 18.5,
+  "cpi_yoy": 0.028,
+  "core_cpi_yoy": 0.022,
+  "m2_yoy": 0.04,
+  "credit_spread_bp": 130.0,
+  "yield_spread": -0.0015,
+  "rate_hike_flag": 0,
+  "unknown_field_xyz": 99.9
+}

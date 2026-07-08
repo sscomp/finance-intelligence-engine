@@ -1,0 +1,17 @@
+{
+  "ticker": "2454.TW",
+  "entity_id": "2454",
+  "date_bucket": "2026-07-08",
+  "timestamp": "2026-07-08T13:30:00+00:00",
+  "info": {
+    "trailingPE": 16.3,
+    "priceToBook": 2.8,
+    "returnOnEquity": 0.18,
+    "earningsGrowth": 0.12,
+    "revenueGrowth": 0.09,
+    "beta": 1.1,
+    "dividendYield": 0.045,
+    "marketCap": 130000000000,
+    "grossMargins": 0.48
+  }
+}

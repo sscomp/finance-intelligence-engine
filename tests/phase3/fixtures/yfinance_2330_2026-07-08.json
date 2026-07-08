@@ -1,0 +1,18 @@
+{
+  "ticker": "2330.TW",
+  "entity_id": "2330",
+  "date_bucket": "2026-07-08",
+  "timestamp": "2026-07-08T13:30:00+00:00",
+  "info": {
+    "trailingPE": 21.5,
+    "priceToBook": 5.4,
+    "pegRatio": 1.2,
+    "returnOnEquity": 0.31,
+    "earningsGrowth": 0.18,
+    "revenueGrowth": 0.14,
+    "beta": 0.95,
+    "dividendYield": 0.022,
+    "marketCap": 560000000000,
+    "grossMargins": 0.52
+  }
+}

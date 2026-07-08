@@ -1,0 +1,68 @@
+# Phase 3B adapter sources config.
+#
+# This file maps logical source names (used in
+# config/phase3/source_weights.yaml) to the adapter class that
+# produces Signals for that source. It is the runtime registry
+# of "where do I get signals of type X from?".
+#
+# Convention:
+#   sources.<name>.adapter       → registry key (e.g. "yfinance", "rss")
+#   sources.<name>.source_type   → source_type string written on the Signal
+#   sources.<name>.default_input → optional default input path (for the CLI)
+#   sources.<name>.entity_match  → for RSS only: "company" / "industry" / "both"
+#   sources.<name>.direction     → for sentiment-bearing sources: "lexicon"
+#
+# The Phase 3B scope document asks us NOT to duplicate the
+# per-source weight profile (it lives in source_weights.yaml).
+# This file only holds *routing* metadata, not scoring weights.
+#
+# To add a new source, append an entry under `sources:` and
+# register the adapter class in
+# phase3/signals/adapters/__init__.py.
+
+sources:
+  yfinance:
+    adapter: yfinance
+    source_type: yfinance
+    description: "yfinance .info payload → company Signals (pe_ratio, roe, ...)"
+    default_input: null
+    enabled: true
+
+  digitimes_rss:
+    adapter: rss
+    source_type: rss
+    description: "DIGITIMES industry RSS → news_headline + sentiment per industry"
+    default_input: null
+    entity_match: industry
+    direction: lexicon
+    enabled: true
+
+  cnyes_rss:
+    adapter: rss
+    source_type: rss
+    description: "鉅亨網 headline RSS → news_headline + sentiment per company/industry"
+    default_input: null
+    entity_match: both
+    direction: lexicon
+    enabled: true
+
+  t86:
+    adapter: t86
+    source_type: t86
+    description: "TWSE T86 institutional flow → foreign_net / prop_net / dealer_net"
+    default_input: null
+    enabled: true
+
+  macro_yfinance:
+    adapter: macro
+    source_type: macro
+    description: "Daily macro indicators (fed_rate, vix, dxy, cpi, ...) → macro Signals"
+    default_input: null
+    enabled: true
+
+  fixture:
+    adapter: fixture
+    source_type: fixture
+    description: "Generic JSON fixture adapter for tests and offline replays"
+    default_input: null
+    enabled: true
