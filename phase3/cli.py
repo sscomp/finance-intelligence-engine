@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -173,6 +174,74 @@ def _build_sample_signals() -> list[Signal]:
 
 # ---------- subcommands ----------
 
+
+# Feature flag for the Phase 3B persistence CLI. Default OFF: the
+# `init-db` subcommand refuses to run unless this is truthy. This
+# keeps a stray cron job or human from creating an intelligence.db
+# by accident. We use the env-var convention that other Phase 3
+# tooling already uses (PHASE3B_ENABLED).
+PHASE3B_ENV_FLAG: str = "PHASE3B_ENABLED"
+
+
+def _phase3b_enabled(args: argparse.Namespace) -> bool:
+    """Return True if the user has explicitly opted in to Phase 3B.
+
+    Priority: explicit ``--force`` flag, then the environment
+    variable, then False. We never silently enable.
+    """
+    if getattr(args, "force", False):
+        return True
+    val = os.environ.get(PHASE3B_ENV_FLAG, "").strip().lower()
+    return val in ("1", "true", "yes", "on")
+
+
+def cmd_init_db(args: argparse.Namespace) -> int:
+    """Initialise the Phase 3B SQLite database (idempotent).
+
+    Refuses to run unless ``PHASE3B_ENABLED=1`` (or ``--force``) is
+    set. The default path is :data:`SQLiteGraphStore.DEFAULT_DB_PATH`
+    but callers may override it. After apply we print the schema
+    version and the quick_check result so the operator has visible
+    confirmation.
+    """
+    if not _phase3b_enabled(args):
+        print(
+            f"refusing to run: Phase 3B persistence is gated behind "
+            f"{PHASE3B_ENV_FLAG}=1 (or pass --force).",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Late imports keep the rest of the CLI fast and let this module
+    # import cleanly even if persistence is missing in some
+    # deployments.
+    from phase3.graph.sqlite_store import DEFAULT_DB_PATH, SQLiteGraphStore
+    from phase3.persistence.migrations import MigrationManager
+    from phase3.persistence.sqlite import quick_check
+    from phase3.persistence import schema_v1
+
+    target = getattr(args, "db_path", None) or DEFAULT_DB_PATH
+    print(f"[init-db] target = {target}")
+    # We pass ``auto_migrate=False`` here so we can capture the list
+    # of migrations that were *newly* applied in this call. The
+    # construction-time ensure_schema() also runs it, but we want
+    # visibility for the operator, so we run it explicitly here and
+    # own the result.
+    with SQLiteGraphStore(target, auto_migrate=False) as store:
+        mgr = MigrationManager(store._store, [schema_v1.build()])
+        applied = mgr.apply()
+        current = mgr.current_version()
+        qc = quick_check(store.path)
+    print(f"[init-db] current_version = {current}")
+    if applied:
+        print(f"[init-db] applied {len(applied)} migration(s): "
+              f"{[m.version for m in applied]}")
+    else:
+        print("[init-db] no new migrations applied (schema up to date)")
+    print(f"[init-db] quick_check = {qc}")
+    return 0 if qc == "ok" else 1
+
+
 def cmd_score_macro(_args: argparse.Namespace) -> int:
     sc = MacroScorer(config_hash="cli-macro")
     ms = sc.score_macro(SAMPLE_MACRO_INPUTS)
@@ -326,6 +395,33 @@ def _build_parser() -> argparse.ArgumentParser:
     p6.add_argument("--direction", choices=["upstream", "downstream"],
                     default="upstream")
     p6.set_defaults(func=cmd_graph_trace)
+
+    # Phase 3B persistence subcommand. Gated by PHASE3B_ENABLED env
+    # var (or --force) so it never runs by accident. The subcommand
+    # is registered in argparse regardless of the flag — that way
+    # `--help` documents it, and the flag is enforced at runtime
+    # inside cmd_init_db. This means a Phase 3A user who doesn't
+    # know about the flag sees the subcommand listed in --help but
+    # gets a clear refusal when they try to run it.
+    p7 = sub.add_parser(
+        "init-db",
+        help="Phase 3B: initialise the SQLite persistence database. "
+             "Gated behind PHASE3B_ENABLED=1 or --force.",
+    )
+    p7.add_argument(
+        "--db-path",
+        default=None,
+        help="Override the default database path "
+             "(default: phase3/data/intelligence.db). The path is "
+             "refused if it resolves to macro_history.db.",
+    )
+    p7.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass the PHASE3B_ENABLED env-var gate. Use with care.",
+    )
+    p7.set_defaults(func=cmd_init_db)
+
     return p
 
 
