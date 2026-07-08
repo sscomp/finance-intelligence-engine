@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local artifacts (untracked in macro-report)
+logs/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+report_offline.json
+
+# Temp / one-off
+/tmp_*.py
+/tmp_*.sh
+phase3_smoke_test.txt
+phase3_test.sh
+
+# macOS Finder noise
+._*
