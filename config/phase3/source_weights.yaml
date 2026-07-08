@@ -1,0 +1,41 @@
+# Per-source weight profiles.
+# source_weight: overall reputation (0..1)
+# type_weights: per-signal-type weight (0..1), falls back to source_weight
+sources:
+  yfinance:
+    source_type: yfinance
+    source_weight: 0.9
+    type_weights:
+      pe_ratio: 0.7
+      roe: 0.9
+      revenue_growth: 0.9
+      earnings_growth: 0.9
+      pb_ratio: 0.6
+      peg_ratio: 0.6
+      beta: 0.5
+  t86:
+    source_type: t86
+    source_weight: 0.95
+    type_weights:
+      foreign_net: 1.0
+      prop_net: 0.9
+      dealer_net: 0.8
+  digitimes_rss:
+    source_type: rss
+    source_weight: 0.7
+    type_weights:
+      news_headline: 0.8
+      sentiment: 0.6
+  cnyes_rss:
+    source_type: rss
+    source_weight: 0.5
+    type_weights:
+      news_headline: 0.4
+  macro_yfinance:
+    source_type: yfinance
+    source_weight: 0.9
+    type_weights:
+      fed_rate: 1.0
+      us10y: 0.9
+      vix: 0.7
+      dxy: 0.6

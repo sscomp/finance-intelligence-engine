@@ -1,0 +1,40 @@
+# Per-signal-type decay rules.
+# Format: {function, half_life_days, step_threshold_days?}.
+# Loader validates function names against {linear, exponential, step, none}.
+decay:
+  fed_rate:
+    function: linear
+    half_life_days: 14.0
+  monthly_revenue:
+    function: exponential
+    half_life_days: 30.0
+  news_headline:
+    function: exponential
+    half_life_days: 1.0
+  institutional_flow:
+    function: step
+    step_threshold_days: 5.0
+  pe_ratio:
+    function: none
+    half_life_days: 0.0
+  roe:
+    function: none
+    half_life_days: 0.0
+  pb_ratio:
+    function: none
+    half_life_days: 0.0
+  revenue_growth:
+    function: exponential
+    half_life_days: 30.0
+  earnings_growth:
+    function: exponential
+    half_life_days: 30.0
+  rate_hike:
+    function: linear
+    half_life_days: 14.0
+  sentiment:
+    function: exponential
+    half_life_days: 1.0
+  default:
+    function: exponential
+    half_life_days: 7.0

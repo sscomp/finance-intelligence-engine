@@ -1,0 +1,9 @@
+# Cross-layer adjustment tuning.
+# These are the upper bounds / scale factors for the macro→industry
+# and macro+industry→company adjustments. Negative numbers are clamped
+# at the matching positive max_abs.
+# Phase 3A uses simple linear clamping; Phase 3B can introduce
+# non-linear sensitivity curves.
+industry_to_company_weight: 0.10
+macro_to_company_max_abs: 15.0
+industry_to_company_max_abs: 10.0

@@ -1,0 +1,14 @@
+# Phase 3A scorer manifest. Loader only reads `default_weights` and
+# `ttl_hours`; the rest is metadata for Phase 3B.
+name: company
+version: 0.1.0
+description: "Company scoring (7 dimensions + cross-layer, Phase 3A scaffold)"
+ttl_hours: 168
+default_weights:
+  financial_quality: 0.20
+  growth: 0.15
+  profitability: 0.15
+  valuation: 0.15
+  momentum: 0.10
+  risk: 0.10
+  news_sentiment: 0.15

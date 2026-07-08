@@ -1,0 +1,13 @@
+# Phase 3A scorer manifest. Loader only reads `default_weights` and
+# `ttl_hours`; the rest is metadata for Phase 3B.
+name: macro
+version: 0.1.0
+description: "Macro environment scoring (6 dimensions, Phase 3A scaffold)"
+ttl_hours: 24
+default_weights:
+  economic: 0.20
+  monetary: 0.20
+  inflation: 0.15
+  rates: 0.20
+  liquidity: 0.15
+  geopolitics: 0.10

@@ -1,0 +1,13 @@
+# Phase 3A scorer manifest. Loader only reads `default_weights` and
+# `ttl_hours`; the rest is metadata for Phase 3B.
+name: industry
+version: 0.1.0
+description: "Industry scoring (6 dimensions, Phase 3A scaffold)"
+ttl_hours: 24
+default_weights:
+  rotation: 0.15
+  relative_strength: 0.20
+  cyclicality: 0.15
+  macro_sensitivity: 0.15
+  industry_news: 0.20
+  capital_flow: 0.15

@@ -1,0 +1,3 @@
+# Phase 3 enabled flag (kill switch).
+# Set to false to disable Phase 3 entirely. Default: true.
+enabled: true
