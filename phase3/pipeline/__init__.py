@@ -84,10 +84,31 @@ __all__ = [
 # via the same `phase3.pipeline` namespace.
 from phase3.pipeline.snapshot_writer import SnapshotWriter, SnapshotWriterConfig  # noqa: E402
 
+# GraphWriter (Phase 3B Task 4) lives in a sibling module to avoid a
+# circular import with `scoring_pipeline` (it consumes PipelineResult).
+# Re-exported here so callers can reach it via the same `phase3.pipeline`
+# namespace.
+from phase3.pipeline.graph_writer import (  # noqa: E402
+    GraphWriteResult,
+    GraphWriter,
+    GraphWriterStore,
+    make_entity_node_id,
+    make_score_node_id,
+    make_signal_node_id,
+    make_source_node_id,
+)
+
 __all__ = [
     "LoadedSignals",
     "InputDimension",
     "InputBundle",
     "SnapshotWriter",
     "SnapshotWriterConfig",
+    "GraphWriter",
+    "GraphWriteResult",
+    "GraphWriterStore",
+    "make_source_node_id",
+    "make_signal_node_id",
+    "make_score_node_id",
+    "make_entity_node_id",
 ]
