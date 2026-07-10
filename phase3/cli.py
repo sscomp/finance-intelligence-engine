@@ -361,6 +361,238 @@ def cmd_graph_trace(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_edge_types_csv(csv: str | None) -> list[EdgeType] | None:
+    """Parse a comma-separated list of edge-type names to a list.
+
+    Returns None when ``csv`` is None or empty (meaning: use the
+    default per-direction list). Unknown names raise
+    ``SystemExit`` via :func:`argparse.ArgumentParser.error` so the
+    CLI fails fast with a clear message.
+    """
+    if not csv:
+        return None
+    out: list[EdgeType] = []
+    known = {e.value: e for e in EdgeType}
+    for raw in csv.split(","):
+        name = raw.strip()
+        if not name:
+            continue
+        if name not in known:
+            valid = ", ".join(sorted(known))
+            raise SystemExit(
+                f"unknown edge type {name!r}; valid: {valid}"
+            )
+        out.append(known[name])
+    return out or None
+
+
+def cmd_trace_score(args: argparse.Namespace) -> int:
+    """Phase 3B Task 4 Run 3 — trace from a score, optionally through a
+    pipeline result adapter.
+
+    Two modes:
+
+    * **sample** (default): build the canonical sample graph and trace
+      from ``--node``. Useful for operator demos and unit smoke tests.
+    * **pipeline** (``--from-pipeline``): build a fake
+      :class:`PipelineResult` from the sample inputs, then use
+      :class:`EvidenceChainAdapter` to compute the score node id and
+      run the trace. Demonstrates the round-trip
+      ``PipelineResult → score_node_id → EvidenceChain`` path that
+      callers (the cron snapshot path, Bridge delivery verification)
+      will use.
+
+    Output:
+
+    * ``--output PATH`` writes the JSON-serialized
+      :class:`EvidenceChain` to PATH. ``--output -`` writes to stdout
+      (default for ``--json``). Without ``--output`` we render the
+      human-readable ``to_text()`` form.
+    """
+    direction = args.direction
+    if direction not in ("upstream", "downstream"):
+        print(
+            f"--direction must be 'upstream' or 'downstream', got {direction!r}",
+            file=sys.stderr,
+        )
+        return 2
+    edge_types = _parse_edge_types_csv(args.edge_types)
+
+    if args.from_pipeline:
+        # Pipeline mode: build a tiny PipelineResult-shaped object
+        # and route through EvidenceChainAdapter. We don't have a
+        # full ScoringPipeline here (no fixtures in this CLI), so we
+        # construct the bridge's input from the sample score.
+        from phase3.datamodel.evidence import Evidence, make_evidence_id
+        from phase3.datamodel.scores import (
+            DimensionResult, ScoreBreakdown, SubIndicatorResult,
+            WeightedFactor,
+        )
+        from phase3.graph.evidence_trace_export import (
+            EvidenceChainAdapter, score_node_id_for_result,
+        )
+        from phase3.pipeline.scoring_pipeline import PipelineResult
+        # Compose a minimal ScoreBreakdown so the adapter has
+        # scorer_type / entity_id / timestamp.
+        now = datetime.now(timezone.utc)
+        valid_until = now
+        ev = Evidence(
+            evidence_id=make_evidence_id("yfinance", "2330:pe", "22.0"),
+            source_type="yfinance", source_ref="2330:pe",
+            raw_value="22.0", description="PE=22.0",
+            timestamp=now,
+        )
+        breakdown = ScoreBreakdown(
+            scorer_type=args.scorer_type or "company",
+            entity_type=args.scorer_type or "company",
+            entity_id=args.entity_id or "2330",
+            score=42.0, confidence=0.7,
+            dimensions=[
+                DimensionResult(
+                    name="valuation", weight=1.0, score=42.0,
+                    confidence=0.7,
+                    sub_indicators=[
+                        SubIndicatorResult(
+                            name="pe", raw_value=22.0, raw_unit="x",
+                            sub_score=42.0, transformation="threshold",
+                            source="yfinance", source_ref="2330:pe",
+                            evidence=[ev],
+                        ),
+                    ],
+                    factors=[
+                        WeightedFactor(
+                            name="pe", raw_value=22.0, raw_unit="x",
+                            sub_score=42.0, sub_weight=1.0,
+                            signed_score=42.0, transformation="threshold",
+                            source="yfinance", source_ref="2330:pe",
+                            evidence=[ev],
+                        ),
+                    ],
+                ),
+            ],
+            overall_evidence=[ev],
+            cross_layer_adjustments=[],
+            schema_version="v1",
+            timestamp=now, valid_until=valid_until,
+            config_hash="cli-trace-score",
+        )
+        from phase3.datamodel import CompanyScore
+        score = CompanyScore(
+            breakdown=breakdown,
+            code=args.entity_id or "2330",
+            name=args.entity_id or "2330",
+            sector="cli",
+        )
+        result = PipelineResult(
+            score=score,
+            input_bundle=None,  # type: ignore[arg-type]
+            evidence_signal_ids=("sig-2330-pe", "sig-2330-roe"),
+            snapshot_id=None,
+            warnings=(),
+            metadata={
+                "scorer_type": args.scorer_type or "company",
+                "entity_id": args.entity_id or "2330",
+                "date_bucket": now.date().isoformat(),
+                "config_hash": "cli-trace-score",
+                "dry_run": True,
+            },
+        )
+        # Build a sample graph that contains the score node we will
+        # synthesize; this keeps the demo deterministic without
+        # requiring the user to call GraphWriter first.
+        s = _build_sample_graph()
+        # The sample graph's company score uses
+        # `score:company:2330:2026-07-08`; if the user supplied a
+        # different date we add a minimal score node + signal
+        # + source so the trace is non-empty.
+        synth_id = score_node_id_for_result(result)
+        if not s.has_node(synth_id):
+            from phase3.datamodel.graph import GraphNode
+            s.add_node(GraphNode(
+                node_id=synth_id, node_type=NodeType.SCORE, label="synth",
+            ))
+            from phase3.datamodel.graph import make_graph_edge_id
+            for sig in ("sig-2330-pe", "sig-2330-roe"):
+                sig_nid = f"signal:{sig}"
+                s.add_node(GraphNode(
+                    node_id=sig_nid, node_type=NodeType.SIGNAL, label=sig,
+                ))
+                s.add_edge(GraphEdge(
+                    edge_id="",
+                    edge_type=EdgeType.CONTRIBUTES_TO,
+                    from_node_id=sig_nid,
+                    to_node_id=synth_id,
+                ))
+                s.add_node(GraphNode(
+                    node_id="source:yfinance:default",
+                    node_type=NodeType.SOURCE, label="yfinance",
+                ))
+                s.add_edge(GraphEdge(
+                    edge_id="",
+                    edge_type=EdgeType.GENERATED,
+                    from_node_id=sig_nid,
+                    to_node_id="source:yfinance:default",
+                ))
+        adapter = EvidenceChainAdapter(s, edge_types=edge_types)
+        chain = adapter.trace(
+            result,
+            max_depth=args.max_depth,
+            direction=direction,
+            max_nodes=args.max_nodes,
+            include_start=args.include_start,
+        )
+        start_label = synth_id
+        source_kind = f"pipeline({args.scorer_type or 'company'})"
+    else:
+        s = _build_sample_graph()
+        target = args.node or "score:company:2330:2026-07-08"
+        tr = EvidenceTracer(s)
+        chain = tr.trace(
+            target,
+            max_depth=args.max_depth,
+            direction=direction,  # type: ignore[arg-type]
+            edge_types=edge_types,
+            max_nodes=args.max_nodes,
+            include_start=args.include_start,
+        )
+        start_label = target
+        source_kind = "sample-graph"
+
+    # Output
+    if args.output is not None or args.json:
+        from phase3.graph.evidence_trace_export import chain_to_json
+        text = chain_to_json(
+            chain,
+            indent=2,
+            include_nodes=not args.no_nodes,
+            include_edges=not args.no_edges,
+        )
+        if args.output and args.output != "-":
+            from pathlib import Path as _P
+            _P(args.output).write_text(text, encoding="utf-8")
+            print(
+                f"=== trace-score ({source_kind}) -> {args.output} ===",
+            )
+            print(
+                f"start={start_label} direction={direction} "
+                f"max_depth={args.max_depth} "
+                f"truncated={chain.truncated} "
+                f"warnings={len(chain.warnings)}"
+            )
+        else:
+            # stdout
+            print(text)
+        return 0
+
+    # Human-readable (default)
+    print(
+        f"=== trace-score ({source_kind}) from {start_label} "
+        f"({direction}, max_depth={args.max_depth}) ==="
+    )
+    print(chain.to_text())
+    return 0
+
+
 # ---------- Phase 3B ingest-signals ----------
 
 #: Canonical adapter name → registry key. ``all`` means "run every
@@ -714,6 +946,77 @@ def _build_parser() -> argparse.ArgumentParser:
              "Use with care.",
     )
     p8.set_defaults(func=cmd_ingest_signals)
+
+    # Phase 3B Task 4 Run 3 — Evidence Trace CLI.
+    # Subcommand: trace-score. Defaults to the sample graph (no
+    # production DB); use --from-pipeline to demonstrate the
+    # PipelineResult -> score_node_id -> EvidenceChain round-trip.
+    p9 = sub.add_parser(
+        "trace-score",
+        help="Phase 3B Task 4 Run 3: trace evidence from a score node. "
+             "By default traces the sample graph; pass --from-pipeline "
+             "to demonstrate the PipelineResult -> EvidenceChain path.",
+    )
+    p9.add_argument(
+        "--node",
+        default="score:company:2330:2026-07-08",
+        help="Node id to trace from (sample-graph mode only). "
+             "Default: the sample-graph company score.",
+    )
+    p9.add_argument("--max-depth", type=int, default=5)
+    p9.add_argument(
+        "--max-nodes", type=int, default=None,
+        help="Optional cap on the number of nodes the walk may visit.",
+    )
+    p9.add_argument(
+        "--direction", choices=("upstream", "downstream"),
+        default="upstream",
+    )
+    p9.add_argument(
+        "--edge-types",
+        default=None,
+        help="Comma-separated edge-type whitelist (e.g. "
+             "'contributes_to,generated'). Default: per-direction default list.",
+    )
+    p9.add_argument(
+        "--include-start",
+        action="store_true",
+        help="Include the start node in visited_node_ids (default: off).",
+    )
+    p9.add_argument(
+        "--from-pipeline",
+        action="store_true",
+        help="Build a tiny PipelineResult from sample inputs and trace "
+             "via EvidenceChainAdapter. Demonstrates the round-trip "
+             "PipelineResult -> score_node_id -> EvidenceChain.",
+    )
+    p9.add_argument(
+        "--scorer-type", default="company",
+        choices=("macro", "industry", "company"),
+        help="Scorer type for --from-pipeline mode (default: company).",
+    )
+    p9.add_argument(
+        "--entity-id", default="2330",
+        help="Entity id for --from-pipeline mode (default: 2330).",
+    )
+    p9.add_argument(
+        "--output", default=None,
+        help="Write the JSON-serialized chain to PATH. Use '-' for stdout. "
+             "Implies --json.",
+    )
+    p9.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON on stdout (default: human-readable text).",
+    )
+    p9.add_argument(
+        "--no-nodes", action="store_true",
+        help="When emitting JSON, omit the per-node payload (buckets only).",
+    )
+    p9.add_argument(
+        "--no-edges", action="store_true",
+        help="When emitting JSON, omit the per-edge payload.",
+    )
+    p9.set_defaults(func=cmd_trace_score)
 
     return p
 

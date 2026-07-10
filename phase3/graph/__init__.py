@@ -24,6 +24,12 @@ from phase3.graph.evidence_tracer import (
 )
 from phase3.graph.in_memory_store import GraphStore
 from phase3.graph.traversal import bfs, shortest_path
+from phase3.graph.evidence_trace_export import (
+    EvidenceChainAdapter,
+    chain_to_dict,
+    chain_to_json,
+    score_node_id_for_result,
+)
 
 __all__ = [
     "GraphStore",
@@ -36,6 +42,10 @@ __all__ = [
     "shortest_path",
     "EvidenceTracer",
     "EvidenceChain",
+    "EvidenceChainAdapter",
+    "chain_to_dict",
+    "chain_to_json",
+    "score_node_id_for_result",
     "EVIDENCE_UPSTREAM_EDGE_TYPES",
     "EVIDENCE_DOWNSTREAM_EDGE_TYPES",
     "UPSTREAM_SIDE",

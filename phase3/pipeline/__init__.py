@@ -98,6 +98,16 @@ from phase3.pipeline.graph_writer import (  # noqa: E402
     make_source_node_id,
 )
 
+# Evidence Integration (Phase 3B Task 4 Run 3) — attach evidence-trace
+# metadata to a PipelineResult. Lives in a sibling module to keep the
+# pipeline pure (it does not import the graph tracer here).
+from phase3.pipeline.evidence_integration import (  # noqa: E402
+    attach_evidence_metadata,
+    evidence_summary,
+    metadata_has_evidence,
+    trace_warnings_only,
+)
+
 __all__ = [
     "LoadedSignals",
     "InputDimension",
@@ -111,4 +121,8 @@ __all__ = [
     "make_signal_node_id",
     "make_score_node_id",
     "make_entity_node_id",
+    "attach_evidence_metadata",
+    "evidence_summary",
+    "metadata_has_evidence",
+    "trace_warnings_only",
 ]
