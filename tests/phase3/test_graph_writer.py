@@ -354,17 +354,28 @@ class GraphWriterSmokeTests(unittest.TestCase):
         self.assertEqual(out.created_node_count, 5)
 
     def test_writes_expected_edges(self) -> None:
-        """source→signal (GENERATED), signal→score (CONTRIBUTES_TO),
-        score→entity (CITES) are all written."""
+        """signal→source (GENERATED), signal→score (CONTRIBUTES_TO),
+        score→source (CITES), and score→entity (REFERS_TO) are all
+        written — per docs/phase3/06_research_graph.md §2.
+
+        Topology (spec-aligned):
+          - 2 GENERATED:   signal -> source
+          - 2 CONTRIBUTES_TO: signal -> score
+          - 1 CITES:       score -> source  (the 2 signals round-robin
+                            to 1 source node, yielding 1 unique CITES)
+          - 1 REFERS_TO:   score -> entity  (preserved score→entity
+                            relationship; REFERS_TO is the closest
+                            existing EdgeType for this relation)
+        """
         breakdown = _make_breakdown(
             scorer_type="macro", entity_id="global",
             factor_source="yfinance",
         )
         result = _make_pipeline_result(breakdown=breakdown)
         self.writer.write(result)
-        # 2 GENERATED + 2 CONTRIBUTES_TO + 1 CITES = 5 edges
-        self.assertEqual(self.store.edge_count(), 5)
-        # The score → entity edge is the one CITES
+        # 2 GENERATED + 2 CONTRIBUTES_TO + 1 CITES + 1 REFERS_TO = 6 edges
+        self.assertEqual(self.store.edge_count(), 6)
+        # CITES is now score -> source (not score -> entity)
         cites_edges = [
             e for e in self.store._edges.values()
             if e.edge_type == EdgeType.CITES
@@ -372,19 +383,45 @@ class GraphWriterSmokeTests(unittest.TestCase):
         self.assertEqual(len(cites_edges), 1)
         ce = cites_edges[0]
         self.assertEqual(ce.from_node_id, out_score_id(self.writer, result))
-        self.assertEqual(ce.to_node_id, out_entity_id(self.writer, result))
+        # CITES target is the source node, not the entity node
+        self.assertNotEqual(ce.to_node_id, out_entity_id(self.writer, result))
+        self.assertTrue(ce.to_node_id.startswith("source:"))
+        # REFERS_TO is score -> entity (preserved relationship)
+        refers_edges = [
+            e for e in self.store._edges.values()
+            if e.edge_type == EdgeType.REFERS_TO
+        ]
+        self.assertEqual(len(refers_edges), 1)
+        re = refers_edges[0]
+        self.assertEqual(re.from_node_id, out_score_id(self.writer, result))
+        self.assertEqual(re.to_node_id, out_entity_id(self.writer, result))
         # Each signal has a CONTRIBUTES_TO edge to the score
         contributes = [
             e for e in self.store._edges.values()
             if e.edge_type == EdgeType.CONTRIBUTES_TO
         ]
         self.assertEqual(len(contributes), 2)
-        # Each signal has a GENERATED edge from the source
+        for c in contributes:
+            self.assertEqual(c.to_node_id, out_score_id(self.writer, result))
+            self.assertTrue(c.from_node_id.startswith("signal:"))
+        # Each signal has a GENERATED edge to the source
+        # (per spec, GENERATED = Signal -> Source, so signal is the
+        # from-side and the source is the to-side)
         generated = [
             e for e in self.store._edges.values()
             if e.edge_type == EdgeType.GENERATED
         ]
         self.assertEqual(len(generated), 2)
+        for g in generated:
+            self.assertTrue(g.from_node_id.startswith("signal:"))
+            self.assertTrue(g.to_node_id.startswith("source:"))
+        # No CITES edge points to an entity node (regression guard
+        # for the prior misuse of CITES = score->entity)
+        for c in cites_edges:
+            self.assertFalse(
+                c.to_node_id.startswith("entity:"),
+                f"CITES must target source, not entity: {c.to_node_id}",
+            )
 
     def test_preserves_evidence_signal_ids(self) -> None:
         """The score node's metadata round-trips evidence_signal_ids."""
@@ -416,8 +453,10 @@ class GraphWriterSmokeTests(unittest.TestCase):
         self.assertEqual(out1.signal_node_ids, out2.signal_node_ids)
         self.assertEqual(out1.source_node_ids, out2.source_node_ids)
         # No node or edge growth on the second write
+        # 5 nodes (entity + score + 2 signals + 1 source) and
+        # 6 edges (2 GENERATED + 2 CONTRIBUTES_TO + 1 CITES + 1 REFERS_TO)
         self.assertEqual(self.store.node_count(), 5)
-        self.assertEqual(self.store.edge_count(), 5)
+        self.assertEqual(self.store.edge_count(), 6)
         # Second call's created_* counters are zero
         self.assertEqual(out2.created_node_count, 0)
         self.assertEqual(out2.created_edge_count, 0)
@@ -758,7 +797,13 @@ class GraphWriterCompatibilityTests(unittest.TestCase):
         os.unlink(self.path)
 
     def test_neighbors_traversal_round_trip(self) -> None:
-        """SQLiteGraphStore.get_neighbors works on writer output."""
+        """SQLiteGraphStore.get_neighbors works on writer output.
+
+        With the spec-aligned topology:
+          - GENERATED = Signal -> Source  (signal is the from-side)
+          - CITES     = Score   -> Source  (entity has NO incoming CITES)
+          - REFERS_TO = Score   -> Entity  (entity has incoming REFERS_TO)
+        """
         result = self.pipeline.run_macro(date_bucket=DATE)
         out = self.writer.write(result)
         # Score has incoming CONTRIBUTES_TO edges from each signal
@@ -771,21 +816,43 @@ class GraphWriterCompatibilityTests(unittest.TestCase):
             {n.node_id for n, _ in contributors},
             set(out.signal_node_ids),
         )
-        # Each signal has an incoming GENERATED edge from its source
+        # Each signal has an OUTGOING GENERATED edge to its source
+        # (per spec §2 row 4: GENERATED = Signal -> Source)
         first_sig = out.signal_node_ids[0]
         sig_neighbors = self.graph.get_neighbors(
-            first_sig, edge_types=[EdgeType.GENERATED], direction="in",
+            first_sig, edge_types=[EdgeType.GENERATED], direction="out",
         )
         self.assertEqual(len(sig_neighbors), 1)
-        # Entity has an incoming CITES edge from the score
+        # Source has an incoming CITES edge from the score
+        # (per spec §2 row 12: CITES = Score -> Source)
+        first_src = out.source_node_ids[0]
+        src_neighbors = self.graph.get_neighbors(
+            first_src, edge_types=[EdgeType.CITES], direction="in",
+        )
+        self.assertEqual(len(src_neighbors), 1)
+        score, _ = src_neighbors[0]
+        self.assertEqual(score.node_id, out.score_node_id)
+        # Entity has an incoming REFERS_TO edge from the score
+        # (preserved score->entity relationship, not CITES)
         entity_neighbors = self.graph.get_neighbors(
             out.entity_node_id,
-            edge_types=[EdgeType.CITES],
+            edge_types=[EdgeType.REFERS_TO],
             direction="in",
         )
         self.assertEqual(len(entity_neighbors), 1)
         score, _ = entity_neighbors[0]
         self.assertEqual(score.node_id, out.score_node_id)
+        # Regression guard: entity has NO incoming CITES edge
+        # (CITES = score -> source per spec, not score -> entity)
+        entity_cites = self.graph.get_neighbors(
+            out.entity_node_id,
+            edge_types=[EdgeType.CITES],
+            direction="in",
+        )
+        self.assertEqual(
+            len(entity_cites), 0,
+            "entity must not have incoming CITES edges (CITES = score->source)",
+        )
 
     def test_stats_match_writer_counts(self) -> None:
         """SQLiteGraphStore.stats reports the same totals the writer
@@ -822,6 +889,281 @@ class GraphWriterCompatibilityTests(unittest.TestCase):
         result = self.pipeline.run_macro(date_bucket=DATE)
         out = w2.write(result)
         self.assertTrue(out.score_node_id)
+
+
+# ---------------------------------------------------------------------------
+# Upstream chain connectivity — score -> signal -> source
+# ---------------------------------------------------------------------------
+
+
+class GraphWriterUpstreamChainTests(unittest.TestCase):
+    """Spec-aligned topology proof: score -> signal -> source is reachable.
+
+    Per docs/phase3/06_research_graph.md §5.1, the chain from a score to
+    its data sources is:
+
+        score
+          ├── signal   (CONTRIBUTES_TO, signal -> score)
+          └── source   (via signal: GENERATED, signal -> source)
+
+    The writer now emits this topology. This test class proves the chain
+    connectivity through the existing traversal primitives (BFS /
+    shortest_path) on both the in-memory and SQLite graph stores. The
+    *semantic* claim "upstream walk from score reaches source" still
+    requires a tracer with per-edge-type direction handling (Run 2
+    work); see ``test_evidence_tracer_bfs_in_reaches_signal_only`` below
+    for the explicit BFS-direction-in behavior we have today.
+    """
+
+    def setUp(self) -> None:
+        self.store = GraphStore()
+        self.writer = GraphWriter(self.store)
+        self.breakdown = _make_breakdown(
+            scorer_type="macro", entity_id="global",
+            factor_source="yfinance",
+        )
+        self.result = _make_pipeline_result(breakdown=self.breakdown)
+        self.out = self.writer.write(self.result)
+
+    # ---- direct edge structure -------------------------------------
+
+    def test_score_to_signal_edge_present(self) -> None:
+        """A score has an incoming CONTRIBUTES_TO edge from each signal
+        in its evidence list."""
+        score_in = self.store.get_neighbors(
+            self.out.score_node_id,
+            edge_types=[EdgeType.CONTRIBUTES_TO], direction="in",
+        )
+        self.assertEqual(
+            {n.node_id for n, _ in score_in},
+            set(self.out.signal_node_ids),
+        )
+
+    def test_signal_to_source_edge_present(self) -> None:
+        """Each signal has an outgoing GENERATED edge to its source
+        (per spec: GENERATED = Signal -> Source)."""
+        for sig_id in self.out.signal_node_ids:
+            sig_out = self.store.get_neighbors(
+                sig_id, edge_types=[EdgeType.GENERATED], direction="out",
+            )
+            self.assertEqual(
+                len(sig_out), 1,
+                f"signal {sig_id} must have exactly one outgoing GENERATED edge",
+            )
+            source, _ = sig_out[0]
+            self.assertIn(
+                source.node_id, self.out.source_node_ids,
+                f"GENERATED target {source.node_id} must be in source_node_ids",
+            )
+
+    def test_score_to_source_edge_present(self) -> None:
+        """The score has an outgoing CITES edge to the source
+        (per spec: CITES = Score -> Source)."""
+        score_out = self.store.get_neighbors(
+            self.out.score_node_id,
+            edge_types=[EdgeType.CITES], direction="out",
+        )
+        # All source_node_ids are unique CITES targets; one edge per
+        # source.
+        cites_targets = {n.node_id for n, _ in score_out}
+        self.assertEqual(cites_targets, set(self.out.source_node_ids))
+
+    # ---- chain reachability via traversal -------------------------
+
+    def test_shortest_path_score_to_source(self) -> None:
+        """shortest_path from score to source traverses the chain
+        score -> signal -> source (length 3) when restricted to the
+        evidence-chain edges (CONTRIBUTES_TO + GENERATED).
+
+        This proves the *data* is correct: there is a 2-hop path
+        score -> signal -> source through the edges the writer wrote.
+        We exclude CITES from the edge set because CITES is a direct
+        score->source shortcut, not part of the evidence chain.
+        """
+        from phase3.graph.traversal import shortest_path
+        # Use the in-memory store directly via the writer's store
+        target_source = self.out.source_node_ids[0]
+        path = shortest_path(
+            self.store, self.out.score_node_id, target_source,
+            edge_types=[EdgeType.CONTRIBUTES_TO, EdgeType.GENERATED],
+            direction="both",
+        )
+        assert path is not None, (
+            "shortest_path score->source returned None under "
+            "CONTRIBUTES_TO+GENERATED edge types"
+        )
+        # Path must be score -> signal -> source (3 nodes)
+        self.assertEqual(len(path), 3)
+        self.assertEqual(path[0], self.out.score_node_id)
+        self.assertEqual(path[-1], target_source)
+        self.assertIn(path[1], self.out.signal_node_ids)
+
+    def test_bfs_both_reaches_signal_and_source(self) -> None:
+        """A BFS from score with direction='both' reaches every signal
+        and every source in the writer's output envelope."""
+        from phase3.graph.traversal import bfs
+        reached = bfs(
+            self.store, self.out.score_node_id,
+            max_depth=10, direction="both",
+        )
+        reached_ids = {n.node_id for n in reached}
+        # Signals (incoming CONTRIBUTES_TO) and sources (incoming CITES
+        # from score OR via signals' outgoing GENERATED) must all be
+        # reachable.
+        for sig_id in self.out.signal_node_ids:
+            self.assertIn(sig_id, reached_ids)
+        for src_id in self.out.source_node_ids:
+            self.assertIn(
+                src_id, reached_ids,
+                f"source {src_id} must be reachable from score",
+            )
+
+    def test_bfs_in_reaches_signal_only(self) -> None:
+        """Document the BFS-in upstream limitation.
+
+        With the spec-aligned topology:
+          - CONTRIBUTES_TO = signal -> score  (signal is INCOMING to score)
+          - GENERATED     = signal -> source  (source is OUTGOING from signal)
+          - CITES         = score   -> source  (source is OUTGOING from score)
+
+        BFS direction='in' from score reaches signals (depth 1) but
+        NOT sources (no incoming CITES on sources because CITES is
+        OUTGOING from score). The source is reachable via direction='both'
+        (see test_bfs_both_reaches_signal_and_source) and via the
+        downstream traversal from source to score.
+
+        This test documents the limitation; Run 2 of Task 4 should add
+        per-edge-type direction handling to the EvidenceTracer so the
+        upstream walk is complete.
+        """
+        from phase3.graph.traversal import bfs
+        # BFS-in upstream from score: reaches signals (via CONTRIBUTES_TO)
+        reached_in = bfs(
+            self.store, self.out.score_node_id,
+            max_depth=10, direction="in",
+        )
+        reached_in_ids = {n.node_id for n in reached_in}
+        for sig_id in self.out.signal_node_ids:
+            self.assertIn(
+                sig_id, reached_in_ids,
+                "BFS-in from score must reach signals (CONTRIBUTES_TO incoming)",
+            )
+        # Sources are NOT reached by BFS-in alone (this is the gap)
+        for src_id in self.out.source_node_ids:
+            self.assertNotIn(
+                src_id, reached_in_ids,
+                "BFS-in alone cannot reach source under spec topology "
+                "(GENERATED is signal->source, CITES is score->source). "
+                "Per-edge-type direction handling is the Run 2 fix.",
+            )
+
+    def test_evidence_tracer_bfs_in_reaches_signal_only(self) -> None:
+        """Same BFS-in limitation observed through the public
+        EvidenceTracer API. The tracer's EVIDENCE_UPSTREAM_EDGE_TYPES
+        includes both CONTRIBUTES_TO and GENERATED, but the global
+        BFS-direction='in' only follows incoming edges uniformly; with
+        spec topology this yields signal-only reach.
+        """
+        from phase3.graph.evidence_tracer import EvidenceTracer
+        tracer = EvidenceTracer(self.store)
+        chain = tracer.trace(
+            self.out.score_node_id, max_depth=10, direction="upstream",
+        )
+        chain_ids = {n.node_id for n in chain.nodes}
+        for sig_id in self.out.signal_node_ids:
+            self.assertIn(
+                sig_id, chain_ids,
+                "EvidenceTracer upstream should reach signals",
+            )
+        # Sources are NOT reached by upstream (see test above)
+        for src_id in self.out.source_node_ids:
+            self.assertNotIn(
+                src_id, chain_ids,
+                "Documented gap: EvidenceTracer upstream with BFS-in does "
+                "not reach source under the spec topology. Run 2 fix: "
+                "per-edge-type direction handling in the tracer.",
+            )
+
+    def test_downstream_from_source_reaches_score(self) -> None:
+        """A BFS downstream from a source reaches the score that cited
+        it. This is the natural direction for the spec topology
+        (source has incoming CITES from score, and via signals the
+        source has incoming GENERATED from signals which have incoming
+        CONTRIBUTES_TO to score)."""
+        from phase3.graph.traversal import bfs
+        target_source = self.out.source_node_ids[0]
+        reached = bfs(
+            self.store, target_source, max_depth=10, direction="both",
+        )
+        reached_ids = {n.node_id for n in reached}
+        self.assertIn(
+            self.out.score_node_id, reached_ids,
+            "BFS-both from source should reach the score",
+        )
+
+    # ---- sqlite parity ---------------------------------------------
+
+    def test_score_to_source_shortcut_via_cites(self) -> None:
+        """shortest_path from score to source via CITES is a 1-hop edge.
+
+        CITES is a direct score->source attribution edge (per spec),
+        so the shortest path is the direct edge, not via signal. This
+        test documents that CITES provides the fast path for source
+        attribution, while the evidence chain (score -> signal ->
+        source) requires walking CONTRIBUTES_TO + GENERATED.
+        """
+        from phase3.graph.traversal import shortest_path
+        target_source = self.out.source_node_ids[0]
+        path = shortest_path(
+            self.store, self.out.score_node_id, target_source,
+            edge_types=[EdgeType.CITES], direction="out",
+        )
+        assert path is not None, "CITES shortcut path should exist"
+        self.assertEqual(len(path), 2)
+        self.assertEqual(path[0], self.out.score_node_id)
+        self.assertEqual(path[1], target_source)
+
+    def test_chain_topology_parity_in_memory_and_sqlite(self) -> None:
+        """The chain connectivity in the in-memory store matches the
+        SQLite store when driven by the same PipelineResult."""
+        # SQLite side
+        path, store2 = _new_sqlite_store()
+        try:
+            signal_repo = SignalRepository(store2)
+            score_repo = ScoreRepository(store2)
+            _seed_macro_signals(signal_repo)
+            pipeline = _build_pipeline(store2)
+            sqlite_graph = SQLiteGraphStore(
+                os.path.join(tempfile.gettempdir(), "graph_writer_chain.db"),
+            )
+            try:
+                result = pipeline.run_macro(date_bucket=DATE)
+                out_sql = GraphWriter(sqlite_graph).write(result)
+                # SQLite: source has incoming CITES
+                src_in = sqlite_graph.get_neighbors(
+                    out_sql.source_node_ids[0],
+                    edge_types=[EdgeType.CITES], direction="in",
+                )
+                self.assertEqual(
+                    len(src_in), 1,
+                    "SQLite: source should have exactly 1 incoming CITES",
+                )
+                # SQLite: signal has outgoing GENERATED
+                sig_out = sqlite_graph.get_neighbors(
+                    out_sql.signal_node_ids[0],
+                    edge_types=[EdgeType.GENERATED], direction="out",
+                )
+                self.assertEqual(
+                    len(sig_out), 1,
+                    "SQLite: signal should have exactly 1 outgoing GENERATED",
+                )
+            finally:
+                try:
+                    os.unlink(sqlite_graph.path)
+                except FileNotFoundError:
+                    pass
+        finally:
+            os.unlink(path)
 
 
 # ---------------------------------------------------------------------------

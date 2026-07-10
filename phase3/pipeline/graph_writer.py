@@ -24,14 +24,42 @@ Node id conventions (all content-derived so idempotency is trivial):
 * score      → ``score:{scorer_type}:{entity_id}:{date_bucket}``
 * entity     → ``entity:{entity_type}:{entity_id}``
 
-Edge topology:
+Edge topology (aligned with ``docs/phase3/06_research_graph.md`` §2):
 
-* ``source ──GENERATED──▶ signal``
-* ``signal ──CONTRIBUTES_TO──▶ score``  (only when the signal is in evidence)
-* ``score ──CITES──▶ entity``
-* ``score_a ──INFLUENCES──▶ score_b``  (cross-layer, only when
-  ``breakdown.cross_layer_adjustments`` describes a link between
-  the two scores)
+* ``signal ──GENERATED──▶ source``  (per spec §2 row 4: ``Signal → Source``)
+* ``signal ──CONTRIBUTES_TO──▶ score``  (unchanged: spec §2 row 7)
+* ``score ──CITES──▶ source``  (per spec §2 row 12: ``Score/Report → Source``)
+* ``score ──REFERS_TO──▶ entity``  (preserved score→entity relationship;
+  REFERS_TO is the closest existing enum meaning "X is about Y" — the
+  spec defines it for News→Entity, but the semantic stretches cleanly
+  to Score→Entity. See notes below.)
+* ``score_a ──INFLUENCES──▶ score_b``  (unchanged: spec §2 row 8)
+
+Why REFERS_TO for score→entity and not a new EdgeType
+-----------------------------------------------------
+The spec lists 12 EdgeTypes; none are "Score → Entity". The user-
+visible constraint for Run 1 is "preserve the score→entity relationship
+without misusing CITES" — REFERS_TO is the closest existing enum. If
+Phase 3B later adds a purpose-built ``SCORES`` or ``ABOUT`` enum, the
+writer can swap the EdgeType with no caller-side change (edge metadata
+records the relationship).
+
+Why CITES = score→source (not score→entity)
+-------------------------------------------
+The spec row 12 says ``CITES = Score/Report → Source``. A score cites
+the source(s) its evidence came from; it does not cite the entity it
+scores. The previous writer misused CITES for the score→entity link;
+this is corrected here.
+
+Upstream traversal note
+-----------------------
+With the spec topology, BFS-direction="in" upstream from a score
+(``phase3.graph.evidence_tracer``) reaches signals (via CONTRIBUTES_TO
+incoming on the score) but does not reach sources (GENERATED is
+outgoing from signals, CITES is outgoing from score). Run 2 of Task 4
+should add per-edge-type direction handling to the tracer so the
+score→signal→source chain is reachable in upstream mode. The data
+itself is correct; only the traversal semantic needs an update.
 
 The writer is read-only on the pipeline side and write-only on the
 graph side. Network is never touched.
@@ -282,15 +310,53 @@ class GraphWriter:
             )):
                 created_edges += 1
 
-        # ---- edge: score -> entity (CITES) ----------------------------
+        # ---- edge: score -> source (CITES) ----------------------------
+        # Per docs/phase3/06_research_graph.md §2 row 12:
+        # CITES = Score/Report -> Source. A score cites the source(s)
+        # its evidence came from. Emitted once per unique source_node_id
+        # so a score with N distinct sources yields N CITES edges (each
+        # edge has a distinct (from, to) and therefore a distinct
+        # canonical id).
+        cites_seen: set[str] = set()
+        for src_node_id in source_node_ids:
+            if src_node_id in cites_seen:
+                continue
+            cites_seen.add(src_node_id)
+            if self._store.add_edge(self._make_edge(
+                EdgeType.CITES,
+                from_node_id=score_node_id,
+                to_node_id=src_node_id,
+                metadata={
+                    "scorer_type": scorer_type,
+                    "entity_id": entity_id,
+                    "date_bucket": date_bucket,
+                },
+            )):
+                created_edges += 1
+
+        # ---- edge: score -> entity (REFERS_TO) ------------------------
+        # The spec lists 12 EdgeTypes but none are "Score -> Entity".
+        # REFERS_TO is the closest existing enum — the spec defines it
+        # for "News -> Company/Industry/MacroFactor/Person" (semantic:
+        # "X is about Y"). A score is *about* the entity it scores, so
+        # the semantic stretches cleanly. The edge metadata records the
+        # relationship explicitly so a future purpose-built EdgeType
+        # (e.g. SCORES) can replace this without caller-side changes.
         if self._store.add_edge(self._make_edge(
-            EdgeType.CITES,
+            EdgeType.REFERS_TO,
             from_node_id=score_node_id,
             to_node_id=entity_node_id,
             metadata={
                 "scorer_type": scorer_type,
+                "entity_type": entity_type,
                 "entity_id": entity_id,
                 "date_bucket": date_bucket,
+                "relation": "score_about_entity",
+                "notes": (
+                    "REFERS_TO used as fallback for Score->Entity; spec "
+                    "defines REFERS_TO as News->Entity but the semantic "
+                    "is the closest existing fit."
+                ),
             },
         )):
             created_edges += 1
@@ -402,10 +468,14 @@ class GraphWriter:
                     scorer_type=str(breakdown.scorer_type or "unknown"),
                 )):
                     counter["nodes"] += 1
+                # Per docs/phase3/06_research_graph.md §2 row 4:
+                # GENERATED = Signal -> Source. The signal was
+                # generated from the source; the source is downstream
+                # of the signal.
                 self._store.add_edge(self._make_edge(
                     EdgeType.GENERATED,
-                    from_node_id=src_node_id,
-                    to_node_id=sig_node_id,
+                    from_node_id=sig_node_id,
+                    to_node_id=src_node_id,
                     metadata={"source_type": src_type, "source_id": src_type},
                 ))
                 signal_node_ids.append(sig_node_id)
@@ -432,10 +502,13 @@ class GraphWriter:
                     scorer_type=str(breakdown.scorer_type or "unknown"),
                 )):
                     counter["nodes"] += 1
+                # Per docs/phase3/06_research_graph.md §2 row 4:
+                # GENERATED = Signal -> Source. Default-source branch
+                # follows the same direction.
                 self._store.add_edge(self._make_edge(
                     EdgeType.GENERATED,
-                    from_node_id=src_node_id,
-                    to_node_id=sig_node_id,
+                    from_node_id=sig_node_id,
+                    to_node_id=src_node_id,
                     metadata={"source_type": src_type, "source_id": src_id},
                 ))
                 signal_node_ids.append(sig_node_id)
