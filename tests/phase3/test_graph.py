@@ -363,6 +363,15 @@ class TestEvidenceTracer(unittest.TestCase):
         self.assertIn("sig:pe:2330", ids)
         # Score itself is NOT in nodes (BFS excludes start)
         self.assertNotIn("score:company:2330", ids)
+        # Run 2: with per-edge-type direction handling, the upstream
+        # walk from score also reaches the source via signal's outgoing
+        # GENERATED edge (spec-faithful topology).
+        self.assertIn("src:yfinance:2330", ids)
+        # Source is a leaf (no further upstream evidence)
+        self.assertIn("src:yfinance:2330", chain.leaf_node_ids)
+        # Typed buckets: source and signal are both populated
+        self.assertIn("sig:pe:2330", chain.signal_node_ids)
+        self.assertIn("src:yfinance:2330", chain.source_node_ids)
 
     def test_trace_upstream_with_specific_edge_types(self):
         s = self._build_score_chain()
@@ -377,17 +386,22 @@ class TestEvidenceTracer(unittest.TestCase):
         # Source shouldn't appear because the GENERATED edge type
         # was filtered out.
         self.assertNotIn("src:yfinance:2330", ids)
+    def test_trace_signal_finds_source_via_generated_out(self):
+        """Per spec, GENERATED = signal -> source. The source is the
+        upstream data origin, so tracing upstream from the signal
+        walks the edge *outgoing* to reach the source.
 
-    def test_trace_signal_finds_source_via_generated_in(self):
-        """BFS in-direction from a signal: a source that the signal
-        points to is NOT upstream; we need a chain like src -> signal
-        to make src upstream of signal."""
+        This documents the Run 2 direction-aware behavior. The
+        earlier "BFS in" tracer reached the source through an
+        in-direction walk on a mislabeled edge; the new tracer
+        follows the spec-faithful per-edge-type policy.
+        """
         s = GraphStore()
         s.add_node(_node("sig:pe:2330", NodeType.SIGNAL, "Signal"))
         s.add_node(_node("src:yfinance:2330", NodeType.SOURCE, "Source"))
-        # Direction matters: src -> sig (incoming to sig) means src is
-        # upstream of sig.
-        s.add_edge(_edge(EdgeType.GENERATED, "src:yfinance:2330", "sig:pe:2330"))
+        # Spec-faithful: GENERATED = signal -> source (the source
+        # is the to-side, which is the upstream data origin).
+        s.add_edge(_edge(EdgeType.GENERATED, "sig:pe:2330", "src:yfinance:2330"))
         tracer = EvidenceTracer(s)
         chain = tracer.trace("sig:pe:2330", max_depth=5, direction="upstream")
         ids = [n.node_id for n in chain.nodes]
@@ -403,7 +417,9 @@ class TestEvidenceTracer(unittest.TestCase):
 
     def test_trace_downstream(self):
         # Build a graph where one score derives from another, with the
-        # convention DERIVED_FROM: from = derived, to = ancestor.
+        # spec-faithful direction DERIVED_FROM: from = derived, to =
+        # ancestor. The downstream walk from "derived" reaches the
+        # ancestor via the to-side.
         s = GraphStore()
         s.add_node(_node("score:derived:2330", NodeType.SCORE, "Derived"))
         s.add_node(_node("score:company:2330", NodeType.SCORE, "Company Score"))
@@ -411,18 +427,22 @@ class TestEvidenceTracer(unittest.TestCase):
         # derived -> company (the derived score derives from the company score)
         s.add_edge(_edge(EdgeType.DERIVED_FROM, "score:derived:2330",
                          "score:company:2330"))
-        # company -> report (the company score is included in the report)
-        s.add_edge(_edge(EdgeType.INCLUDES, "score:company:2330",
-                         "report:2026-07-08"))
+        # report -> company (the report includes the company score)
+        s.add_edge(_edge(EdgeType.INCLUDES, "report:2026-07-08",
+                         "score:company:2330"))
         tracer = EvidenceTracer(s)
-        # From derived, downstream (out) → company. From company,
-        # downstream (out) → report.
+        # From derived, downstream → company. The DERIVED_FROM policy
+        # says the downstream side is "from" (the derived score), so
+        # we walk incoming at the derived node to reach the ancestor.
         chain_derived = tracer.trace(
             "score:derived:2330", max_depth=5, direction="downstream",
         )
         ids_d = [n.node_id for n in chain_derived.nodes]
         self.assertIn("score:company:2330", ids_d)
 
+        # From company, downstream → report. The INCLUDES policy
+        # says the downstream side is "to" (the included score), so
+        # the report is on the from-side — walk incoming at company.
         chain_company = tracer.trace(
             "score:company:2330", max_depth=5, direction="downstream",
         )

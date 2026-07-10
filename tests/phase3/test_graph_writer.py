@@ -909,10 +909,9 @@ class GraphWriterUpstreamChainTests(unittest.TestCase):
     The writer now emits this topology. This test class proves the chain
     connectivity through the existing traversal primitives (BFS /
     shortest_path) on both the in-memory and SQLite graph stores. The
-    *semantic* claim "upstream walk from score reaches source" still
-    requires a tracer with per-edge-type direction handling (Run 2
-    work); see ``test_evidence_tracer_bfs_in_reaches_signal_only`` below
-    for the explicit BFS-direction-in behavior we have today.
+    The *semantic* claim "upstream walk from score reaches source" is
+    now satisfied via the Run 2 direction-aware EvidenceTracer; see
+    ``test_evidence_tracer_reaches_signal_and_source`` below.
     """
 
     def setUp(self) -> None:
@@ -1057,12 +1056,15 @@ class GraphWriterUpstreamChainTests(unittest.TestCase):
                 "Per-edge-type direction handling is the Run 2 fix.",
             )
 
-    def test_evidence_tracer_bfs_in_reaches_signal_only(self) -> None:
-        """Same BFS-in limitation observed through the public
-        EvidenceTracer API. The tracer's EVIDENCE_UPSTREAM_EDGE_TYPES
-        includes both CONTRIBUTES_TO and GENERATED, but the global
-        BFS-direction='in' only follows incoming edges uniformly; with
-        spec topology this yields signal-only reach.
+    def test_evidence_tracer_reaches_signal_and_source(self) -> None:
+        """Run 2: with per-edge-type direction handling, the
+        EvidenceTracer's upstream walk from the score reaches both
+        signals (via incoming CONTRIBUTES_TO) and sources (via
+        outgoing GENERATED from signals, and outgoing CITES from
+        score).
+
+        The earlier "BFS in" tracer only reached signals; the new
+        tracer follows the spec-faithful per-edge-type policy.
         """
         from phase3.graph.evidence_tracer import EvidenceTracer
         tracer = EvidenceTracer(self.store)
@@ -1073,16 +1075,26 @@ class GraphWriterUpstreamChainTests(unittest.TestCase):
         for sig_id in self.out.signal_node_ids:
             self.assertIn(
                 sig_id, chain_ids,
-                "EvidenceTracer upstream should reach signals",
+                "EvidenceTracer upstream should reach signals "
+                "(incoming CONTRIBUTES_TO)",
             )
-        # Sources are NOT reached by upstream (see test above)
+        # Run 2 fix: sources are now reachable via per-edge-type
+        # direction handling (outgoing GENERATED from signals +
+        # outgoing CITES from score).
         for src_id in self.out.source_node_ids:
-            self.assertNotIn(
+            self.assertIn(
                 src_id, chain_ids,
-                "Documented gap: EvidenceTracer upstream with BFS-in does "
-                "not reach source under the spec topology. Run 2 fix: "
-                "per-edge-type direction handling in the tracer.",
+                f"Run 2: EvidenceTracer upstream should reach source "
+                f"{src_id} via per-edge-type direction handling "
+                f"(GENERATED from signal + CITES from score).",
             )
+        # Typed buckets reflect the new behavior.
+        self.assertEqual(
+            set(chain.signal_node_ids), set(self.out.signal_node_ids),
+        )
+        self.assertEqual(
+            set(chain.source_node_ids), set(self.out.source_node_ids),
+        )
 
     def test_downstream_from_source_reaches_score(self) -> None:
         """A BFS downstream from a source reaches the score that cited

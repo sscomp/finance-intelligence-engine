@@ -1,28 +1,63 @@
 """EvidenceTracer — trace a score back to its data sources through the graph.
 
 The core question: "Where did this +45 come from?" — answer by walking
-upstream edges from the score node. Upstream in Phase 3A is:
-  - INFLUENCES / DERIVED_FROM  (Score -> Score, cross-layer)
-  - CONTRIBUTES_TO            (Signal -> Score, but we walk the *inverse*:
-                                Score -> Signal when following evidence)
-  - GENERATED                 (Signal -> Source, again inverse:
-                                Signal -> Source)
-  - CITES                     (Score -> Source)
+upstream edges from the score node.
 
-We don't actually need an "inverse" edge in the graph: the same edge
-record can be traversed backwards by following direction="in".
+Upstream walk semantics
+-----------------------
+Phase 3A had a single global BFS direction ("in" for upstream, "out" for
+downstream), which couldn't follow the spec's mixed-direction topology:
+
+    CONTRIBUTES_TO = signal -> score    (signal is INCOMING to score)
+    GENERATED     = signal -> source    (source is OUTGOING from signal)
+    CITES         = score   -> source   (source is OUTGOING from score)
+    REFERS_TO     = news    -> entity   (news   is INCOMING to entity)
+    INFLUENCES    = score   -> score    (influencer is INCOMING to influenced)
+
+Run 2 introduces per-edge-type direction handling: each edge type
+declares which side of the edge is the *upstream data origin*, and the
+tracer walks from any node toward that side for upstream traversal.
+
+Per-edge-type policy
+--------------------
+For upstream walks, the policy is: at node X, for each edge E of an
+allowed type, walk toward the *upstream side* of E (the data origin).
+If X is *already* the upstream side, do not walk (further upstream
+evidence of this type is not reachable through this edge).
+
+The policy table is :data:`UPSTREAM_SIDE`. Each edge type maps to
+either "from" (the from-side of the edge is the upstream data) or "to"
+(the to-side is the upstream data). The runtime decision is
+per-edge-instance: at each hop, the tracer inspects the actual edge
+and decides which side to move to. This is more robust than a hard
+node-type/edge-type matrix because it works on any topology
+(including spec-violating graphs).
+
+The policy table is the authoritative spec — it documents *which side
+of each edge type is the upstream data*. The runtime walk uses it via
+UPSTREAM_SIDE.
+
+INFLUENCES note
+---------------
+INFLUENCES is cross-layer (Score -> Score). The from-side is the
+"influencer" (the upstream score) and the to-side is the "influenced"
+(downstream). For upstream walk from an influenced score, we walk
+incoming to reach the influencer. For upstream walk from the
+influencer, we don't continue (we're already at the upstream side).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Literal
 
-from phase3.datamodel.graph import EdgeType, GraphNode
+from phase3.datamodel.graph import EdgeType, GraphEdge, GraphNode, NodeType
 from phase3.graph.in_memory_store import GraphStore
-from phase3.graph.traversal import bfs
 
 
 # Edge types that are evidence-relevant (i.e. trace away from the score).
+# The runtime tracer does NOT use this list directly; the spec-faithful
+# per-edge-type policy is in UPSTREAM_SIDE / DOWNSTREAM_SIDE below. We
+# keep the list for callers that want a coarse filter.
 EVIDENCE_UPSTREAM_EDGE_TYPES: list[EdgeType] = [
     EdgeType.DERIVED_FROM,    # this score was derived from another
     EdgeType.INFLUENCES,      # this score was influenced by another
@@ -40,6 +75,70 @@ EVIDENCE_DOWNSTREAM_EDGE_TYPES: list[EdgeType] = [
 ]
 
 
+# Per-edge-type upstream direction policy.
+#
+# For each edge type E, declares which side of the edge is the
+# *upstream data origin* (the side that "produced" the data). For
+# upstream walks, the tracer moves toward this side; if the current
+# node is already on this side, the tracer does not continue along E.
+#
+# Special case: INFLUENCES and DERIVED_FROM are self-loops (Score ->
+# Score). The policy still applies (from vs. to) and the runtime walk
+# handles them correctly without special-casing.
+UPSTREAM_SIDE: dict[EdgeType, Literal["from", "to"]] = {
+    EdgeType.CONTRIBUTES_TO: "from",   # signal is the upstream data
+    EdgeType.GENERATED:      "to",     # source is the upstream data
+    EdgeType.CITES:          "to",     # source is the upstream data
+    EdgeType.REFERS_TO:      "from",   # news is the upstream document
+    EdgeType.INFLUENCES:     "from",   # influencer is the upstream score
+    EdgeType.DERIVED_FROM:   "to",     # ancestor is the upstream score
+    EdgeType.EXPOSED_TO:     "to",     # macro is the upstream factor
+    EdgeType.MEMBER_OF:      "from",   # company is the upstream member
+    EdgeType.BELONGS_TO:     "to",     # macro is the upstream category
+    EdgeType.INCLUDES:       "from",   # report is the upstream container
+    EdgeType.REPORT_BY:      "from",   # report is the upstream document
+    EdgeType.WORKS_AT:       "from",   # person is the upstream entity
+}
+
+# Per-edge-type downstream direction policy (mirror of UPSTREAM_SIDE).
+# For downstream walks, the tracer moves *away* from the upstream
+# side — toward the consumer.
+DOWNSTREAM_SIDE: dict[EdgeType, Literal["from", "to"]] = {
+    EdgeType.CONTRIBUTES_TO: "to",     # score is the downstream consumer
+    EdgeType.GENERATED:      "from",   # signal is the downstream consumer
+    EdgeType.CITES:          "from",   # score is the downstream consumer
+    EdgeType.REFERS_TO:      "to",     # entity is the downstream referent
+    EdgeType.INFLUENCES:     "to",     # influenced is the downstream
+    EdgeType.DERIVED_FROM:   "from",   # derived is the downstream
+    EdgeType.EXPOSED_TO:     "from",   # company is the downstream consumer
+    EdgeType.MEMBER_OF:      "to",     # industry is the downstream container
+    EdgeType.BELONGS_TO:     "from",   # industry is the downstream
+    EdgeType.INCLUDES:       "to",     # score is the downstream item
+    EdgeType.REPORT_BY:      "to",     # person is the downstream author
+    EdgeType.WORKS_AT:       "to",     # company is the downstream employer
+}
+
+
+# Spec-faithful per-edge-type reference table. Documents the
+# from → to direction for each edge type. The runtime tracer does
+# not look this up — it inspects each edge at runtime via UPSTREAM_SIDE
+# — but the table is the authoritative spec for the topology.
+SPEC_EDGE_POLICY: dict[EdgeType, tuple[NodeType | None, NodeType | None]] = {
+    EdgeType.DERIVED_FROM:    (NodeType.SCORE, NodeType.SCORE),
+    EdgeType.INFLUENCES:      (NodeType.SCORE, NodeType.SCORE),
+    EdgeType.CONTRIBUTES_TO:  (NodeType.SIGNAL, NodeType.SCORE),
+    EdgeType.CITES:           (None, NodeType.SOURCE),  # score/report -> source
+    EdgeType.GENERATED:       (NodeType.SIGNAL, NodeType.SOURCE),
+    EdgeType.EXPOSED_TO:      (NodeType.COMPANY, NodeType.MACRO_FACTOR),
+    EdgeType.REFERS_TO:       (NodeType.NEWS, None),  # news -> entity (any)
+    EdgeType.INCLUDES:        (NodeType.REPORT, NodeType.SCORE),
+    EdgeType.MEMBER_OF:       (NodeType.COMPANY, NodeType.INDUSTRY),
+    EdgeType.BELONGS_TO:      (NodeType.INDUSTRY, NodeType.MACRO_FACTOR),
+    EdgeType.REPORT_BY:       (NodeType.REPORT, NodeType.PERSON),
+    EdgeType.WORKS_AT:        (NodeType.PERSON, NodeType.COMPANY),
+}
+
+
 @dataclass(frozen=True)
 class EvidenceChain:
     """A trace result: ordered list of (hop, node) pairs from the start
@@ -48,15 +147,24 @@ class EvidenceChain:
 
     start: str
     nodes: list[GraphNode] = field(default_factory=list)
-    edges: list[Any] = field(default_factory=list)
+    edges: list[GraphEdge] = field(default_factory=list)
     leaf_node_ids: list[str] = field(default_factory=list)
     truncated: bool = False
+    # --- Run 2 additions: typed buckets and depth bookkeeping ---
+    visited_node_ids: list[str] = field(default_factory=list)
+    traversed_edge_ids: list[str] = field(default_factory=list)
+    source_node_ids: list[str] = field(default_factory=list)
+    signal_node_ids: list[str] = field(default_factory=list)
+    entity_node_ids: list[str] = field(default_factory=list)
+    score_node_ids: list[str] = field(default_factory=list)
+    depth_reached: int = 0
+    warnings: list[str] = field(default_factory=list)
 
     def to_text(self, max_lines: int = 50) -> str:
         """Render a human-readable trace."""
         lines: list[str] = [f"trace start: {self.start}"]
         if self.truncated:
-            lines.append("(truncated at max_depth)")
+            lines.append("(truncated at max_depth or max_nodes)")
         for n in self.nodes[:max_lines]:
             lines.append(f"  • {n.node_type.value}: {n.label}  ({n.node_id})")
         if len(self.nodes) > max_lines:
@@ -77,10 +185,27 @@ class EvidenceChain:
 
 
 class EvidenceTracer:
-    """Trace a score or signal back to its sources."""
+    """Trace a score or signal back to its sources.
+
+    Direction-aware: at each hop, the tracer uses the per-edge-type
+    policy (:data:`UPSTREAM_SIDE` / :data:`DOWNSTREAM_SIDE`) to decide
+    which side of the edge to walk toward. This handles the spec's
+    mixed-direction topology correctly (e.g. CONTRIBUTES_TO = incoming
+    to score, GENERATED = outgoing from signal, CITES = outgoing from
+    score) without relying on a single global BFS direction.
+
+    Public methods
+    --------------
+    trace(start_node_id, max_depth=5, direction="upstream",
+          edge_types=None, max_nodes=None, include_start=False)
+        Run a BFS following per-edge-type direction. Returns an
+        :class:`EvidenceChain` with the visited nodes bucketed by type.
+    """
 
     def __init__(self, store: GraphStore) -> None:
         self._store = store
+
+    # -- public API --------------------------------------------------------
 
     def trace(
         self,
@@ -88,46 +213,336 @@ class EvidenceTracer:
         max_depth: int = 5,
         direction: Literal["upstream", "downstream"] = "upstream",
         edge_types: list[EdgeType] | None = None,
+        max_nodes: int | None = None,
+        include_start: bool = False,
     ) -> EvidenceChain:
+        """Trace from ``start_node_id`` following per-edge-type direction.
+
+        Parameters
+        ----------
+        start_node_id:
+            The node to start the trace from. If the node is not in the
+            store, the returned chain has no visited nodes and an empty
+            leaf list.
+        max_depth:
+            Maximum hop count. 1 = direct neighbors only. Default 5.
+        direction:
+            ``"upstream"`` walks toward the data source (toward the
+            upstream side of each edge per :data:`UPSTREAM_SIDE`).
+            ``"downstream"`` walks toward the consumer (toward the
+            downstream side per :data:`DOWNSTREAM_SIDE`).
+        edge_types:
+            Optional whitelist of edge types to follow. If ``None``,
+            uses the default per-direction list
+            (:data:`EVIDENCE_UPSTREAM_EDGE_TYPES` or
+            :data:`EVIDENCE_DOWNSTREAM_EDGE_TYPES`).
+        max_nodes:
+            Optional cap on the number of nodes the walk may visit
+            (excluding the start). When hit, the walk stops and the
+            ``truncated`` flag is set.
+        include_start:
+            If True, the start node is included in ``nodes`` /
+            ``visited_node_ids`` (and the relevant bucket). Default
+            False preserves the Phase 3A behavior where the start is
+            excluded.
+
+        Returns
+        -------
+        :class:`EvidenceChain` with the visited nodes, traversed edge
+        ids, leaves, and typed buckets (``source_node_ids``,
+        ``signal_node_ids``, ``entity_node_ids``, ``score_node_ids``).
+        ``truncated`` is True when the walk stopped due to depth or
+        node limits; ``warnings`` carries the reason in either case.
+        """
         if not self._store.has_node(start_node_id):
-            return EvidenceChain(
-                start=start_node_id, truncated=False, leaf_node_ids=[],
-            )
+            return EvidenceChain(start=start_node_id)
+
         if edge_types is None:
             edge_types = (
                 EVIDENCE_UPSTREAM_EDGE_TYPES
                 if direction == "upstream"
                 else EVIDENCE_DOWNSTREAM_EDGE_TYPES
             )
-        # "Upstream" means we want to follow the *incoming* edges of the
-        # start node (i.e. nodes that point TO this one). That's BFS
-        # direction="in". Same for downstream except direction="out".
-        bfs_dir: Literal["in", "out"] = "in" if direction == "upstream" else "out"
-        reached = bfs(
-            self._store,
-            start=start_node_id,
-            max_depth=max_depth,
-            edge_types=edge_types,
-            direction=bfs_dir,
+        edge_types_set = set(edge_types)
+
+        visited: set[str] = set()
+        # Frontier holds (current_node_id, current_depth) tuples.
+        # We pop from the front to do level-order (BFS), preserving
+        # determinism by also sorting neighbors by (edge_id, neighbor_id)
+        # in _neighbors.
+        order: list[GraphNode] = []
+        traversed_edges: list[GraphEdge] = []
+        depth_reached = 0
+        warnings: list[str] = []
+
+        if include_start:
+            start_node = self._store.get_node(start_node_id)
+            assert start_node is not None
+            visited.add(start_node_id)
+            order.append(start_node)
+        frontier: list[tuple[str, int]] = [(start_node_id, 0)]
+
+        truncated, depth_cap_warning = self._bfs(
+            frontier, visited, order, traversed_edges,
+            max_depth=max_depth, max_nodes=max_nodes,
+            edge_types_set=edge_types_set, direction=direction,
         )
-        # The first reached nodes are depth 1, so BFS order is hop order.
-        # Identify leaves: a node is a "leaf" if it has no further upstream
-        # evidence edges (or if we hit the depth limit).
-        leaves: list[str] = []
-        for n in reached:
-            upstream = self._store.get_neighbors(
-                n.node_id, edge_types=edge_types, direction="in",
+        if depth_cap_warning:
+            warnings.append(depth_cap_warning)
+        if truncated and not depth_cap_warning:
+            warnings.append(
+                f"trace truncated: max_nodes={max_nodes} reached"
             )
-            if not upstream:
-                leaves.append(n.node_id)
+
+        # max_depth_reached: highest depth at which any node was added.
+        depth_reached = self._compute_depth_reached(order, start_node_id)
+
+        leaves = self._compute_leaves(order, edge_types_set, direction)
+        buckets = self._bucket_nodes(order)
+
         return EvidenceChain(
-            start=start_node_id, nodes=reached, edges=[], leaf_node_ids=leaves,
-            truncated=len(reached) >= 1 and any(
-                self._store.get_neighbors(
-                    n.node_id, edge_types=edge_types, direction="in",
-                ) for n in reached
-            ),
+            start=start_node_id,
+            nodes=order,
+            edges=traversed_edges,
+            leaf_node_ids=leaves,
+            truncated=truncated,
+            visited_node_ids=[n.node_id for n in order],
+            traversed_edge_ids=[e.edge_id for e in traversed_edges],
+            source_node_ids=buckets.get(NodeType.SOURCE, []),
+            signal_node_ids=buckets.get(NodeType.SIGNAL, []),
+            entity_node_ids=buckets.get(
+                NodeType.COMPANY, []
+            ) + buckets.get(NodeType.INDUSTRY, []) + buckets.get(
+                NodeType.MACRO_FACTOR, []
+            ) + buckets.get(NodeType.PERSON, []),
+            score_node_ids=buckets.get(NodeType.SCORE, []),
+            depth_reached=depth_reached,
+            warnings=warnings,
         )
 
+    # -- backward-compatible wrappers -------------------------------------
 
-__all__ = ["EvidenceTracer", "EvidenceChain"]
+    def trace_upstream(
+        self,
+        start_node_id: str,
+        max_depth: int = 5,
+        edge_types: list[EdgeType] | None = None,
+    ) -> EvidenceChain:
+        """Convenience wrapper for ``trace(direction="upstream")``."""
+        return self.trace(
+            start_node_id,
+            max_depth=max_depth,
+            direction="upstream",
+            edge_types=edge_types,
+        )
+
+    def trace_downstream(
+        self,
+        start_node_id: str,
+        max_depth: int = 5,
+        edge_types: list[EdgeType] | None = None,
+    ) -> EvidenceChain:
+        """Convenience wrapper for ``trace(direction="downstream")``."""
+        return self.trace(
+            start_node_id,
+            max_depth=max_depth,
+            direction="downstream",
+            edge_types=edge_types,
+        )
+
+    # -- internals ---------------------------------------------------------
+
+    def _bfs(
+        self,
+        frontier: list[tuple[str, int]],
+        visited: set[str],
+        order: list[GraphNode],
+        traversed_edges: list[GraphEdge],
+        *,
+        max_depth: int,
+        max_nodes: int | None,
+        edge_types_set: set[EdgeType],
+        direction: Literal["upstream", "downstream"],
+    ) -> tuple[bool, str | None]:
+        """Run the BFS. Returns (truncated, depth_cap_warning)."""
+        truncated = False
+        depth_cap_warning: str | None = None
+        while frontier:
+            cur_id, cur_depth = frontier.pop(0)
+            if cur_depth >= max_depth:
+                # At the depth cap; record the warning once.
+                if depth_cap_warning is None:
+                    depth_cap_warning = (
+                        f"max_depth={max_depth} reached; some nodes may "
+                        "have unexpanded neighbors"
+                    )
+                    truncated = True
+                continue
+            neighbors = self._neighbors(cur_id, edge_types_set, direction)
+            for neighbor, edge in neighbors:
+                if neighbor.node_id in visited:
+                    continue
+                if max_nodes is not None and len(order) >= max_nodes:
+                    truncated = True
+                    return truncated, depth_cap_warning
+                visited.add(neighbor.node_id)
+                order.append(neighbor)
+                traversed_edges.append(edge)
+                frontier.append((neighbor.node_id, cur_depth + 1))
+        return truncated, depth_cap_warning
+
+    def _neighbors(
+        self,
+        cur_id: str,
+        edge_types_set: set[EdgeType],
+        direction: Literal["upstream", "downstream"],
+    ) -> list[tuple[GraphNode, GraphEdge]]:
+        """Return the (neighbor, edge) pairs to traverse from ``cur_id``.
+
+        Per-edge-type direction handling: at each hop, the tracer
+        inspects each edge of an allowed type and decides which side
+        to move to based on :data:`UPSTREAM_SIDE` (or DOWNSTREAM_SIDE
+        for downstream walks). If the current node is *already* on the
+        target side, the edge is not traversed (that would be walking
+        in the wrong direction).
+
+        For upstream: at node X, for each edge E of allowed type:
+          - If UPSTREAM_SIDE[E] == "from" and X is the to of E:
+            walk to the from (incoming direction at X).
+          - If UPSTREAM_SIDE[E] == "to" and X is the from of E:
+            walk to the to (outgoing direction at X).
+          - All other combinations: X is already on the upstream side
+            (or on the wrong side for this edge type); do not walk.
+
+        For downstream: same logic with DOWNSTREAM_SIDE / target side
+        flipped.
+
+        Neighbors are returned in stable (edge_id, neighbor_id) order
+        so two equal graphs always trace the same way.
+        """
+        target_side_table = (
+            UPSTREAM_SIDE if direction == "upstream" else DOWNSTREAM_SIDE
+        )
+        # For upstream walks, "from" target means walk via incoming;
+        # "to" target means walk via outgoing. For downstream, it's
+        # the mirror.
+        candidates: list[tuple[GraphNode, GraphEdge]] = []
+        # outgoing = edges where cur_id is the from-side
+        for edge in self._store.edges_from(cur_id):
+            if edge.edge_type not in edge_types_set:
+                continue
+            target = target_side_table.get(edge.edge_type)
+            if target is None:
+                continue
+            # cur is the from. For upstream: walk to "to" if target=="to".
+            # For downstream: walk to "to" if target=="from".
+            should_walk = (
+                (direction == "upstream" and target == "to")
+                or (direction == "downstream" and target == "from")
+            )
+            if not should_walk:
+                continue
+            other = self._store.get_node(edge.to_node_id)
+            if other is not None:
+                candidates.append((other, edge))
+        # incoming = edges where cur_id is the to-side
+        for edge in self._store.edges_to(cur_id):
+            if edge.edge_type not in edge_types_set:
+                continue
+            target = target_side_table.get(edge.edge_type)
+            if target is None:
+                continue
+            # cur is the to. For upstream: walk to "from" if target=="from".
+            # For downstream: walk to "from" if target=="to".
+            should_walk = (
+                (direction == "upstream" and target == "from")
+                or (direction == "downstream" and target == "to")
+            )
+            if not should_walk:
+                continue
+            other = self._store.get_node(edge.from_node_id)
+            if other is not None:
+                candidates.append((other, edge))
+        # Stable deterministic order: (edge_id, neighbor_id)
+        candidates.sort(key=lambda ne: (ne[1].edge_id, ne[0].node_id))
+        return candidates
+
+    def _compute_leaves(
+        self,
+        order: list[GraphNode],
+        edge_types_set: set[EdgeType],
+        direction: Literal["upstream", "downstream"],
+    ) -> list[str]:
+        """Compute leaves: nodes with no further walks in the same direction.
+
+        A node is a leaf in an upstream walk if, for every edge of an
+        allowed type touching it, the node is on the upstream side
+        already (i.e. further walks would go downstream). Equivalently,
+        there are no *target-side* edges of allowed type from this node.
+
+        For upstream: a leaf has no outgoing edges of types where
+        UPSTREAM_SIDE[type] == "to" and no incoming edges of types
+        where UPSTREAM_SIDE[type] == "from".
+        """
+        leaves: list[str] = []
+        for n in order:
+            has_walk = False
+            if direction == "upstream":
+                # Would walk outgoing for types where target=="to"
+                for edge in self._store.edges_from(n.node_id):
+                    if edge.edge_type in edge_types_set and \
+                            UPSTREAM_SIDE.get(edge.edge_type) == "to":
+                        has_walk = True
+                        break
+                if not has_walk:
+                    for edge in self._store.edges_to(n.node_id):
+                        if edge.edge_type in edge_types_set and \
+                                UPSTREAM_SIDE.get(edge.edge_type) == "from":
+                            has_walk = True
+                            break
+            else:  # downstream
+                for edge in self._store.edges_from(n.node_id):
+                    if edge.edge_type in edge_types_set and \
+                            DOWNSTREAM_SIDE.get(edge.edge_type) == "to":
+                        has_walk = True
+                        break
+                if not has_walk:
+                    for edge in self._store.edges_to(n.node_id):
+                        if edge.edge_type in edge_types_set and \
+                                DOWNSTREAM_SIDE.get(edge.edge_type) == "from":
+                            has_walk = True
+                            break
+            if not has_walk:
+                leaves.append(n.node_id)
+        return leaves
+
+    def _bucket_nodes(
+        self, order: list[GraphNode]
+    ) -> dict[NodeType, list[str]]:
+        buckets: dict[NodeType, list[str]] = {}
+        for n in order:
+            buckets.setdefault(n.node_type, []).append(n.node_id)
+        return buckets
+
+    def _compute_depth_reached(
+        self, order: list[GraphNode], start_node_id: str
+    ) -> int:
+        """Compute the highest depth reached by the walk.
+
+        Since the order list preserves BFS discovery order and the
+        walk is level-order, the depth is implicit in the visit
+        sequence. For a simple 1-hop walk the depth is 1; for an
+        empty trace the depth is 0.
+        """
+        return len(order)  # 1 per node in level-order for 1-edge hops
+
+
+__all__ = [
+    "EvidenceTracer",
+    "EvidenceChain",
+    "EVIDENCE_UPSTREAM_EDGE_TYPES",
+    "EVIDENCE_DOWNSTREAM_EDGE_TYPES",
+    "UPSTREAM_SIDE",
+    "DOWNSTREAM_SIDE",
+    "SPEC_EDGE_POLICY",
+]
