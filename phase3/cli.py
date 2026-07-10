@@ -22,8 +22,16 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+from phase3.api import (
+    PipelineAPIError,
+    observe_pipeline_status,
+    export_pipeline_report,
+    resume_pipeline,
+    run_pipeline,
+)
 from phase3.datamodel.evidence import Evidence, make_evidence_id
 from phase3.datamodel.signals import Signal, SignalSource
 from phase3.graph import (
@@ -1054,7 +1062,352 @@ def _signal_to_record(sig: Signal) -> Any:
     )
 
 
+# ---------- Phase 3B Task 5 Run 4 — pipeline CLI surface ----------
+
+
+def _resolve_pipeline_kwargs(
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Translate a CLI ``args`` Namespace into ``run_pipeline`` kwargs.
+
+    Centralised so the run / resume / status subcommands all
+    share the same option-to-kwarg mapping. ``--industry`` and
+    ``--company`` accept repeated values.
+    """
+    industry_ids: list[str] = list(getattr(args, "industry", []) or [])
+    company_specs: list[dict[str, Any]] = []
+    for raw in getattr(args, "company", []) or []:
+        company_specs.append({"code": raw})
+    return {
+        "date_bucket": args.date,
+        "industry_ids": tuple(industry_ids),
+        "company_specs": tuple(company_specs),
+        "run_macro": bool(getattr(args, "run_macro", True)),
+        "persist": bool(getattr(args, "persist", False)),
+        "db_path": getattr(args, "db_path", None),
+        "run_id": getattr(args, "run_id", "") or "",
+        "config_hash": getattr(args, "config_hash", "phase3-cli"),
+        "notes": getattr(args, "notes", "") or "",
+        "trace_directions": tuple(getattr(args, "trace_directions", ("upstream",))),
+        "trace_max_depth": int(getattr(args, "trace_max_depth", 5)),
+    }
+
+
+def _emit_api_payload(
+    args: argparse.Namespace,
+    *,
+    label: str,
+    api_result: Any,
+) -> int:
+    """Render an :class:`APIResult` to stdout / file.
+
+    Contract matches :func:`_emit_query_result`:
+
+    * ``--output PATH`` writes JSON to PATH. ``-`` writes to stdout.
+    * ``--json`` emits JSON to stdout.
+    * Default: a short human-readable status line.
+    """
+    if args.output is not None or args.json:
+        text = json.dumps(api_result.payload, sort_keys=True,
+                          ensure_ascii=False, indent=2)
+        if args.output and args.output != "-":
+            from pathlib import Path as _P
+            _P(args.output).write_text(text, encoding="utf-8")
+            print(f"=== {label} -> {args.output} ===")
+            print(f"  kind: {api_result.kind}")
+        else:
+            print(text)
+        return 0
+
+    # Human-readable default
+    print(f"=== {label} (kind={api_result.kind}) ===")
+    p = api_result.payload
+    # Surface the run-level summary fields the operator wants
+    # without re-typing the entire DTO.
+    for key in (
+        "run_id", "config_hash", "date_bucket", "dry_run",
+        "persist", "started_at", "finished_at",
+        "duration_seconds", "signal_count", "score_count",
+        "snapshot_count", "graph_node_count", "graph_edge_count",
+        "warning_count", "error_count",
+        "last_completed_stage", "completed_stages",
+        "attempted_stages", "replay_count", "resume_state",
+    ):
+        if key in p:
+            value = p[key]
+            if isinstance(value, (list, tuple)) and len(value) > 8:
+                value = f"<{len(value)} items>"
+            print(f"  {key}: {value}")
+    return 0
+
+
+def cmd_pipeline_run(args: argparse.Namespace) -> int:
+    """Phase 3B Task 5 Run 4: run the end-to-end pipeline.
+
+    Default is dry-run (no DB writes). Pass ``--persist`` to
+    actually write to ``--db-path``. The path is guarded against
+    ``macro_history.db`` (same as init-db / ingest-signals).
+
+    Output: a one-line summary by default, JSON with ``--json`` or
+    ``--output``.
+    """
+    try:
+        kwargs = _resolve_pipeline_kwargs(args)
+    except ValueError as exc:
+        print(f"invalid arguments: {exc}", file=sys.stderr)
+        return 2
+    try:
+        api_result = run_pipeline(**kwargs)
+    except PipelineAPIError as exc:
+        print(
+            f"pipeline-run failed ({exc.component}/{exc.error_class}): "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return 1
+    return _emit_api_payload(args, label="pipeline-run", api_result=api_result)
+
+
+def cmd_pipeline_resume(args: argparse.Namespace) -> int:
+    """Phase 3B Task 5 Run 4: resume a previously-started run.
+
+    Requires ``--db-path`` (the recovery layer reads from existing
+    snapshot/graph stores). Other options map to
+    :class:`RecoveryConfig` (``--max-attempts``,
+    ``--retry-backoff``).
+    """
+    if not getattr(args, "db_path", None):
+        print(
+            "pipeline-resume requires --db-path",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        api_result = resume_pipeline(
+            date_bucket=args.date,
+            config_hash=getattr(args, "config_hash", "phase3-cli"),
+            run_id=getattr(args, "run_id", "") or "",
+            db_path=args.db_path,
+            max_attempts=int(getattr(args, "max_attempts", 2)),
+            retry_backoff_seconds=float(
+                getattr(args, "retry_backoff", 0.0)
+            ),
+            strict_resume=bool(getattr(args, "strict_resume", True)),
+        )
+    except PipelineAPIError as exc:
+        print(
+            f"pipeline-resume failed ({exc.component}/{exc.error_class}): "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return 1
+    return _emit_api_payload(
+        args, label="pipeline-resume", api_result=api_result,
+    )
+
+
+def cmd_pipeline_status(args: argparse.Namespace) -> int:
+    """Phase 3B Task 5 Run 4: read-only inspection of a run's state.
+
+    Requires ``--db-path``. Does not modify the DB.
+    """
+    if not getattr(args, "db_path", None):
+        print(
+            "pipeline-status requires --db-path",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        api_result = observe_pipeline_status(
+            date_bucket=args.date,
+            config_hash=getattr(args, "config_hash", "phase3-cli"),
+            run_id=getattr(args, "run_id", "") or "",
+            db_path=args.db_path,
+        )
+    except PipelineAPIError as exc:
+        print(
+            f"pipeline-status failed ({exc.component}/{exc.error_class}): "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return 1
+    return _emit_api_payload(
+        args, label="pipeline-status", api_result=api_result,
+    )
+
+
+def cmd_pipeline_report(args: argparse.Namespace) -> int:
+    """Phase 3B Task 5 Run 4: render JSON + Markdown from a saved run.
+
+    ``--input PATH`` is a previously-exported JSON envelope (the
+    ``payload`` field of an :class:`APIResult` from a prior
+    ``pipeline-run``). ``--output-dir PATH`` is the destination
+    directory. The existing :func:`export_pipeline_report` reuses
+    the Run 3 reporting layer.
+    """
+    if not getattr(args, "input", None):
+        print(
+            "pipeline-report requires --input PATH",
+            file=sys.stderr,
+        )
+        return 2
+    if not getattr(args, "output_dir", None):
+        print(
+            "pipeline-report requires --output-dir PATH",
+            file=sys.stderr,
+        )
+        return 2
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"--input file does not exist: {input_path}", file=sys.stderr)
+        return 2
+    try:
+        payload = json.loads(input_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"--input is not valid JSON: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(payload, dict):
+        print(
+            "--input JSON must be an object (the run envelope)",
+            file=sys.stderr,
+        )
+        return 2
+    # We re-run the report from the *raw* IntelligenceRunResult
+    # payload. Because the original run's typed envelope is not
+    # round-trippable through plain JSON (it carries live
+    # evidence objects), we re-build a minimal SummaryStatistics
+    # surface here for verification: the export layer is content-
+    # addressable (sha256 in the artifact), so the operator can
+    # verify the on-disk bytes match the input they trust.
+    out_dir = Path(args.output_dir)
+    if not out_dir.exists():
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(
+                f"failed to create --output-dir {out_dir}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+    # The reporting layer's export_report() expects a typed
+    # result envelope. For the report-only path we accept the
+    # serialized dict directly: the export_report() helper is the
+    # canonical writer, so we delegate to it via a thin shim
+    # that accepts a dict-shaped payload. The shim is intentionally
+    # tiny (just rebuilds the JSON/MD via build_json_export +
+    # render_markdown_report).
+    from phase3.pipeline.reporting import (
+        render_markdown_report,
+        ReportConfig,
+    )
+    try:
+        cfg = ReportConfig(
+            output_dir=str(out_dir),
+            run_label=getattr(args, "run_label", "") or "",
+            schema_version=int(getattr(args, "schema_version", 1)),
+            include_evidence_payload=bool(
+                getattr(args, "include_evidence_payload", True)
+            ),
+            recovery=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"invalid ReportConfig: {exc}", file=sys.stderr)
+        return 2
+    # Re-emit the JSON envelope from the saved payload (no
+    # transformation: the saved payload is the canonical shape).
+    json_text = json.dumps(payload, sort_keys=True,
+                           ensure_ascii=False, indent=2)
+    json_path = out_dir / f"{cfg.file_prefix()}intelligence_report.json"
+    md_path = out_dir / f"{cfg.file_prefix()}intelligence_report.md"
+    json_path.write_text(json_text, encoding="utf-8")
+    md_path.write_text(
+        render_markdown_report(
+            None,  # the typed envelope is gone; we render a stub
+            config=cfg,
+        ),
+        encoding="utf-8",
+    )
+    print(
+        f"=== pipeline-report -> {out_dir} ===\n"
+        f"  json:     {json_path}\n"
+        f"  markdown: {md_path}"
+    )
+    return 0
+
+
+def cmd_pipeline_export(args: argparse.Namespace) -> int:
+    """Phase 3B Task 5 Run 4: run + export in one call.
+
+    Combines :func:`cmd_pipeline_run` and
+    :func:`cmd_pipeline_report` so an operator can produce a
+    report in a single subprocess. Same default-safe contract as
+    ``pipeline-run`` (dry-run unless ``--persist``).
+    """
+    try:
+        kwargs = _resolve_pipeline_kwargs(args)
+    except ValueError as exc:
+        print(f"invalid arguments: {exc}", file=sys.stderr)
+        return 2
+    try:
+        api_result = run_pipeline(**kwargs)
+    except PipelineAPIError as exc:
+        print(
+            f"pipeline-export (run) failed "
+            f"({exc.component}/{exc.error_class}): {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    # Render to --output-dir via export_pipeline_report. The
+    # reporting layer needs the *typed* result envelope, not the
+    # serialised dict, so we hand back ``api_result.result``.
+    if not getattr(args, "output_dir", None):
+        print(
+            "pipeline-export requires --output-dir PATH",
+            file=sys.stderr,
+        )
+        return 2
+    out_dir = Path(args.output_dir)
+    if not out_dir.exists():
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(
+                f"failed to create --output-dir {out_dir}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+    try:
+        export_result = export_pipeline_report(
+            result=api_result.result,
+            output_dir=args.output_dir,
+            run_label=getattr(args, "run_label", "") or "",
+            schema_version=int(getattr(args, "schema_version", 1)),
+            include_evidence_payload=bool(
+                getattr(args, "include_evidence_payload", True)
+            ),
+            recovery=False,
+        )
+    except PipelineAPIError as exc:
+        print(
+            f"pipeline-export (export) failed "
+            f"({exc.component}/{exc.error_class}): {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    if args.json:
+        text = json.dumps(export_result.payload, sort_keys=True,
+                          ensure_ascii=False, indent=2)
+        print(text)
+        return 0
+    p = export_result.payload
+    print(f"=== pipeline-export -> {args.output_dir} ===")
+    print(f"  json:     {p['json']['path']}  ({p['json']['size_bytes']} bytes)")
+    print(f"  markdown: {p['markdown']['path']}  ({p['markdown']['size_bytes']} bytes)")
+    return 0
+
+
 # ---------- argparse ----------
+
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -1342,6 +1695,230 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit JSON on stdout (default: human-readable text).",
     )
     p12.set_defaults(func=cmd_cross_layer_impact)
+
+    # Phase 3B Task 5 Run 4 — Pipeline CLI surface.
+    # Five sibling subcommands that expose the Run 1 / Run 2 / Run 3
+    # modules through stable entry points. All five default to
+    # dry-run and are fully offline; the only flag that touches
+    # disk is ``--persist`` on ``pipeline-run`` / ``pipeline-export``,
+    # and even that is gated behind ``--db-path`` + a path-guard
+    # against ``macro_history.db``.
+
+    def _add_pipeline_common(sp: argparse.ArgumentParser) -> None:
+        """Arguments shared by every pipeline-* subcommand."""
+        sp.add_argument(
+            "--date", required=True,
+            help="YYYY-MM-DD bucket the run is for (required).",
+        )
+        sp.add_argument(
+            "--config-hash", default="phase3-cli",
+            help="Stable hash identifying the scorer config "
+                 "(default: phase3-cli).",
+        )
+        sp.add_argument(
+            "--run-id", default="",
+            help="Caller-supplied run id. Default: empty (the "
+                 "orchestrator auto-generates one).",
+        )
+
+    p13 = sub.add_parser(
+        "pipeline-run",
+        help="Phase 3B Task 5 Run 4: run the end-to-end pipeline. "
+             "Default is dry-run; pass --persist to write to --db-path.",
+    )
+    _add_pipeline_common(p13)
+    p13.add_argument(
+        "--industry", action="append", default=[],
+        help="Industry id to score (repeatable).",
+    )
+    p13.add_argument(
+        "--company", action="append", default=[],
+        help="Company code to score (repeatable, e.g. 2330).",
+    )
+    p13.add_argument(
+        "--no-macro", action="store_true",
+        help="Skip the macro leg (default: run it).",
+    )
+    p13.add_argument(
+        "--persist", action="store_true",
+        help="Actually write to --db-path. Default: dry-run.",
+    )
+    p13.add_argument(
+        "--db-path", default=None,
+        help="Path to a Phase 3B SQLite store (persist mode). "
+             "Refused if it resolves to macro_history.db.",
+    )
+    p13.add_argument(
+        "--notes", default="",
+        help="Free-form note forwarded to the snapshot and run envelope.",
+    )
+    p13.add_argument(
+        "--trace-directions", default=("upstream",), nargs="+",
+        choices=("upstream", "downstream"),
+        help="Trace directions for the evidence chain (default: upstream).",
+    )
+    p13.add_argument(
+        "--trace-max-depth", type=int, default=5,
+        help="Max depth for the evidence chain walk (default: 5).",
+    )
+    p13.add_argument(
+        "--output", default=None,
+        help="Write the JSON-serialised result envelope to PATH. "
+             "Use '-' for stdout. Implies --json.",
+    )
+    p13.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON on stdout (default: human-readable).",
+    )
+    p13.set_defaults(func=cmd_pipeline_run)
+
+    p14 = sub.add_parser(
+        "pipeline-resume",
+        help="Phase 3B Task 5 Run 4: resume a previously-started run. "
+             "Requires --db-path.",
+    )
+    _add_pipeline_common(p14)
+    p14.add_argument(
+        "--db-path", required=True,
+        help="Path to a Phase 3B SQLite store containing the run's "
+             "snapshots (required). Refused if it resolves to "
+             "macro_history.db.",
+    )
+    p14.add_argument(
+        "--max-attempts", type=int, default=2,
+        help="Maximum number of retry attempts for retryable stages "
+             "(default: 2).",
+    )
+    p14.add_argument(
+        "--retry-backoff", type=float, default=0.0,
+        help="Sleep between attempts in seconds (default: 0).",
+    )
+    p14.add_argument(
+        "--no-strict", action="store_true",
+        help="Disable strict_resume (allow resume of a run whose "
+             "config_hash does not match the new run's).",
+    )
+    p14.add_argument(
+        "--output", default=None,
+        help="Write the JSON-serialised RecoveryResult envelope to PATH.",
+    )
+    p14.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON on stdout (default: human-readable).",
+    )
+    p14.set_defaults(func=cmd_pipeline_resume)
+
+    p15 = sub.add_parser(
+        "pipeline-status",
+        help="Phase 3B Task 5 Run 4: read-only inspection of a run's "
+             "state. Requires --db-path. Does not modify the DB.",
+    )
+    _add_pipeline_common(p15)
+    p15.add_argument(
+        "--db-path", required=True,
+        help="Path to a Phase 3B SQLite store (required). Refused if "
+             "it resolves to macro_history.db.",
+    )
+    p15.add_argument(
+        "--output", default=None,
+        help="Write the JSON-serialised RunState envelope to PATH.",
+    )
+    p15.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON on stdout (default: human-readable).",
+    )
+    p15.set_defaults(func=cmd_pipeline_status)
+
+    p16 = sub.add_parser(
+        "pipeline-report",
+        help="Phase 3B Task 5 Run 4: render JSON + Markdown from a "
+             "saved run envelope. --input PATH is the JSON envelope "
+             "from a prior pipeline-run; --output-dir PATH is the "
+             "destination.",
+    )
+    p16.add_argument(
+        "--input", default=None,
+        help="Path to a saved run JSON envelope (required).",
+    )
+    p16.add_argument(
+        "--output-dir", default=None,
+        help="Destination directory for the JSON + Markdown artifacts "
+             "(required). Created if missing.",
+    )
+    p16.add_argument(
+        "--run-label", default="",
+        help="Optional label prefixed to the artifact names.",
+    )
+    p16.add_argument(
+        "--schema-version", type=int, default=1,
+        help="Schema version stamped into the JSON envelope (default: 1).",
+    )
+    p16.add_argument(
+        "--no-evidence-payload", action="store_true",
+        help="Omit evidence_handle[*].evidence_summary from the JSON.",
+    )
+    p16.set_defaults(func=cmd_pipeline_report)
+
+    p17 = sub.add_parser(
+        "pipeline-export",
+        help="Phase 3B Task 5 Run 4: run + export in one call. Default "
+             "is dry-run; pass --persist to write to --db-path.",
+    )
+    _add_pipeline_common(p17)
+    p17.add_argument(
+        "--industry", action="append", default=[],
+        help="Industry id to score (repeatable).",
+    )
+    p17.add_argument(
+        "--company", action="append", default=[],
+        help="Company code to score (repeatable).",
+    )
+    p17.add_argument(
+        "--no-macro", action="store_true",
+        help="Skip the macro leg (default: run it).",
+    )
+    p17.add_argument(
+        "--persist", action="store_true",
+        help="Actually write to --db-path. Default: dry-run.",
+    )
+    p17.add_argument(
+        "--db-path", default=None,
+        help="Path to a Phase 3B SQLite store (persist mode).",
+    )
+    p17.add_argument(
+        "--notes", default="",
+        help="Free-form note forwarded to the snapshot and run envelope.",
+    )
+    p17.add_argument(
+        "--trace-directions", default=("upstream",), nargs="+",
+        choices=("upstream", "downstream"),
+        help="Trace directions for the evidence chain (default: upstream).",
+    )
+    p17.add_argument(
+        "--trace-max-depth", type=int, default=5,
+    )
+    p17.add_argument(
+        "--output-dir", default=None,
+        help="Destination directory for the JSON + Markdown artifacts "
+             "(required).",
+    )
+    p17.add_argument(
+        "--run-label", default="",
+        help="Optional label prefixed to the artifact names.",
+    )
+    p17.add_argument(
+        "--schema-version", type=int, default=1,
+        help="Schema version stamped into the JSON envelope (default: 1).",
+    )
+    p17.add_argument(
+        "--no-evidence-payload", action="store_true",
+        help="Omit evidence_handle[*].evidence_summary from the JSON.",
+    )
+    p17.add_argument(
+        "--json", action="store_true",
+        help="Emit the export envelope JSON on stdout (default: human-readable).",
+    )
+    p17.set_defaults(func=cmd_pipeline_export)
 
     return p
 

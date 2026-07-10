@@ -83,6 +83,25 @@ class PathGuardTests(unittest.TestCase):
         with self.assertRaises(PathGuardError):
             _check_path("macro_history.db")
 
+    def test_uppercase_basename_match_is_rejected(self) -> None:
+        # F2: a case-bypass (``Macro_History.db``) must still trip the
+        # guard. On a case-sensitive filesystem the bypass was previously
+        # silent because the basename comparison was case-sensitive.
+        with self.assertRaises(PathGuardError):
+            SQLiteStore("Macro_History.db")
+
+    def test_check_path_helper_rejects_uppercase_forbidden(self) -> None:
+        with self.assertRaises(PathGuardError):
+            _check_path("MACRO_HISTORY.DB")
+
+    def test_case_insensitive_safe_path_still_accepted(self) -> None:
+        # Sanity check: a different-cased SAFE name (e.g. ``Macro.db``)
+        # is not the production DB and must be accepted.
+        with tempfile.TemporaryDirectory() as td:
+            safe = os.path.join(td, "IntelliGence.db")
+            with SQLiteStore(safe) as store:
+                self.assertEqual(store.path, os.path.realpath(safe))
+
 
 class PragmaProfileTests(unittest.TestCase):
     """The default PRAGMA profile is applied to every store."""

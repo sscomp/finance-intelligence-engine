@@ -61,12 +61,19 @@ def _check_path(db_path: str | os.PathLike[str]) -> str:
     # os.path.realpath resolves symlinks and `..` traversal, both of
     # which are the obvious ways a caller might try to bypass the guard.
     resolved = os.path.realpath(str(db_path))
-    if os.path.basename(resolved) == FORBIDDEN_DB_NAME:
+    # Compare on lowercase to close the case-bypass gap (F2 finding).
+    # On a case-sensitive filesystem, ``Macro_History.db`` and
+    # ``macro_history.db`` resolve to different files, so the bypass
+    # was previously silent. Treating the basename as case-insensitive
+    # matches the production-DB contract: the path guard is the sole
+    # tripwire, and the only safe assumption is that the production
+    # name is canonical regardless of caller-supplied case.
+    if os.path.basename(resolved).lower() == FORBIDDEN_DB_NAME.lower():
         raise PathGuardError(
             f"refusing to open {resolved!r}: basename matches "
-            f"{FORBIDDEN_DB_NAME!r}. Phase 3B is not allowed to touch "
-            f"the production database. Pick a different path "
-            f"(default: phase3/data/intelligence.db)."
+            f"{FORBIDDEN_DB_NAME!r} (case-insensitive). Phase 3B is "
+            f"not allowed to touch the production database. Pick a "
+            f"different path (default: phase3/data/intelligence.db)."
         )
     return resolved
 

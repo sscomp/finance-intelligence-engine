@@ -108,6 +108,49 @@ from phase3.pipeline.evidence_integration import (  # noqa: E402
     trace_warnings_only,
 )
 
+# End-to-End Intelligence Pipeline (Phase 3B Task 5 Run 1) — composes
+# ScoringPipeline + GraphWriter + EvidenceChainAdapter. Lives in a
+# sibling module to keep the wiring isolated from the leaf components.
+from phase3.pipeline.intelligence_pipeline import (  # noqa: E402
+    EvidenceQueryHandle,
+    IntelligencePipeline,
+    IntelligencePipelineConfig,
+    IntelligenceRunError,
+    IntelligenceRunResult,
+)
+
+# Recovery / Resume Layer (Phase 3B Task 5 Run 2) — persistence-aware
+# resume and replay around IntelligencePipeline. The orchestrator
+# remains the source of truth; this layer only *observes* and
+# *wraps* it.
+from phase3.pipeline.recovery import (  # noqa: E402
+    FailureCategory,
+    RecoveryConfig,
+    RecoveryManager,
+    RecoveryResult,
+    RunState,
+    Stage,
+    StageAttempt,
+    classify_failure,
+)
+
+# Report / Export Layer (Phase 3B Task 5 Run 3) — deterministic JSON +
+# Markdown export of IntelligenceRunResult / RecoveryResult envelopes.
+# Pure presentation layer; never reads from a scorer, signal store, or
+# graph store directly. Reuses ``.to_dict()`` views.
+from phase3.pipeline.reporting import (  # noqa: E402
+    ReportArtifact,
+    ReportConfig,
+    ReportExportError,
+    SummaryStatistics,
+    build_json_export,
+    build_recovery_json_export,
+    build_summary_statistics,
+    export_report,
+    render_markdown_report,
+    render_recovery_markdown_report,
+)
+
 __all__ = [
     "LoadedSignals",
     "InputDimension",
@@ -125,4 +168,27 @@ __all__ = [
     "evidence_summary",
     "metadata_has_evidence",
     "trace_warnings_only",
+    "IntelligencePipeline",
+    "IntelligencePipelineConfig",
+    "IntelligenceRunResult",
+    "IntelligenceRunError",
+    "EvidenceQueryHandle",
+    "Stage",
+    "FailureCategory",
+    "RecoveryConfig",
+    "RunState",
+    "RecoveryResult",
+    "StageAttempt",
+    "RecoveryManager",
+    "classify_failure",
+    "ReportConfig",
+    "ReportArtifact",
+    "SummaryStatistics",
+    "ReportExportError",
+    "build_summary_statistics",
+    "build_json_export",
+    "build_recovery_json_export",
+    "render_markdown_report",
+    "render_recovery_markdown_report",
+    "export_report",
 ]
