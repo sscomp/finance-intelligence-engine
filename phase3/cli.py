@@ -593,6 +593,231 @@ def cmd_trace_score(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------- Phase 3B Task 4 Run 4B — Graph Query CLI ----------
+
+
+def _resolve_graph_store(args: argparse.Namespace) -> tuple[Any, str]:
+    """Build a :class:`GraphStore` for the query subcommands.
+
+    Two modes:
+
+    * **sample** (default): build the canonical in-memory sample
+      graph and return it. No filesystem side effects.
+    * **db** (``--db-path``): open the SQLite graph store at the
+      given path. We pass ``auto_migrate=False`` to skip
+      :meth:`ensure_schema` (the production DB is already
+      migrated; we never want this CLI to touch a schema) and
+      then enable ``PRAGMA query_only=1`` on the underlying
+      connection so the query subcommands can never mutate the
+      production DB. If the path resolves to
+      ``macro_history.db`` we refuse (same path guard the
+      persistence CLI uses).
+
+    Returns ``(store, source_label)``. The source label is used
+    for human-readable output.
+    """
+    db_path = getattr(args, "db_path", None)
+    if db_path is None:
+        return _build_sample_graph(), "sample-graph"
+
+    # Refuse macro_history.db, same guard the persistence layer
+    # uses. We deliberately check the basename (not the full
+    # path) so an alias / symlink is also caught.
+    if os.path.basename(db_path) == "macro_history.db":
+        print(
+            f"refusing to open {db_path!r}: macro_history.db is "
+            f"reserved for macro-report history, not Phase 3B "
+            f"graph storage.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    from phase3.graph.sqlite_store import SQLiteGraphStore
+    try:
+        store = SQLiteGraphStore(db_path, auto_migrate=False)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"failed to open {db_path!r}: {exc}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from exc
+    # Hard guarantee: the production DB cannot be mutated from
+    # this CLI even if a future bug writes by accident.
+    try:
+        store._store._conn.execute("PRAGMA query_only = 1")
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"failed to enable PRAGMA query_only on {db_path!r}: {exc}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from exc
+    return store, f"sqlite({db_path})"
+
+
+def _emit_query_result(
+    args: argparse.Namespace,
+    *,
+    label: str,
+    start_label: str,
+    result: Any,
+    source_kind: str,
+) -> int:
+    """Render a graph query result to stdout / file.
+
+    Mirrors the :func:`cmd_trace_score` output contract:
+
+    * ``--output PATH`` writes JSON to PATH. ``-`` writes to
+      stdout. Prints a status line to stdout either way.
+    * ``--json`` emits JSON to stdout (no file).
+    * Default: human-readable summary to stdout.
+    """
+    if args.output is not None or args.json:
+        text = json.dumps(result.to_dict(), indent=2, sort_keys=True)
+        if args.output and args.output != "-":
+            from pathlib import Path as _P
+            _P(args.output).write_text(text, encoding="utf-8")
+            print(
+                f"=== {label} ({source_kind}) -> {args.output} ==="
+            )
+            print(
+                f"start={start_label} max_depth={args.max_depth} "
+                f"warnings={len(result.warnings)} "
+                f"truncated={getattr(result, 'truncated', False)}"
+            )
+        else:
+            print(text)
+        return 0
+
+    # Human-readable
+    print(
+        f"=== {label} ({source_kind}) from {start_label} "
+        f"(max_depth={args.max_depth}) ==="
+    )
+    rd = result.to_dict()
+    # Print the headline fields first, then everything else.
+    for key in (
+        "start", "visited_node_ids", "source_node_ids",
+        "signal_node_ids", "score_node_ids", "entity_node_ids",
+        "leaf_node_ids", "leaf_summary", "layered",
+        "upstream_chain", "downstream_chain",
+        "upstream_layers", "downstream_layers",
+        "all_reachable_score_ids", "layered_upstream",
+        "layered_downstream", "truncated", "depth_reached",
+        "truncated_upstream", "truncated_downstream",
+        "depth_reached_upstream", "depth_reached_downstream",
+    ):
+        if key in rd:
+            print(f"  {key}: {rd[key]}")
+    extra = {
+        k: v for k, v in rd.items()
+        if k not in {
+            "start", "visited_node_ids", "source_node_ids",
+            "signal_node_ids", "score_node_ids", "entity_node_ids",
+            "leaf_node_ids", "leaf_summary", "layered",
+            "upstream_chain", "downstream_chain",
+            "upstream_layers", "downstream_layers",
+            "all_reachable_score_ids", "layered_upstream",
+            "layered_downstream", "truncated", "depth_reached",
+            "truncated_upstream", "truncated_downstream",
+            "depth_reached_upstream", "depth_reached_downstream",
+            "visited_edges", "visited_edges_upstream",
+            "visited_edges_downstream", "warnings",
+        }
+    }
+    if extra:
+        for k, v in extra.items():
+            print(f"  {k}: {v}")
+    if rd.get("visited_edges") is not None:
+        print(f"  visited_edges: {rd['visited_edges']}")
+    if rd.get("visited_edges_upstream") is not None:
+        print(f"  visited_edges_upstream: {rd['visited_edges_upstream']}")
+    if rd.get("visited_edges_downstream") is not None:
+        print(f"  visited_edges_downstream: {rd['visited_edges_downstream']}")
+    if rd.get("warnings"):
+        print(f"  warnings: {rd['warnings']}")
+    return 0
+
+
+def cmd_lineage(args: argparse.Namespace) -> int:
+    """Phase 3B Task 4 Run 4B: upstream lineage (provenance) query.
+
+    Default graph: sample. Pass ``--db-path`` to query a Phase 3B
+    SQLite graph store (read-only).
+
+    Output: human-readable by default, JSON with ``--json`` or
+    ``--output``.
+    """
+    from phase3.graph.lineage import compute_lineage
+    store, source_kind = _resolve_graph_store(args)
+    result = compute_lineage(
+        store,
+        args.node,
+        max_depth=args.max_depth,
+        max_nodes=args.max_nodes,
+    )
+    return _emit_query_result(
+        args,
+        label="lineage",
+        start_label=args.node,
+        result=result,
+        source_kind=source_kind,
+    )
+
+
+def cmd_blast_radius(args: argparse.Namespace) -> int:
+    """Phase 3B Task 4 Run 4A/4B: downstream blast-radius query.
+
+    Default graph: sample. Pass ``--db-path`` to query a Phase 3B
+    SQLite graph store (read-only).
+
+    Output: human-readable by default, JSON with ``--json`` or
+    ``--output``.
+    """
+    from phase3.graph.blast_radius import compute_blast_radius
+    store, source_kind = _resolve_graph_store(args)
+    result = compute_blast_radius(
+        store,
+        args.node,
+        max_depth=args.max_depth,
+        max_nodes=args.max_nodes,
+    )
+    return _emit_query_result(
+        args,
+        label="blast-radius",
+        start_label=args.node,
+        result=result,
+        source_kind=source_kind,
+    )
+
+
+def cmd_cross_layer_impact(args: argparse.Namespace) -> int:
+    """Phase 3B Task 4 Run 4B: score-to-score cross-layer impact.
+
+    Default graph: sample. Pass ``--db-path`` to query a Phase 3B
+    SQLite graph store (read-only).
+
+    Output: human-readable by default, JSON with ``--json`` or
+    ``--output``.
+    """
+    from phase3.graph.cross_layer_impact import (
+        compute_cross_layer_impact,
+    )
+    store, source_kind = _resolve_graph_store(args)
+    result = compute_cross_layer_impact(
+        store,
+        args.node,
+        max_depth=args.max_depth,
+        max_nodes=args.max_nodes,
+    )
+    return _emit_query_result(
+        args,
+        label="cross-layer-impact",
+        start_label=args.node,
+        result=result,
+        source_kind=source_kind,
+    )
+
+
 # ---------- Phase 3B ingest-signals ----------
 
 #: Canonical adapter name → registry key. ``all`` means "run every
@@ -1017,6 +1242,106 @@ def _build_parser() -> argparse.ArgumentParser:
         help="When emitting JSON, omit the per-edge payload.",
     )
     p9.set_defaults(func=cmd_trace_score)
+
+    # Phase 3B Task 4 Run 4B — Graph Query CLI surface.
+    # Three sibling subcommands that expose the canonical graph
+    # queries (Lineage, Blast Radius, Cross-layer Impact) for
+    # operator use. All three are READ-ONLY — they never write to
+    # any DB. The default graph is the canonical sample graph; pass
+    # --db-path to query a Phase 3B SQLite graph store.
+    p10 = sub.add_parser(
+        "lineage",
+        help="Phase 3B Task 4 Run 4B: upstream lineage (provenance) "
+             "query from a node. By default queries the sample graph; "
+             "pass --db-path to query a Phase 3B SQLite graph store.",
+    )
+    p10.add_argument(
+        "--node", default="score:company:2330:2026-07-08",
+        help="Start node id. Default: the sample company score.",
+    )
+    p10.add_argument("--max-depth", type=int, default=5)
+    p10.add_argument(
+        "--max-nodes", type=int, default=None,
+        help="Optional cap on the number of nodes visited.",
+    )
+    p10.add_argument(
+        "--db-path", default=None,
+        help="Path to a Phase 3B SQLite graph store (read-only). "
+             "When omitted, queries the sample graph in-process.",
+    )
+    p10.add_argument(
+        "--output", default=None,
+        help="Write the JSON-serialized LineageQuery to PATH. "
+             "Use '-' for stdout. Implies --json.",
+    )
+    p10.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON on stdout (default: human-readable text).",
+    )
+    p10.set_defaults(func=cmd_lineage)
+
+    p11 = sub.add_parser(
+        "blast-radius",
+        help="Phase 3B Task 4 Run 4A/4B: downstream blast-radius "
+             "query from a node. By default queries the sample graph; "
+             "pass --db-path to query a Phase 3B SQLite graph store.",
+    )
+    p11.add_argument(
+        "--node", default="source:yfinance",
+        help="Start node id. Default: the sample yfinance source.",
+    )
+    p11.add_argument("--max-depth", type=int, default=5)
+    p11.add_argument(
+        "--max-nodes", type=int, default=None,
+        help="Optional cap on the number of nodes visited.",
+    )
+    p11.add_argument(
+        "--db-path", default=None,
+        help="Path to a Phase 3B SQLite graph store (read-only). "
+             "When omitted, queries the sample graph in-process.",
+    )
+    p11.add_argument(
+        "--output", default=None,
+        help="Write the JSON-serialized BlastRadiusResult to PATH. "
+             "Use '-' for stdout. Implies --json.",
+    )
+    p11.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON on stdout (default: human-readable text).",
+    )
+    p11.set_defaults(func=cmd_blast_radius)
+
+    p12 = sub.add_parser(
+        "cross-layer-impact",
+        help="Phase 3B Task 4 Run 4B: score-to-score cross-layer "
+             "impact (upstream + downstream). By default queries "
+             "the sample graph; pass --db-path to query a Phase 3B "
+             "SQLite graph store.",
+    )
+    p12.add_argument(
+        "--node", default="score:company:2330:2026-07-08",
+        help="Start node id. Default: the sample company score.",
+    )
+    p12.add_argument("--max-depth", type=int, default=5)
+    p12.add_argument(
+        "--max-nodes", type=int, default=None,
+        help="Optional cap on the number of nodes visited per walk.",
+    )
+    p12.add_argument(
+        "--db-path", default=None,
+        help="Path to a Phase 3B SQLite graph store (read-only). "
+             "When omitted, queries the sample graph in-process.",
+    )
+    p12.add_argument(
+        "--output", default=None,
+        help="Write the JSON-serialized CrossLayerImpactResult to "
+             "PATH. Use '-' for stdout. Implies --json.",
+    )
+    p12.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON on stdout (default: human-readable text).",
+    )
+    p12.set_defaults(func=cmd_cross_layer_impact)
 
     return p
 

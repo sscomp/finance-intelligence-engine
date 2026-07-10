@@ -18,6 +18,26 @@ removed because their implementation delegated to
         BLAST_DOWNSTREAM_SIDE,
         compute_blast_radius,
     )
+
+Phase 3B Task 4 Run 4B (2026-07-11): the canonical Lineage
+implementation lives in :mod:`phase3.graph.lineage` and the
+canonical Cross-layer Impact implementation lives in
+:mod:`phase3.graph.cross_layer_impact`. The previous
+``query_lineage`` and ``query_cross_layer_impact`` functions in
+:mod:`phase3.graph.queries` (which delegated to
+:class:`EvidenceTracer` and inherited the tracer's
+downstream-walk asymmetry, "Pitfall O") are now thin facades
+over the canonical modules. Use the canonical paths:
+
+    from phase3.graph import (
+        LineageQuery,
+        compute_lineage,
+    )
+
+    from phase3.graph import (
+        CrossLayerImpactResult,
+        compute_cross_layer_impact,
+    )
 """
 from __future__ import annotations
 
@@ -51,11 +71,22 @@ from phase3.graph.blast_radius import (
     GraphStoreLike,
     compute_blast_radius,
 )
-from phase3.graph.queries import (
+from phase3.graph.cross_layer_impact import (
+    CROSS_LAYER_DOWNSTREAM_SIDE,
     CROSS_LAYER_EDGE_TYPES,
+    CROSS_LAYER_UPSTREAM_SIDE,
+    CrossLayerImpactResult,
+    compute_cross_layer_impact,
+)
+from phase3.graph.lineage import (
+    LINEAGE_EDGE_TYPES,
+    LINEAGE_UPSTREAM_SIDE,
+    LineageQuery,
+    compute_lineage,
+)
+from phase3.graph.queries import (
     CrossLayerImpactQuery,
     GraphQueryService,
-    LineageQuery,
     query_cross_layer_impact,
     query_lineage,
 )
@@ -85,11 +116,20 @@ __all__ = [
     "BlastRadiusResult",
     "GraphStoreLike",
     "compute_blast_radius",
-    # Graph query layer (Run 4 first attempt, post-consolidation)
+    # Canonical Lineage (Run 4B consolidation, 2026-07-11)
+    "LINEAGE_EDGE_TYPES",
+    "LINEAGE_UPSTREAM_SIDE",
+    "LineageQuery",
+    "compute_lineage",
+    # Canonical Cross-layer Impact (Run 4B consolidation, 2026-07-11)
     "CROSS_LAYER_EDGE_TYPES",
+    "CROSS_LAYER_UPSTREAM_SIDE",
+    "CROSS_LAYER_DOWNSTREAM_SIDE",
+    "CrossLayerImpactResult",
+    "compute_cross_layer_impact",
+    # Graph query facade (Run 4B consolidation, 2026-07-11)
     "CrossLayerImpactQuery",
     "GraphQueryService",
-    "LineageQuery",
     "query_cross_layer_impact",
     "query_lineage",
 ]
