@@ -42,6 +42,7 @@ from phase3.graph import (
     GraphStore,
     NodeType,
 )
+from phase3.persistence.sqlite import FORBIDDEN_DB_NAME
 from phase3.scoring import CompanyScorer, IndustryScorer, MacroScorer
 from phase3.scoring.explain import explain_score
 from phase3.signals import SignalAggregator, SignalEngine
@@ -630,12 +631,21 @@ def _resolve_graph_store(args: argparse.Namespace) -> tuple[Any, str]:
 
     # Refuse macro_history.db, same guard the persistence layer
     # uses. We deliberately check the basename (not the full
-    # path) so an alias / symlink is also caught.
-    if os.path.basename(db_path) == "macro_history.db":
+    # path) so an alias / symlink is also caught. The comparison
+    # is case-insensitive (F2 hardening): on a case-sensitive
+    # filesystem ``Macro_History.db`` would otherwise bypass the
+    # guard and write to a different file. The same rule is
+    # enforced in :func:`phase3.persistence.sqlite._check_path`
+    # (line 71); we mirror the contract here so the CLI cannot
+    # regress the F2 fix.
+    if (
+        os.path.basename(db_path).lower()
+        == FORBIDDEN_DB_NAME.lower()
+    ):
         print(
-            f"refusing to open {db_path!r}: macro_history.db is "
-            f"reserved for macro-report history, not Phase 3B "
-            f"graph storage.",
+            f"refusing to open {db_path!r}: {FORBIDDEN_DB_NAME} "
+            f"is reserved for macro-report history, not Phase 3B "
+            f"graph storage (case-insensitive basename match).",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -824,6 +834,132 @@ def cmd_cross_layer_impact(args: argparse.Namespace) -> int:
         result=result,
         source_kind=source_kind,
     )
+
+
+# ---------- Phase 4 Task 3B Run 1: explain-score / decision trace ----------
+
+def cmd_explain_score(args: argparse.Namespace) -> int:
+    """Phase 4 Task 3B Run 1: explain-score / decision trace.
+
+    Read-only composition of the three canonical graph queries
+    (lineage, blast-radius, cross-layer impact) plus the score
+    node's metadata. Answers the operator question
+    "why does this score exist, what contributed, what does it
+    touch, and is the trace complete?".
+
+    Default graph: sample. Pass ``--db-path`` to query a Phase 3B
+    SQLite graph store (read-only; PRAGMA query_only=1 is
+    enabled by :func:`_resolve_graph_store`).
+
+    Output: human-readable Markdown by default, JSON with
+    ``--json`` or ``--output``. The Markdown view is the
+    canonical operator surface; the JSON view is the canonical
+    machine surface.
+
+    Flags
+    -----
+    ``--node``
+        The score node id (default: the sample company score
+        ``score:company:2330:2026-07-08``).
+    ``--max-depth``
+        Max hop count for each of the three underlying walks
+        (default: 5).
+    ``--max-nodes``
+        Optional cap on the number of nodes each walk may
+        visit (default: unbounded).
+    ``--db-path``
+        Path to a Phase 3B SQLite graph store (read-only).
+        Refused if it resolves to ``macro_history.db``.
+    ``--output PATH``
+        Write the JSON-serialized ``ExplainedScore`` to PATH.
+        Use ``-`` for stdout. Implies ``--json``.
+    ``--json``
+        Emit JSON on stdout (default: human-readable Markdown).
+    ``--from-pipeline`` (placeholder)
+        Reserved for future wiring to ``PipelineResult``. Not
+        honored in Run 1; included so the help text documents
+        the intended extension point.
+
+    Exit codes
+    ----------
+    0 — success (the score was found, the trace completed, the
+        result was written).
+    1 — operational failure (db-path refused, db open failed,
+        output path unwritable). The error is printed to stderr.
+    2 — argparse rejection (unknown flag, invalid choice).
+    """
+    from phase3.graph.explain_score import explain_score as _explain
+    store, source_kind = _resolve_graph_store(args)
+    result = _explain(
+        store,
+        args.node,
+        max_depth=args.max_depth,
+        max_nodes=args.max_nodes,
+    )
+
+    # --from-pipeline is reserved for Run 2+ where we'll thread
+    # the PipelineResult through. For now we just accept the
+    # flag and ignore it (no error) so the CLI surface is
+    # forward-compatible. We only print a hint when the
+    # operator actually asked for it.
+    if getattr(args, "from_pipeline", False):
+        print(
+            "note: --from-pipeline is reserved for a future Run; "
+            "ignored in this run (the explanation is computed "
+            "from the graph store only).",
+            file=sys.stderr,
+        )
+
+    # Mirror the contract of cmd_lineage / cmd_blast_radius:
+    #   * --output PATH (incl. -) implies JSON.
+    #   * --json without --output writes JSON to stdout.
+    #   * default: Markdown to stdout.
+    want_json = bool(args.json or args.output)
+    if want_json:
+        text = json.dumps(result.to_dict(), indent=2, sort_keys=True)
+        if args.output and args.output != "-":
+            from pathlib import Path as _P
+            try:
+                _P(args.output).write_text(text, encoding="utf-8")
+            except OSError as exc:
+                print(
+                    f"failed to write {args.output!r}: {exc}",
+                    file=sys.stderr,
+                )
+                return 1
+            print(
+                f"=== explain-score ({source_kind}) -> "
+                f"{args.output} ==="
+            )
+            print(
+                f"score_node_id={args.node} max_depth="
+                f"{args.max_depth} max_nodes={args.max_nodes} "
+                f"present={result.present} "
+                f"truncated={result.truncated} "
+                f"depth_reached={result.depth_reached} "
+                f"warnings={len(result.warnings)}"
+            )
+            return 0
+        # args.output == "-" or args.json with no --output.
+        print(text)
+        return 0
+
+    # Default: Markdown to stdout. Use a small status line above
+    # the rendered explanation so the operator can confirm the
+    # run parameters at a glance.
+    print(
+        f"=== explain-score ({source_kind}) ==="
+    )
+    print(
+        f"score_node_id={args.node} max_depth={args.max_depth} "
+        f"max_nodes={args.max_nodes} present={result.present} "
+        f"truncated={result.truncated} "
+        f"depth_reached={result.depth_reached} "
+        f"warnings={len(result.warnings)}"
+    )
+    print()
+    print(result.to_markdown())
+    return 0
 
 
 # ---------- Phase 3B ingest-signals ----------
@@ -1919,6 +2055,50 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit the export envelope JSON on stdout (default: human-readable).",
     )
     p17.set_defaults(func=cmd_pipeline_export)
+
+    p18 = sub.add_parser(
+        "explain-score",
+        help="Phase 4 Task 3B Run 1: read-only explain-score / "
+             "decision trace. Composes lineage + blast-radius + "
+             "cross-layer-impact around a single score node id. "
+             "Output: human-readable Markdown (default) or JSON "
+             "(--json / --output).",
+    )
+    p18.add_argument(
+        "--node", default="score:company:2330:2026-07-08",
+        help="Score node id to explain. Default: the sample "
+             "company score.",
+    )
+    p18.add_argument(
+        "--max-depth", type=int, default=5,
+        help="Max hop count for each underlying walk (default: 5).",
+    )
+    p18.add_argument(
+        "--max-nodes", type=int, default=None,
+        help="Optional cap on the number of nodes each underlying "
+             "walk may visit (default: unbounded).",
+    )
+    p18.add_argument(
+        "--db-path", default=None,
+        help="Path to a Phase 3B SQLite graph store (read-only). "
+             "When omitted, queries the sample graph in-process. "
+             "Refused if it resolves to macro_history.db.",
+    )
+    p18.add_argument(
+        "--output", default=None,
+        help="Write the JSON-serialised ExplainedScore to PATH. "
+             "Use '-' for stdout. Implies --json.",
+    )
+    p18.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON on stdout (default: human-readable Markdown).",
+    )
+    p18.add_argument(
+        "--from-pipeline", action="store_true",
+        help="Reserved for a future Run that threads a "
+             "PipelineResult through. Accepted but ignored in Run 1.",
+    )
+    p18.set_defaults(func=cmd_explain_score)
 
     return p
 

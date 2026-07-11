@@ -90,6 +90,13 @@ from phase3.graph.queries import (
     query_cross_layer_impact,
     query_lineage,
 )
+from phase3.graph.explain_score import (
+    DEFAULT_MAX_DEPTH,
+    DEFAULT_MAX_NODES,
+    ExplainedScore,
+    GraphStoreLike,
+    explain_score,
+)
 
 __all__ = [
     "GraphStore",
@@ -132,4 +139,12 @@ __all__ = [
     "GraphQueryService",
     "query_cross_layer_impact",
     "query_lineage",
+    # Explain-Score / Decision Trace (Phase 4 Task 3B Run 1,
+    # 2026-07-11) — read-only composition of the three canonical
+    # graph queries plus score metadata projection.
+    "DEFAULT_MAX_DEPTH",
+    "DEFAULT_MAX_NODES",
+    "ExplainedScore",
+    "GraphStoreLike",
+    "explain_score",
 ]
