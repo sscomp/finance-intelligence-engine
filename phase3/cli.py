@@ -48,6 +48,16 @@ from phase3.scoring.explain import explain_score
 from phase3.signals import SignalAggregator, SignalEngine
 
 
+# Module-level constants. These are referenced from both the
+# argparse defaults (in ``_build_parser``) and the command
+# bodies (in ``cmd_explain_score``). Keeping them here avoids
+# the "imported value baked into the default" anti-pattern:
+# the help text, the body, and the test suite all see the same
+# canonical string. ``DEFAULT_NODE_SENTINEL`` doubles as the
+# "user did not pass --node" marker for Run 2 dispatch.
+DEFAULT_NODE_SENTINEL = "score:company:2330:2026-07-08"
+
+
 # ---------- sample data ----------
 
 SAMPLE_MACRO_INPUTS: dict[str, Any] = {
@@ -839,7 +849,7 @@ def cmd_cross_layer_impact(args: argparse.Namespace) -> int:
 # ---------- Phase 4 Task 3B Run 1: explain-score / decision trace ----------
 
 def cmd_explain_score(args: argparse.Namespace) -> int:
-    """Phase 4 Task 3B Run 1: explain-score / decision trace.
+    """Phase 4 Task 3B Run 1 + Run 2: explain-score / decision trace.
 
     Read-only composition of the three canonical graph queries
     (lineage, blast-radius, cross-layer impact) plus the score
@@ -860,7 +870,12 @@ def cmd_explain_score(args: argparse.Namespace) -> int:
     -----
     ``--node``
         The score node id (default: the sample company score
-        ``score:company:2330:2026-07-08``).
+        ``score:company:2330:2026-07-08``). When
+        ``--from-pipeline --pipeline-artifact`` is used the
+        default is the first score in the artifact's
+        ``graph_writes`` list; an explicit ``--node`` must
+        exist in the artifact or the run aborts with
+        ``ExplainPipelineArtifactError``.
     ``--max-depth``
         Max hop count for each of the three underlying walks
         (default: 5).
@@ -870,43 +885,148 @@ def cmd_explain_score(args: argparse.Namespace) -> int:
     ``--db-path``
         Path to a Phase 3B SQLite graph store (read-only).
         Refused if it resolves to ``macro_history.db``.
+        Mutually exclusive with ``--from-pipeline
+        --pipeline-artifact``.
     ``--output PATH``
         Write the JSON-serialized ``ExplainedScore`` to PATH.
         Use ``-`` for stdout. Implies ``--json``.
     ``--json``
         Emit JSON on stdout (default: human-readable Markdown).
-    ``--from-pipeline`` (placeholder)
-        Reserved for future wiring to ``PipelineResult``. Not
-        honored in Run 1; included so the help text documents
-        the intended extension point.
+    ``--from-pipeline``
+        Phase 4 Task 3B Run 2: load a PipelineResult-shaped
+        envelope and thread it into the explain-score
+        composition. Without ``--pipeline-artifact`` the flag
+        is accepted as a no-op hint (Run 1 back-compat).
+        When combined with ``--pipeline-artifact PATH`` the
+        artifact is loaded via
+        :mod:`phase3.graph.explain_from_pipeline`, the rebuilt
+        graph is queried instead of the sample graph, and
+        ``run_id`` / ``config_hash`` / ``date_bucket`` are
+        propagated into ``score_metadata``.
+    ``--pipeline-artifact PATH``
+        Phase 4 Task 3B Run 2: path to a JSON artifact
+        produced by
+        :func:`phase3.pipeline.reporting.export_report`
+        (or :func:`build_json_export`). Required for the
+        real ``--from-pipeline`` integration; ignored when
+        ``--from-pipeline`` is not set. Refused if it
+        resolves to ``macro_history.db`` (case-insensitive
+        basename, same guard the SQLite path uses).
 
     Exit codes
     ----------
     0 — success (the score was found, the trace completed, the
         result was written).
     1 — operational failure (db-path refused, db open failed,
-        output path unwritable). The error is printed to stderr.
-    2 — argparse rejection (unknown flag, invalid choice).
+        output path unwritable, artifact missing/invalid).
+        The error is printed to stderr.
+    2 — argparse rejection (unknown flag, invalid choice,
+        mutually exclusive flag pair).
     """
     from phase3.graph.explain_score import explain_score as _explain
-    store, source_kind = _resolve_graph_store(args)
-    result = _explain(
-        store,
-        args.node,
-        max_depth=args.max_depth,
-        max_nodes=args.max_nodes,
-    )
+    pipeline_envelope = None
+    # The argparse default for --node is the sample company score
+    # ``score:company:2330:2026-07-08`` so Run 1 callers without
+    # --from-pipeline still get a useful default. In Run 2 mode
+    # the artifact owns the canonical id; we must NOT pass the
+    # sample-graph default through the validator or every
+    # non-2026-07-08 artifact would be rejected. We treat
+    # "user did not pass --node" as "let the artifact pick",
+    # which is signalled by the default sentinel
+    # ``DEFAULT_NODE_SENTINEL``.
+    requested_node = getattr(args, "node", None)
+    if (
+        getattr(args, "from_pipeline", False)
+        and getattr(args, "pipeline_artifact", None)
+        and requested_node == DEFAULT_NODE_SENTINEL
+    ):
+        requested_node = None
+    if getattr(args, "from_pipeline", False) and getattr(
+        args, "pipeline_artifact", None
+    ):
+        # Real Run 2 mode: load the JSON artifact, build a
+        # fresh in-memory graph + PipelineResult from it, and
+        # thread the result into explain_score. The sample
+        # graph + --db-path are bypassed entirely.
+        if getattr(args, "db_path", None):
+            print(
+                "--from-pipeline --pipeline-artifact is mutually "
+                "exclusive with --db-path (the artifact carries "
+                "its own graph).",
+                file=sys.stderr,
+            )
+            return 2
+        from phase3.graph.explain_from_pipeline import (
+            ExplainPipelineArtifactError,
+            load_pipeline_envelope,
+        )
+        artifact_path = args.pipeline_artifact
+        # Same case-insensitive basename guard the SQLite path
+        # uses. The artifact lives next to the production
+        # SQLite DB in some layouts; a mis-typed argument
+        # would otherwise open the wrong file. The check
+        # intentionally mirrors the F2 hardening.
+        if (
+            os.path.basename(artifact_path).lower()
+            == FORBIDDEN_DB_NAME.lower()
+        ):
+            print(
+                f"refusing to open {artifact_path!r}: "
+                f"{FORBIDDEN_DB_NAME} is reserved for "
+                f"macro-report history, not Phase 3B pipeline "
+                f"artifacts (case-insensitive basename match).",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            pipeline_envelope = load_pipeline_envelope(
+                artifact_path, score_node_id=requested_node
+            )
+        except ExplainPipelineArtifactError as exc:
+            print(
+                f"failed to load pipeline artifact: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        store = pipeline_envelope.graph
+        source_kind = "pipeline-artifact"
+        # The chosen score is the envelope's resolved id,
+        # not the caller's --node (which may be a default).
+        score_node_id = pipeline_envelope.score_node_id
+    else:
+        store, source_kind = _resolve_graph_store(args)
+        score_node_id = args.node
 
-    # --from-pipeline is reserved for Run 2+ where we'll thread
-    # the PipelineResult through. For now we just accept the
-    # flag and ignore it (no error) so the CLI surface is
-    # forward-compatible. We only print a hint when the
-    # operator actually asked for it.
-    if getattr(args, "from_pipeline", False):
+    if pipeline_envelope is not None:
+        result = _explain(
+            store,
+            score_node_id,
+            max_depth=args.max_depth,
+            max_nodes=args.max_nodes,
+            pipeline_result=pipeline_envelope.pipeline_result,
+        )
+    else:
+        result = _explain(
+            store,
+            score_node_id,
+            max_depth=args.max_depth,
+            max_nodes=args.max_nodes,
+        )
+
+    # --from-pipeline without --pipeline-artifact is a no-op
+    # hint for back-compat with the Run 1 surface. When the
+    # real --pipeline-artifact path was taken the hint is
+    # already replaced by a richer status line below.
+    if (
+        getattr(args, "from_pipeline", False)
+        and pipeline_envelope is None
+    ):
         print(
-            "note: --from-pipeline is reserved for a future Run; "
-            "ignored in this run (the explanation is computed "
-            "from the graph store only).",
+            "note: --from-pipeline without --pipeline-artifact "
+            "is a no-op hint; pass --pipeline-artifact PATH to "
+            "thread a real PipelineResult through. The "
+            "explanation below is computed from the graph store "
+            "only.",
             file=sys.stderr,
         )
 
@@ -915,8 +1035,27 @@ def cmd_explain_score(args: argparse.Namespace) -> int:
     #   * --json without --output writes JSON to stdout.
     #   * default: Markdown to stdout.
     want_json = bool(args.json or args.output)
+    # When the caller asked for the real pipeline integration
+    # we also surface the envelope fields in the output
+    # (run_id / config_hash / date_bucket) so the operator can
+    # confirm the artifact was loaded as expected. This is a
+    # strict superset of the Run 1 contract — a Run 1 caller
+    # never reaches this branch because pipeline_envelope is
+    # None for them.
+    extra_envelope: dict[str, Any] | None = None
+    if pipeline_envelope is not None:
+        extra_envelope = {
+            "artifact_path": pipeline_envelope.source_artifact_path,
+            "config_hash": pipeline_envelope.config_hash,
+            "date_bucket": pipeline_envelope.date_bucket,
+            "persisted": pipeline_envelope.persisted,
+            "run_id": pipeline_envelope.run_id,
+        }
     if want_json:
-        text = json.dumps(result.to_dict(), indent=2, sort_keys=True)
+        payload = dict(result.to_dict())
+        if extra_envelope is not None:
+            payload["pipeline_envelope"] = extra_envelope
+        text = json.dumps(payload, indent=2, sort_keys=True)
         if args.output and args.output != "-":
             from pathlib import Path as _P
             try:
@@ -932,7 +1071,7 @@ def cmd_explain_score(args: argparse.Namespace) -> int:
                 f"{args.output} ==="
             )
             print(
-                f"score_node_id={args.node} max_depth="
+                f"score_node_id={score_node_id} max_depth="
                 f"{args.max_depth} max_nodes={args.max_nodes} "
                 f"present={result.present} "
                 f"truncated={result.truncated} "
@@ -951,12 +1090,20 @@ def cmd_explain_score(args: argparse.Namespace) -> int:
         f"=== explain-score ({source_kind}) ==="
     )
     print(
-        f"score_node_id={args.node} max_depth={args.max_depth} "
+        f"score_node_id={score_node_id} max_depth={args.max_depth} "
         f"max_nodes={args.max_nodes} present={result.present} "
         f"truncated={result.truncated} "
         f"depth_reached={result.depth_reached} "
         f"warnings={len(result.warnings)}"
     )
+    if extra_envelope is not None:
+        print(
+            f"pipeline run_id={extra_envelope['run_id']!r} "
+            f"config_hash={extra_envelope['config_hash']!r} "
+            f"date_bucket={extra_envelope['date_bucket']!r} "
+            f"persisted={extra_envelope['persisted']} "
+            f"artifact={extra_envelope['artifact_path']}"
+        )
     print()
     print(result.to_markdown())
     return 0
@@ -2065,9 +2212,11 @@ def _build_parser() -> argparse.ArgumentParser:
              "(--json / --output).",
     )
     p18.add_argument(
-        "--node", default="score:company:2330:2026-07-08",
+        "--node", default=DEFAULT_NODE_SENTINEL,
         help="Score node id to explain. Default: the sample "
-             "company score.",
+             "company score. With --from-pipeline --pipeline-artifact "
+             "the default lets the artifact pick (you only need to "
+             "pass this if the artifact carries more than one score).",
     )
     p18.add_argument(
         "--max-depth", type=int, default=5,
@@ -2095,8 +2244,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p18.add_argument(
         "--from-pipeline", action="store_true",
-        help="Reserved for a future Run that threads a "
-             "PipelineResult through. Accepted but ignored in Run 1.",
+        help="Phase 4 Task 3B Run 2: load a PipelineResult-shaped "
+             "envelope and thread it into the explain-score "
+             "composition. Without --pipeline-artifact the flag is "
+             "accepted as a no-op hint (Run 1 back-compat). When "
+             "combined with --pipeline-artifact PATH the artifact "
+             "is loaded via phase3.graph.explain_from_pipeline, the "
+             "rebuilt graph is queried instead of the sample graph, "
+             "and run_id / config_hash / date_bucket are propagated "
+             "into score_metadata. Mutually exclusive with --db-path "
+             "when --pipeline-artifact is set.",
+    )
+    p18.add_argument(
+        "--pipeline-artifact", default=None,
+        help="Phase 4 Task 3B Run 2: path to a JSON artifact "
+             "produced by phase3.pipeline.reporting.export_report "
+             "(or build_json_export). Required for the real "
+             "--from-pipeline integration; ignored when "
+             "--from-pipeline is not set. Refused if it resolves "
+             "to macro_history.db (case-insensitive basename).",
     )
     p18.set_defaults(func=cmd_explain_score)
 
