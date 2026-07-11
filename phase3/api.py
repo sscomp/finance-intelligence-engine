@@ -60,6 +60,16 @@ from phase3.persistence.schema_v1 import build as build_v1_schema
 from phase3.persistence.signal_repo import SignalRepository
 from phase3.persistence.sqlite import SQLiteStore, _check_path
 from phase3.persistence.sqlite import PathGuardError as _PathGuardError
+
+# Phase 4 Task 1B (F1 close): SQLiteGraphStore is now used on the
+# persist path. Imported lazily inside the factory so the dry-run path
+# does not pay the import cost; the import is also guarded so a
+# broken SQLite stack does not take the whole module down on
+# import-time.
+try:  # noqa: SIM105
+    from phase3.graph.sqlite_store import SQLiteGraphStore as _SQLiteGraphStore
+except Exception:  # pragma: no cover - defensive
+    _SQLiteGraphStore = None  # type: ignore[assignment]
 from phase3.pipeline.graph_writer import GraphWriter
 from phase3.pipeline.intelligence_pipeline import (
     IntelligencePipeline,
@@ -169,6 +179,75 @@ def _open_store(db_path: str) -> SQLiteStore:
     return store
 
 
+# Phase 4 Task 1B (F1 close): small graph-store factory. The
+# persist path used to instantiate :class:`InMemoryGraphStore`
+# unconditionally; this helper centralises the choice so all
+# three call sites (default-build, dry-run, resume) share the
+# same selection logic. Default behaviour:
+#
+# * ``db_path is None`` or ``force_in_memory=True`` -> in-memory
+#   store (the dry-run / ephemeral path; no filesystem touch).
+# * Otherwise -> :class:`SQLiteGraphStore` at the (path-guard
+#   validated) ``db_path``. Schema is auto-applied.
+#
+# The path-guard failure path mirrors ``_validate_db_path`` so
+# callers get a typed :class:`PipelineAPIError` (component
+# ``db_path_guard``) for the ``macro_history.db`` case instead
+# of a raw :class:`PathGuardError`.
+_GRAPH_STORE_IMPORT_ERROR_HINT = (
+    "phase3.graph.sqlite_store could not be imported; the "
+    "in-memory graph store will be used as a fallback."
+)
+
+
+def _build_graph_store(
+    db_path: str | None,
+    *,
+    force_in_memory: bool = False,
+    auto_migrate: bool = True,
+) -> InMemoryGraphStore | Any:  # returns SQLiteGraphStore when persist
+    """Return the right graph store for the API call site.
+
+    Parameters
+    ----------
+    db_path:
+        Resolved / validated DB path. ``None`` means the dry-run
+        path which never touches a DB.
+    force_in_memory:
+        Explicit override — always return an in-memory store even
+        when ``db_path`` is set. Used by tests and by the
+        ``force-in-memory-graph`` knob the API surface may expose
+        in future.
+    auto_migrate:
+        Forwarded to :class:`SQLiteGraphStore`. ``False`` is the
+        test-friendly shape (the caller drives the migration).
+    """
+    if not db_path or force_in_memory:
+        # Empty string / None -> dry-run path. The pre-F1 API's
+        # ``_validate_db_path`` treats empty string the same as
+        # None; we preserve that contract.
+        return InMemoryGraphStore()
+    if _SQLiteGraphStore is None:
+        # SQLite stack is unavailable. Fall back to in-memory so
+        # the API does not raise a hard ImportError. This is a
+        # defensive branch; in normal operation ``_SQLiteGraphStore``
+        # is the real class.
+        return InMemoryGraphStore()
+    # db_path is non-None here; we re-validate through the same
+    # path guard the rest of the API uses so the call-site code
+    # path is uniform. If the guard fails we let the typed
+    # PipelineAPIError bubble up.
+    try:
+        resolved = _check_path(db_path)
+    except _PathGuardError as exc:
+        raise PipelineAPIError(
+            component="db_path_guard",
+            message=str(exc),
+            error_class="PathGuardError",
+        ) from exc
+    return _SQLiteGraphStore(resolved, auto_migrate=auto_migrate)
+
+
 def _build_default_components(
     *,
     db_path: str,
@@ -210,7 +289,11 @@ def _build_default_components(
                 config_hash=config_hash,
             ),
         )
-        graph_store = InMemoryGraphStore()
+        # Phase 4 Task 1B (F1 close): the persist path now writes the
+        # graph to the same SQLite file the rest of the project uses
+        # for signals / scores. The factory picks SQLiteGraphStore
+        # here because ``db_path`` is non-None.
+        graph_store = _build_graph_store(db_path)
         graph_writer = GraphWriter(graph_store)
         adapter = EvidenceChainAdapter(graph_store)
         return store, pipeline, graph_store, score_repo, signal_repo
@@ -237,8 +320,9 @@ def _build_orchestrator(
     if db_path is None:
         # Dry-run: an in-memory graph + a never-persisted pipeline
         # is enough. We use the same in-memory default to keep the
-        # shape symmetric with the persist path.
-        graph_store = InMemoryGraphStore()
+        # shape symmetric with the persist path. ``db_path=None``
+        # signals the factory to skip SQLite entirely.
+        graph_store = _build_graph_store(None)
         graph_writer = GraphWriter(graph_store)
         adapter = EvidenceChainAdapter(graph_store)
         # Build a *throwaway* store that we close immediately so
@@ -575,7 +659,11 @@ def resume_pipeline(
                 config_hash=config_hash,
             ),
         )
-        graph_store = InMemoryGraphStore()
+        # Phase 4 Task 1B (F1 close): resume now also reads the
+        # graph from SQLite (same path the original run wrote to).
+        # The factory picks SQLiteGraphStore because ``resolved``
+        # is non-None after the path-guard.
+        graph_store = _build_graph_store(resolved)
         graph_writer = GraphWriter(graph_store)
         adapter = EvidenceChainAdapter(graph_store)
         orch = IntelligencePipeline(

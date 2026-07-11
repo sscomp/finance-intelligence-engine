@@ -108,6 +108,11 @@ from typing import Literal, Protocol
 
 from phase3.datamodel.graph import EdgeType, GraphEdge, GraphNode, NodeType
 from phase3.graph.in_memory_store import GraphStore
+from phase3.graph.optimization import (
+    BatchReader,
+    batched_edges_lookup,
+    batched_nodes_lookup,
+)
 
 
 class _GraphStoreLike(Protocol):
@@ -286,6 +291,107 @@ def _neighbors_at(
     return candidates
 
 
+def _neighbors_for_frontier(
+    reader: BatchReader,
+    frontier: list[str],
+    edge_types_set: set[EdgeType],
+) -> list[tuple[str, GraphNode, GraphEdge]]:
+    """Layer-level batched neighbor lookup for the Blast Radius
+    direction policy.
+
+    For every node in ``frontier``, return the (neighbor_id, neighbor,
+    edge) triples the Blast Radius BFS would walk to from that node.
+    The triples are emitted in **stable per-frontier-node order**:
+    each frontier node's triples are sorted by ``(edge_id, neighbor_id)``
+    (matching the per-node :func:`_neighbors_at` contract), and the
+    frontier nodes themselves are visited in the order they appear in
+    ``frontier``.
+
+    The direction policy is identical to :func:`_neighbors_at`: at a
+    frontier node X, for each edge of an allowed type, walk to the
+    downstream side declared in :data:`BLAST_DOWNSTREAM_SIDE`.
+
+    Returns a flat list of ``(cur_id, neighbor, edge)`` tuples
+    (frontier-node order preserved, within-frontier sort
+    preserved). The BFS loop in :func:`compute_blast_radius` groups
+    these by ``cur_id`` to assemble each BFS layer.
+    """
+    if not frontier:
+        return []
+
+    # Batched edges from + to across the entire frontier. We pass the
+    # edge_types whitelist to the batched helper so the SQL / Python
+    # path applies the same filter as the per-node path. The result
+    # is keyed by node id and the order is stable per the contract
+    # of batched_edges_lookup.
+    types_list = list(edge_types_set)
+    from_map = batched_edges_lookup(
+        reader.store, frontier, direction="from", edge_types=types_list,
+    )
+    to_map = batched_edges_lookup(
+        reader.store, frontier, direction="to", edge_types=types_list,
+    )
+
+    # Collect every candidate neighbor id for one batched get_node.
+    neighbor_ids: set[str] = set()
+    per_node_from: dict[str, list[GraphEdge]] = {}
+    per_node_to: dict[str, list[GraphEdge]] = {}
+    for cur_id in frontier:
+        candidates: list[GraphEdge] = []
+        # Walk edges_from: cur is the from-side. Walk to to iff
+        # downstream side is "to".
+        for edge in from_map.get(cur_id, []):
+            ds = BLAST_DOWNSTREAM_SIDE.get(edge.edge_type)
+            if ds is None:
+                continue
+            if ds != "to":
+                continue
+            candidates.append(edge)
+            neighbor_ids.add(edge.to_node_id)
+        # Walk edges_to: cur is the to-side. Walk to from iff
+        # downstream side is "from".
+        for edge in to_map.get(cur_id, []):
+            ds = BLAST_DOWNSTREAM_SIDE.get(edge.edge_type)
+            if ds is None:
+                continue
+            if ds != "from":
+                continue
+            candidates.append(edge)
+            neighbor_ids.add(edge.from_node_id)
+        # Stable per-frontier-node sort matches the per-node path.
+        candidates.sort(key=lambda e: (e.edge_id, _other_id(e, cur_id)))
+        per_node_from[cur_id] = candidates  # type: ignore[assignment]
+        per_node_to[cur_id] = []  # placeholder; not used after merge
+
+    # Resolve neighbor nodes in a single batched call.
+    nodes_by_id: dict[str, GraphNode] = (
+        batched_nodes_lookup(reader.store, sorted(neighbor_ids))
+        if neighbor_ids
+        else {}
+    )
+
+    # Emit flat list in frontier order, with per-frontier-node order
+    # preserved.
+    out: list[tuple[str, GraphNode, GraphEdge]] = []
+    for cur_id in frontier:
+        for edge in per_node_from[cur_id]:
+            other_id = _other_id(edge, cur_id)
+            other = nodes_by_id.get(other_id)
+            if other is not None:
+                out.append((cur_id, other, edge))
+    return out
+
+
+def _other_id(edge: GraphEdge, cur_id: str) -> str:
+    """Return the node id on the side of ``edge`` opposite ``cur_id``."""
+    if edge.from_node_id == cur_id:
+        return edge.to_node_id
+    if edge.to_node_id == cur_id:
+        return edge.from_node_id
+    # Defensive fallback (edge does not touch cur_id): pick from.
+    return edge.from_node_id
+
+
 def _bucket_visited(
     visited: list[GraphNode],
 ) -> tuple[list[str], list[str], list[str], dict[str, int]]:
@@ -371,30 +477,42 @@ def compute_blast_radius(
     depth_reached: int = 0
     truncated: bool = False
 
+    # Phase 4 Task 2B: BatchReader wraps the store so each BFS
+    # layer issues one batched edges_from + one batched edges_to
+    # + one batched nodes query instead of N+M per-node round-trips.
+    # cache_size=0 disables the per-instance memoization: the win
+    # is from batching, not memoization, and a single BFS does not
+    # revisit the same frontier anyway.
+    reader = BatchReader(store, cache_size=0)
+
     for depth in range(1, max_depth + 1):
         next_frontier: list[str] = []
         layer_nodes: list[str] = []
-        for cur_id in frontier:
-            for neighbor, edge in _neighbors_at(
-                store, cur_id, edge_types_set
+        # Batched layer-level neighbor lookup. Emits a flat list of
+        # (cur_id, neighbor, edge) in frontier order; per-frontier
+        # order is stable (matches the per-node _neighbors_at
+        # contract: sorted by (edge_id, neighbor_id)).
+        layer_pairs = _neighbors_for_frontier(
+            reader, frontier, edge_types_set
+        )
+        for cur_id, neighbor, edge in layer_pairs:
+            if neighbor.node_id in visited_ids:
+                continue
+            if (
+                max_nodes is not None
+                and len(visited_nodes) >= max_nodes
             ):
-                if neighbor.node_id in visited_ids:
-                    continue
-                if (
-                    max_nodes is not None
-                    and len(visited_nodes) >= max_nodes
-                ):
-                    truncated = True
-                    break
-                visited_ids.add(neighbor.node_id)
-                visited_nodes.append(neighbor)
-                visited_edges.append(
-                    (edge.edge_id, edge.from_node_id, edge.to_node_id)
-                )
-                layer_nodes.append(neighbor.node_id)
-                next_frontier.append(neighbor.node_id)
-            if truncated:
+                truncated = True
                 break
+            visited_ids.add(neighbor.node_id)
+            visited_nodes.append(neighbor)
+            visited_edges.append(
+                (edge.edge_id, edge.from_node_id, edge.to_node_id)
+            )
+            layer_nodes.append(neighbor.node_id)
+            next_frontier.append(neighbor.node_id)
+        if truncated:
+            break
         if not layer_nodes:
             break
         layered[depth] = layer_nodes

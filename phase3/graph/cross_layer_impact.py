@@ -114,6 +114,11 @@ from typing import Literal, Protocol
 
 from phase3.datamodel.graph import EdgeType, GraphEdge, GraphNode, NodeType
 from phase3.graph.in_memory_store import GraphStore
+from phase3.graph.optimization import (
+    BatchReader,
+    batched_edges_lookup,
+    batched_nodes_lookup,
+)
 
 
 class _GraphStoreLike(Protocol):
@@ -349,6 +354,84 @@ def _neighbors_at(
     return candidates
 
 
+def _neighbors_for_frontier(
+    reader: BatchReader,
+    frontier: list[str],
+    edge_types_set: set[EdgeType],
+    target_side_table: dict[EdgeType, Literal["from", "to"]],
+) -> list[tuple[str, GraphNode, GraphEdge]]:
+    """Layer-level batched equivalent of the per-node ``_neighbors_at``.
+
+    Returns a flat list of ``(cur_id, neighbor, edge)`` triples in
+    the same order the per-node path would have produced: grouped
+    by ``cur_id`` in ``frontier`` order, and within each group
+    sorted by ``(edge.edge_id, neighbor.node_id)``.
+
+    Strategy
+    --------
+    1. One ``batched_edges_lookup(reader.store, frontier,
+       direction="both", edge_types=edge_types_set)`` collapses
+       the N+M per-node edges calls into one (or two for SQLite)
+       SQL round-trips.
+    2. Apply the per-edge-type ``target_side_table`` filter
+       (``target == "to"`` ⇒ move to to-side; ``target == "from"``
+       ⇒ move to from-side) and collect the surviving
+       ``(cur_id, other_id, edge)`` triples.
+    3. One ``batched_nodes_lookup(reader.store, other_ids)``
+       collapses the per-neighbor ``get_node`` calls into one
+       SQL round-trip.
+    4. Emit ``(cur_id, neighbor, edge)`` in frontier order with
+       per-group ``(edge_id, neighbor_id)`` sort, matching the
+       per-node contract byte-for-byte.
+    """
+    if not frontier:
+        return []
+
+    # 1. Batched edges fetch for the whole frontier.
+    edges_by_node = batched_edges_lookup(
+        reader.store, frontier, direction="both", edge_types=edge_types_set
+    )
+
+    # 2. Apply per-edge-type direction policy in Python; group
+    #    (edge, other_id) pairs by cur_id, in frontier order.
+    grouped: dict[str, list[tuple[GraphEdge, str]]] = {nid: [] for nid in frontier}
+    for cur_id in frontier:
+        for edge in edges_by_node.get(cur_id, []):
+            target = target_side_table.get(edge.edge_type)
+            if target is None:
+                continue
+            if edge.from_node_id == cur_id:
+                if target != "to":
+                    continue
+                other_id = edge.to_node_id
+            elif edge.to_node_id == cur_id:
+                if target != "from":
+                    continue
+                other_id = edge.from_node_id
+            else:
+                continue
+            grouped[cur_id].append((edge, other_id))
+
+    # 3. One batched node lookup for the union of other_ids.
+    all_other_ids: list[str] = []
+    for cur_id in frontier:
+        for _edge, other_id in grouped[cur_id]:
+            all_other_ids.append(other_id)
+    nodes_by_id = batched_nodes_lookup(reader.store, all_other_ids)
+
+    # 4. Emit in frontier order with per-group (edge_id, other_id) sort.
+    out: list[tuple[str, GraphNode, GraphEdge]] = []
+    for cur_id in frontier:
+        per_cur = grouped[cur_id]
+        per_cur.sort(key=lambda t: (t[0].edge_id, t[1]))
+        for edge, other_id in per_cur:
+            neighbor = nodes_by_id.get(other_id)
+            if neighbor is None:
+                continue
+            out.append((cur_id, neighbor, edge))
+    return out
+
+
 def _bfs_one_direction(
     store: _GraphStoreLike,
     start_node_id: str,
@@ -370,6 +453,14 @@ def _bfs_one_direction(
     Returns ``(visited_nodes, visited_edges, layered, truncated,
     depth_reached, warnings)``. ``visited_nodes`` is in BFS
     discovery order, excluding ``start_node_id``.
+
+    Implementation note
+    -------------------
+    Uses layer-level batched edges/nodes lookups via
+    :class:`phase3.graph.optimization.BatchReader` so each BFS
+    layer collapses to 1-2 SQL round-trips instead of N+M
+    per-node calls. Per-edge-type direction policy is applied
+    in Python, matching the per-node contract byte-for-byte.
     """
     warnings: list[str] = []
     visited_ids: set[str] = {start_node_id}
@@ -380,30 +471,34 @@ def _bfs_one_direction(
     depth_reached: int = 0
     truncated: bool = False
 
+    # BatchReader for layer-level lookups. cache_size=0 because
+    # a single BFS does not revisit frontiers.
+    reader = BatchReader(store, cache_size=0)
+
     for depth in range(1, max_depth + 1):
         next_frontier: list[str] = []
         layer_nodes: list[str] = []
-        for cur_id in frontier:
-            for neighbor, edge in _neighbors_at(
-                store, cur_id, edge_types_set, target_side_table
+        # Layer-level batched fetch: one edges query + one nodes
+        # query for the whole frontier, regardless of frontier size.
+        layer_pairs = _neighbors_for_frontier(
+            reader, frontier, edge_types_set, target_side_table
+        )
+        for cur_id, neighbor, edge in layer_pairs:
+            if neighbor.node_id in visited_ids:
+                continue
+            if (
+                max_nodes is not None
+                and len(visited_nodes) >= max_nodes
             ):
-                if neighbor.node_id in visited_ids:
-                    continue
-                if (
-                    max_nodes is not None
-                    and len(visited_nodes) >= max_nodes
-                ):
-                    truncated = True
-                    break
-                visited_ids.add(neighbor.node_id)
-                visited_nodes.append(neighbor)
-                visited_edges.append(
-                    (edge.edge_id, edge.from_node_id, edge.to_node_id)
-                )
-                layer_nodes.append(neighbor.node_id)
-                next_frontier.append(neighbor.node_id)
-            if truncated:
+                truncated = True
                 break
+            visited_ids.add(neighbor.node_id)
+            visited_nodes.append(neighbor)
+            visited_edges.append(
+                (edge.edge_id, edge.from_node_id, edge.to_node_id)
+            )
+            layer_nodes.append(neighbor.node_id)
+            next_frontier.append(neighbor.node_id)
         if not layer_nodes:
             break
         layered[depth] = layer_nodes

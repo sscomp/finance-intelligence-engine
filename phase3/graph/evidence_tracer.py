@@ -52,6 +52,11 @@ from typing import Literal
 
 from phase3.datamodel.graph import EdgeType, GraphEdge, GraphNode, NodeType
 from phase3.graph.in_memory_store import GraphStore
+from phase3.graph.optimization import (
+    BatchReader,
+    batched_edges_lookup,
+    batched_nodes_lookup,
+)
 
 
 # Edge types that are evidence-relevant (i.e. trace away from the score).
@@ -364,22 +369,79 @@ class EvidenceTracer:
         edge_types_set: set[EdgeType],
         direction: Literal["upstream", "downstream"],
     ) -> tuple[bool, str | None]:
-        """Run the BFS. Returns (truncated, depth_cap_warning)."""
+        """Run the BFS. Returns (truncated, depth_cap_warning).
+
+        Implementation note
+        -------------------
+        Operates layer-by-layer instead of node-by-node so each
+        BFS layer collapses to 1-2 batched edges/nodes lookups
+        (via :class:`phase3.graph.optimization.BatchReader`)
+        instead of N+M per-node SQL calls. The BFS discovery
+        order is preserved by the layer-by-layer structure: the
+        order list records nodes in the same level-order the
+        per-node BFS would have produced.
+
+        ``max_depth`` semantics preserved:
+            - depth=0 is the start node (not visited by the BFS).
+            - depth=k hops means the start -> ... -> node walks
+              in k edges. A node at cur_depth=k is one more hop
+              from a node at cur_depth=k-1.
+            - When ``cur_depth >= max_depth`` the depth_cap
+              warning is recorded once and the walk stops
+              expanding this layer.
+        """
         truncated = False
         depth_cap_warning: str | None = None
-        while frontier:
-            cur_id, cur_depth = frontier.pop(0)
-            if cur_depth >= max_depth:
-                # At the depth cap; record the warning once.
-                if depth_cap_warning is None:
-                    depth_cap_warning = (
-                        f"max_depth={max_depth} reached; some nodes may "
-                        "have unexpanded neighbors"
-                    )
-                    truncated = True
-                continue
-            neighbors = self._neighbors(cur_id, edge_types_set, direction)
-            for neighbor, edge in neighbors:
+        target_side_table = (
+            UPSTREAM_SIDE if direction == "upstream" else DOWNSTREAM_SIDE
+        )
+        # BatchReader for layer-level lookups. cache_size=0
+        # because a single BFS does not revisit frontiers.
+        reader = BatchReader(self._store, cache_size=0)
+
+        # Snapshot the initial frontier so we can process it
+        # layer-by-layer while preserving visit order.
+        current_layer: list[tuple[str, int]] = list(frontier)
+        # Tracked separately: nodes whose cur_depth >= max_depth
+        # are recorded as "depth cap" warnings (once) and skipped
+        # from expansion, but they DO count as discovered (the
+        # per-node path does the same — they remain in `order`).
+        depth_capped_nodes: set[str] = set()
+
+        while current_layer:
+            next_layer: list[tuple[str, int]] = []
+            # Partition the current layer into two groups: nodes
+            # to expand (cur_depth < max_depth) and nodes that
+            # have hit the depth cap.
+            to_expand: list[tuple[str, int]] = []
+            for cur_id, cur_depth in current_layer:
+                if cur_depth >= max_depth:
+                    if depth_cap_warning is None:
+                        depth_cap_warning = (
+                            f"max_depth={max_depth} reached; some nodes "
+                            "may have unexpanded neighbors"
+                        )
+                        truncated = True
+                    depth_capped_nodes.add(cur_id)
+                    continue
+                to_expand.append((cur_id, cur_depth))
+            if not to_expand:
+                break
+            expand_ids: list[str] = [nid for nid, _ in to_expand]
+            # One batched edges + one batched nodes fetch for the
+            # whole expansion layer. The per-edge-type direction
+            # policy is applied in Python to match the per-node
+            # contract byte-for-byte.
+            layer_pairs = self._neighbors_for_frontier(
+                reader, expand_ids, edge_types_set,
+                target_side_table, direction,
+            )
+            # Map each frontier node id to its depth once (O(N)),
+            # to avoid a linear lookup per visited neighbor.
+            depth_by_cur: dict[str, int] = {
+                nid: d for nid, d in to_expand
+            }
+            for cur_id, neighbor, edge in layer_pairs:
                 if neighbor.node_id in visited:
                     continue
                 if max_nodes is not None and len(order) >= max_nodes:
@@ -388,7 +450,16 @@ class EvidenceTracer:
                 visited.add(neighbor.node_id)
                 order.append(neighbor)
                 traversed_edges.append(edge)
-                frontier.append((neighbor.node_id, cur_depth + 1))
+                cur_depth = depth_by_cur[cur_id]
+                next_layer.append((neighbor.node_id, cur_depth + 1))
+            if not next_layer:
+                break
+            # Build the next current_layer preserving insertion
+            # order. (The per-node BFS also appends to a flat
+            # queue in the order it visits nodes, so this is the
+            # same level-order traversal.)
+            current_layer = next_layer
+
         return truncated, depth_cap_warning
 
     def _neighbors(
@@ -397,7 +468,9 @@ class EvidenceTracer:
         edge_types_set: set[EdgeType],
         direction: Literal["upstream", "downstream"],
     ) -> list[tuple[GraphNode, GraphEdge]]:
-        """Return the (neighbor, edge) pairs to traverse from ``cur_id``.
+        """Per-node helper — kept for backwards-compatibility and for
+        any single-node caller. The BFS now uses the layer-level
+        :meth:`_neighbors_for_frontier` for batched lookups.
 
         Per-edge-type direction handling: at each hop, the tracer
         inspects each edge of an allowed type and decides which side
@@ -467,6 +540,102 @@ class EvidenceTracer:
         candidates.sort(key=lambda ne: (ne[1].edge_id, ne[0].node_id))
         return candidates
 
+    def _neighbors_for_frontier(
+        self,
+        reader: BatchReader,
+        frontier_ids: list[str],
+        edge_types_set: set[EdgeType],
+        target_side_table: dict[EdgeType, Literal["from", "to"]],
+        direction: Literal["upstream", "downstream"],
+    ) -> list[tuple[str, GraphNode, GraphEdge]]:
+        """Layer-level batched equivalent of the per-node ``_neighbors``.
+
+        Returns ``(cur_id, neighbor, edge)`` triples in the same
+        order the per-node path would have produced: grouped by
+        ``cur_id`` in ``frontier_ids`` order, within each group
+        sorted by ``(edge.edge_id, neighbor.node_id)``.
+
+        Strategy
+        --------
+        1. One ``batched_edges_lookup(reader.store, frontier_ids,
+           direction="both", edge_types=edge_types_set)`` collapses
+           the N+M per-node edges calls into one (or two for SQLite)
+           SQL round-trips.
+        2. Apply the per-edge-type ``target_side_table`` +
+           ``direction`` filter (matches the per-node ``_neighbors``
+           should_walk decision byte-for-byte) and collect the
+           surviving ``(cur_id, other_id, edge)`` triples.
+        3. One ``batched_nodes_lookup(reader.store, other_ids)``
+           collapses the per-neighbor ``get_node`` calls into one
+           SQL round-trip.
+        4. Emit in frontier order with per-group
+           ``(edge_id, neighbor_id)`` sort.
+        """
+        if not frontier_ids:
+            return []
+
+        # 1. Batched edges fetch.
+        edges_by_node = batched_edges_lookup(
+            reader.store, frontier_ids,
+            direction="both", edge_types=edge_types_set,
+        )
+
+        # 2. Apply per-edge-type direction policy in Python;
+        #    group (edge, other_id) by cur_id, in frontier order.
+        grouped: dict[str, list[tuple[GraphEdge, str]]] = {
+            nid: [] for nid in frontier_ids
+        }
+        for cur_id in frontier_ids:
+            for edge in edges_by_node.get(cur_id, []):
+                target = target_side_table.get(edge.edge_type)
+                if target is None:
+                    continue
+                # Mirror the per-node should_walk decision:
+                # outgoing (cur is from): walk iff
+                #   (direction=="upstream"   and target=="to")   or
+                #   (direction=="downstream" and target=="from").
+                # incoming (cur is to): walk iff
+                #   (direction=="upstream"   and target=="from") or
+                #   (direction=="downstream" and target=="to").
+                if edge.from_node_id == cur_id:
+                    should_walk = (
+                        (direction == "upstream" and target == "to")
+                        or (direction == "downstream" and target == "from")
+                    )
+                    if not should_walk:
+                        continue
+                    other_id = edge.to_node_id
+                elif edge.to_node_id == cur_id:
+                    should_walk = (
+                        (direction == "upstream" and target == "from")
+                        or (direction == "downstream" and target == "to")
+                    )
+                    if not should_walk:
+                        continue
+                    other_id = edge.from_node_id
+                else:
+                    continue
+                grouped[cur_id].append((edge, other_id))
+
+        # 3. One batched node lookup.
+        all_other_ids: list[str] = []
+        for cur_id in frontier_ids:
+            for _edge, other_id in grouped[cur_id]:
+                all_other_ids.append(other_id)
+        nodes_by_id = batched_nodes_lookup(reader.store, all_other_ids)
+
+        # 4. Emit in frontier order with per-group (edge_id, other_id) sort.
+        out: list[tuple[str, GraphNode, GraphEdge]] = []
+        for cur_id in frontier_ids:
+            per_cur = grouped[cur_id]
+            per_cur.sort(key=lambda t: (t[0].edge_id, t[1]))
+            for edge, other_id in per_cur:
+                neighbor = nodes_by_id.get(other_id)
+                if neighbor is None:
+                    continue
+                out.append((cur_id, neighbor, edge))
+        return out
+
     def _compute_leaves(
         self,
         order: list[GraphNode],
@@ -483,37 +652,44 @@ class EvidenceTracer:
         For upstream: a leaf has no outgoing edges of types where
         UPSTREAM_SIDE[type] == "to" and no incoming edges of types
         where UPSTREAM_SIDE[type] == "from".
+
+        Uses a single batched edges fetch for the whole order list
+        (mirroring the BFS layer-level batching in :meth:`_bfs`).
         """
+        if not order:
+            return []
+        order_ids: list[str] = [n.node_id for n in order]
+        edges_by_node = batched_edges_lookup(
+            self._store, order_ids,
+            direction="both", edge_types=edge_types_set,
+        )
+        target_side_table = (
+            UPSTREAM_SIDE if direction == "upstream" else DOWNSTREAM_SIDE
+        )
         leaves: list[str] = []
         for n in order:
+            nid = n.node_id
             has_walk = False
-            if direction == "upstream":
-                # Would walk outgoing for types where target=="to"
-                for edge in self._store.edges_from(n.node_id):
-                    if edge.edge_type in edge_types_set and \
-                            UPSTREAM_SIDE.get(edge.edge_type) == "to":
+            for edge in edges_by_node.get(nid, []):
+                target = target_side_table.get(edge.edge_type)
+                if target is None:
+                    continue
+                # Walk iff the current node is on the side
+                # opposite the target side (i.e. walking FROM
+                # the opposite side TO the target side would
+                # continue the walk).
+                if edge.from_node_id == nid:
+                    # cur is from ⇒ would walk if target=="to"
+                    if target == "to":
                         has_walk = True
                         break
-                if not has_walk:
-                    for edge in self._store.edges_to(n.node_id):
-                        if edge.edge_type in edge_types_set and \
-                                UPSTREAM_SIDE.get(edge.edge_type) == "from":
-                            has_walk = True
-                            break
-            else:  # downstream
-                for edge in self._store.edges_from(n.node_id):
-                    if edge.edge_type in edge_types_set and \
-                            DOWNSTREAM_SIDE.get(edge.edge_type) == "to":
+                elif edge.to_node_id == nid:
+                    # cur is to ⇒ would walk if target=="from"
+                    if target == "from":
                         has_walk = True
                         break
-                if not has_walk:
-                    for edge in self._store.edges_to(n.node_id):
-                        if edge.edge_type in edge_types_set and \
-                                DOWNSTREAM_SIDE.get(edge.edge_type) == "from":
-                            has_walk = True
-                            break
             if not has_walk:
-                leaves.append(n.node_id)
+                leaves.append(nid)
         return leaves
 
     def _bucket_nodes(
