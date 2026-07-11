@@ -1,0 +1,65 @@
+#!/bin/bash
+# 產業趨勢週報 wrapper — 供 cron job 使用
+# 使用 venv 的 python 執行，輸出報告文字到 stdout
+#
+# v2026-07-11 (Phase 4 Operational A1 sibling — Weekly wrapper wiring):
+# - After industry_weekly.py succeeds, render a Phase 3 pipeline JSON + Markdown
+#   artifact to metadata/reports/artifacts/<YYYY-MM-DD>-weekly.intelligence_report.{json,md}
+# - Dry-run mode: NO production DB writes; phase3/api.py:137 has the case-insensitive
+#   macro_history.db refusal built in; pipeline-export does not touch any DB by default
+# - industry_weekly.py failure still fails the script; pipeline-export failure is explicit
+#   and non-silent (own exit code propagated)
+# - ARTIFACT_DATE can be overridden via env for deterministic testing; default uses
+#   Asia/Taipei calendar date (weekly report is delivered at 08:00 TPE every Monday)
+# - Mirrors the run.sh (Op A1 daily) pattern exactly; same stub-and-restore + explicit
+#   RC + canonical naming + TZ=Asia/Taipei + basename guard
+
+set -u  # fail on unset vars; do NOT set -e — we propagate each step's exit code explicitly
+
+source /home/ubuntu/macro-venv/bin/activate
+cd /home/ubuntu/macro-report || {
+    echo "run_weekly.sh: failed to cd to /home/ubuntu/macro-report" >&2
+    exit 5
+}
+
+# Step 1: existing industry-weekly generation. Failure must fail the script.
+python3 /home/ubuntu/macro-report/industry_weekly.py 2>&1
+INDUSTRY_RC=$?
+if [ "$INDUSTRY_RC" -ne 0 ]; then
+    echo "run_weekly.sh: industry_weekly.py failed with exit code ${INDUSTRY_RC}" >&2
+    exit "${INDUSTRY_RC}"
+fi
+
+# Step 2: Phase 3 pipeline artifact (Phase 4 Operational A1 sibling — Weekly).
+#   Reuses phase3.cli pipeline-export (dry-run by default) + the canonical
+#   report naming convention <run_label>.intelligence_report.{json,md}
+#   (phase3/pipeline/reporting.py:65). No DB writes, no scheduling.
+ARTIFACT_DATE="${ARTIFACT_DATE:-$(TZ=Asia/Taipei date +%F)}"
+ARTIFACT_DIR="/home/ubuntu/macro-report/metadata/reports/artifacts"
+
+# Defense-in-depth: refuse if the artifact dir basename is the reserved
+# production DB name. Mirrors the case-insensitive macro_history.db refusal
+# used across the Phase 3 CLI surface (phase3/api.py:137 + phase3/cli.py:642).
+ARTIFACT_BASENAME="$(basename -- "${ARTIFACT_DIR}")"
+if [ "${ARTIFACT_BASENAME,,}" = "macro_history.db" ]; then
+    echo "run_weekly.sh: REFUSING — artifact dir basename is the reserved 'macro_history.db'" >&2
+    exit 3
+fi
+
+# Create parent directory safely. Idempotent: no error if it already exists.
+mkdir -p -- "${ARTIFACT_DIR}" || {
+    echo "run_weekly.sh: failed to mkdir -p ${ARTIFACT_DIR}" >&2
+    exit 4
+}
+
+PYTHONPATH=/home/ubuntu/macro-report python3 -m phase3.cli pipeline-export \
+    --date "${ARTIFACT_DATE}" \
+    --run-label "${ARTIFACT_DATE}-weekly" \
+    --output-dir "${ARTIFACT_DIR}" 2>&1
+PIPELINE_RC=$?
+if [ "$PIPELINE_RC" -ne 0 ]; then
+    echo "run_weekly.sh: phase3 pipeline-export failed with exit code ${PIPELINE_RC}" >&2
+    exit "${PIPELINE_RC}"
+fi
+
+exit 0
