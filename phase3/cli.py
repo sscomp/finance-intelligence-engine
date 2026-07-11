@@ -1748,6 +1748,12 @@ def cmd_shadow_run(args: argparse.Namespace) -> int:
         When set, the result surfaces every decision. Default:
         only changed decisions are surfaced (unchanged count is
         still reported in the summary).
+    ``--inputs-source``
+        Replay strategy: ``structured_copy`` (default, Run 1)
+        or ``real_replay`` (Run 2 — re-executes the scorer
+        against the artifact's ``evidence_handles[*].inputs``
+        block). Old artifacts that do not carry the ``inputs``
+        block fall back to ``structured_copy`` per handle.
     ``--json``
         Emit the result JSON on stdout (default: human-readable).
     """
@@ -1794,6 +1800,7 @@ def cmd_shadow_run(args: argparse.Namespace) -> int:
         confidence_tolerance=args.confidence_tolerance,
         output_path=output_path,
         include_unchanged=args.include_unchanged,
+        inputs_source=getattr(args, "inputs_source", "structured_copy"),
     )
 
     try:
@@ -2484,6 +2491,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Surface every decision in the result (default: "
              "only changed decisions; unchanged count is "
              "still reported in the summary).",
+    )
+    p19.add_argument(
+        "--inputs-source", default="structured_copy",
+        choices=("structured_copy", "real_replay"),
+        help="Replay strategy: 'structured_copy' (default — "
+             "Run 1, replay is a copy of the baseline) or "
+             "'real_replay' (Run 2 — re-executes the scorer "
+             "against the artifact's evidence_handles[*].inputs "
+             "block and computes a real score-delta).",
     )
     p19.add_argument(
         "--output", default=None,

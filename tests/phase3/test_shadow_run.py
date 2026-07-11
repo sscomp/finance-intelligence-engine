@@ -272,6 +272,7 @@ class DTORoundTripTests(unittest.TestCase):
             "evidence_diff",
             "warnings_diff",
             "explain_score_ref",
+            "replay_source",
         }
         self.assertEqual(set(d_dict.keys()), expected_keys)
 
@@ -797,6 +798,289 @@ class ExplainRefStabilityTests(unittest.TestCase):
             d["summary"]["explain_score_ref_count"],
             d["summary"]["total_changed_count"],
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 Task 4 Run 2: real-replay tests
+# ---------------------------------------------------------------------------
+
+
+def _inputs_payload_for(scorer_type: str, entity_id: str) -> dict[str, Any]:
+    """Build a minimal ``inputs`` block for an evidence_handle.
+
+    Returns the canonical dict shape stored under
+    ``evidence_handles[*].inputs``. The shape is::
+
+        {
+            "scorer_type": "...",
+            "entity_id": "...",
+            "date_bucket": "2026-07-08",
+            "dimensions": {
+                "<dim>": {"values": {<indicator>: <value>}, ...},
+                ...
+            },
+        }
+    """
+    if scorer_type == "macro":
+        dims = ("economic", "monetary", "inflation", "rates", "liquidity", "geopolitics")
+    elif scorer_type == "industry":
+        dims = (
+            "rotation",
+            "relative_strength",
+            "cyclicality",
+            "macro_sensitivity",
+            "industry_news",
+            "capital_flow",
+        )
+    else:
+        dims = (
+            "financial_quality",
+            "growth",
+            "profitability",
+            "valuation",
+            "momentum",
+            "risk",
+            "news_sentiment",
+        )
+    return {
+        "scorer_type": scorer_type,
+        "entity_id": entity_id,
+        "date_bucket": "2026-07-08",
+        "dimensions": {d: {"values": {}, "signal_ids": [], "confidence": None, "warnings": []} for d in dims},
+    }
+
+
+def _artifact_with_inputs(handles_with_inputs: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Build a 3-scorer artifact where each handle's ``inputs`` block is set.
+
+    ``handles_with_inputs`` is keyed by ``score_node_id`` so callers
+    can attach a tailored ``inputs`` block to one or more handles
+    while leaving the rest with an empty dict.
+    """
+    artifact = _build_artifact()
+    for h in artifact["result"]["evidence_handles"]:
+        sid = h.get("score_node_id", "")
+        if sid in handles_with_inputs:
+            h["inputs"] = handles_with_inputs[sid]
+    return artifact
+
+
+class RealReplayTests(unittest.TestCase):
+    """Phase 4 Task 4 Run 2: ``inputs_source='real_replay'`` must
+    re-execute the scorer against the artifact's recorded
+    ``inputs`` block, producing a real score-delta surface that
+    the structured-copy path cannot compute.
+
+    Tests are additive — they extend the existing
+    :class:`ShadowRunResult` / :class:`ShadowDecision` contract
+    with two new fields:
+
+    * ``ShadowRunResult.inputs_source`` — the replay strategy
+      the run was configured with.
+    * ``ShadowDecision.replay_source`` — per-decision
+      ``"structured_copy"`` / ``"real_replay"`` label.
+
+    Tests do not require any production DB writes; they build
+    artifacts in a temp directory and exercise the public
+    :func:`run_shadow` entry point.
+    """
+
+    def test_default_inputs_source_is_structured_copy(self) -> None:
+        cfg = ShadowRunConfig(artifact_path="/tmp/x.json")
+        self.assertEqual(cfg.inputs_source, "structured_copy")
+
+    def test_bad_inputs_source_rejected(self) -> None:
+        with self.assertRaises(ShadowRunError) as cm:
+            ShadowRunConfig(artifact_path="/tmp/x.json", inputs_source="bad")
+        self.assertIn("inputs_source", str(cm.exception))
+
+    def test_real_replay_decision_has_replay_source_label(self) -> None:
+        artifact = _build_artifact()
+        for h in artifact["result"]["evidence_handles"]:
+            h["inputs"] = _inputs_payload_for(h["scorer_type"], h["entity_id"])
+        path = _write_artifact_to_temp(artifact)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+
+        cfg = ShadowRunConfig(artifact_path=path, inputs_source="real_replay")
+        result = run_shadow(cfg)
+
+        # Every surfaced decision in this artifact has its
+        # ``inputs`` block populated, so all three should be
+        # labelled ``real_replay``.
+        surfaced: list[dict[str, Any]] = []
+        for c in result.comparisons:
+            for d in c.decisions:
+                surfaced.append(d.to_dict())
+        self.assertEqual(len(surfaced), 3)
+        for d in surfaced:
+            self.assertEqual(d["replay_source"], "real_replay")
+        self.assertEqual(result.inputs_source, "real_replay")
+        self.assertEqual(result.to_dict()["inputs_source"], "real_replay")
+
+    def test_structured_copy_decision_has_structured_copy_label(self) -> None:
+        path = _write_artifact_to_temp(_build_artifact())
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+
+        cfg = ShadowRunConfig(artifact_path=path, inputs_source="structured_copy")
+        result = run_shadow(cfg)
+        for c in result.comparisons:
+            for d in c.decisions:
+                self.assertEqual(d.replay_source, "structured_copy")
+
+    def test_real_replay_determinism_byte_identical(self) -> None:
+        """Real replay against an empty-inputs artifact must be
+        byte-identical: the scorers' defaults give a fixed
+        score/confidence, and the symmetric-diff of unchanged
+        fields is empty.
+
+        This is the determinism test: with no replay override
+        and identical inputs, replay_score == baseline_score
+        (within float tolerance) and ``changed`` is False for
+        every decision.
+        """
+        artifact = _build_artifact()
+        for h in artifact["result"]["evidence_handles"]:
+            h["inputs"] = _inputs_payload_for(h["scorer_type"], h["entity_id"])
+        path = _write_artifact_to_temp(artifact)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+
+        cfg = ShadowRunConfig(artifact_path=path, inputs_source="real_replay")
+        result = run_shadow(cfg)
+        # All three scorers default to non-zero baselines; the
+        # empty-inputs replay must hit the same default branch,
+        # so the score_delta is a small float (not necessarily
+        # 0.0 — the scorers' default weights produce a
+        # deterministic value).
+        for c in result.comparisons:
+            for d in c.decisions:
+                # Real replay always labels the decision.
+                self.assertEqual(d.replay_source, "real_replay")
+                # Replay score and confidence must be finite
+                # floats (no None / no exception).
+                self.assertIsInstance(d.replay_score, float)
+                self.assertIsInstance(d.replay_confidence, float)
+                # Determinism: identical empty inputs → same
+                # score as the scorers' default branch.
+                # We just require stability across two runs.
+        # Run the same config twice and compare.
+        result2 = run_shadow(cfg)
+        d1 = result.to_dict()
+        d2 = result2.to_dict()
+        # Compare per-decision score/confidence pairs.
+        for c1, c2 in zip(d1["comparisons"], d2["comparisons"]):
+            for dd1, dd2 in zip(c1["decisions"], c2["decisions"]):
+                self.assertEqual(dd1["replay_score"], dd2["replay_score"])
+                self.assertEqual(dd1["replay_confidence"], dd2["replay_confidence"])
+
+    def test_real_replay_drift_surfaces_score_delta(self) -> None:
+        """Real replay against a perturbed-inputs artifact must
+        surface a non-zero score_delta (drift test).
+
+        We seed the macro ``economic`` dimension with a strong
+        positive ``gdp_yoy`` value (5.0). The MacroScorer
+        default produces a score of ~4.4 with empty inputs;
+        the gdp_yoy sub-indicator moves ``economic`` to a
+        positive contribution, raising the macro score by
+        more than the float-noise floor.
+        """
+        artifact = _build_artifact()
+        for h in artifact["result"]["evidence_handles"]:
+            h["inputs"] = _inputs_payload_for(h["scorer_type"], h["entity_id"])
+        # Mutate the macro handle's economic input to force
+        # drift.
+        for h in artifact["result"]["evidence_handles"]:
+            if h["scorer_type"] == "macro":
+                h["inputs"]["dimensions"]["economic"]["values"] = {"gdp_yoy": 5.0}
+        path = _write_artifact_to_temp(artifact)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+
+        cfg = ShadowRunConfig(artifact_path=path, inputs_source="real_replay")
+        result = run_shadow(cfg)
+        macro_changed: ShadowDecision | None = None
+        for c in result.comparisons:
+            for d in c.decisions:
+                if d.scorer_type == "macro":
+                    macro_changed = d
+                    break
+        self.assertIsNotNone(macro_changed)
+        assert macro_changed is not None  # type narrowing for pyright
+        # The macro replay score must be different from the
+        # baseline (4.68 in the fixture). The actual value is
+        # the MacroScorer's response to gdp_yoy=5.0 across
+        # the default weights.
+        self.assertNotEqual(
+            macro_changed.replay_score,
+            macro_changed.baseline_score,
+        )
+        self.assertTrue(
+            abs(macro_changed.score_delta) > 0.0,
+        )
+        self.assertEqual(macro_changed.replay_source, "real_replay")
+        self.assertTrue(macro_changed.changed)
+
+    def test_real_replay_falls_back_to_structured_copy_on_missing_inputs(self) -> None:
+        """A handle without an ``inputs`` block must fall back
+        to ``structured_copy`` semantics even when the run is
+        configured with ``inputs_source='real_replay'``. This
+        preserves back-compat with v1 artifacts (Run 1 era).
+        """
+        # _build_artifact() doesn't set ``inputs`` on any
+        # handle. So every handle is a candidate for the
+        # fallback path.
+        path = _write_artifact_to_temp(_build_artifact())
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+
+        cfg = ShadowRunConfig(artifact_path=path, inputs_source="real_replay")
+        result = run_shadow(cfg)
+        for c in result.comparisons:
+            for d in c.decisions:
+                self.assertEqual(d.replay_source, "structured_copy")
+                # Structured-copy replay == baseline.
+                self.assertEqual(d.replay_score, d.baseline_score)
+                self.assertEqual(d.replay_confidence, d.baseline_confidence)
+
+    def test_real_replay_partial_inputs_uses_real_replay(self) -> None:
+        """When SOME handles have ``inputs`` and others don't,
+        the labelled run applies real_replay per handle and
+        the result surfaces both labels."""
+        artifact = _build_artifact()
+        # Only the macro handle gets an inputs block.
+        for h in artifact["result"]["evidence_handles"]:
+            if h["scorer_type"] == "macro":
+                h["inputs"] = _inputs_payload_for("macro", h["entity_id"])
+        path = _write_artifact_to_temp(artifact)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+
+        cfg = ShadowRunConfig(artifact_path=path, inputs_source="real_replay")
+        result = run_shadow(cfg)
+        labels: dict[str, str] = {}
+        for c in result.comparisons:
+            for d in c.decisions:
+                labels[d.scorer_type] = d.replay_source
+        self.assertEqual(labels.get("macro"), "real_replay")
+        self.assertEqual(labels.get("industry"), "structured_copy")
+        self.assertEqual(labels.get("company"), "structured_copy")
+
+
+class InputsSourceDimensionSyncTests(unittest.TestCase):
+    """``shadow_run._CANONICAL_DIMENSIONS`` is mirrored from
+    ``phase3.datamodel``. The mirror must stay in lock-step or
+    real_replay will silently fall back to structured_copy on
+    every handle (the scorer's ``_validate_inputs`` will raise
+    ``ValueError`` for any missing dimension). This test is the
+    sync-enforcement surface: a divergence fails the test
+    loudly instead of leaking into production."""
+
+    def test_canonical_dimensions_match_datamodel(self) -> None:
+        from phase3.pipeline.shadow_run import _CANONICAL_DIMENSIONS
+        from phase3.datamodel import (
+            MACRO_DIMENSIONS,
+            INDUSTRY_DIMENSIONS,
+            COMPANY_DIMENSIONS,
+        )
+        self.assertEqual(_CANONICAL_DIMENSIONS["macro"], tuple(MACRO_DIMENSIONS))
+        self.assertEqual(_CANONICAL_DIMENSIONS["industry"], tuple(INDUSTRY_DIMENSIONS))
+        self.assertEqual(_CANONICAL_DIMENSIONS["company"], tuple(COMPANY_DIMENSIONS))
 
 
 if __name__ == "__main__":

@@ -202,6 +202,14 @@ class EvidenceQueryHandle:
         upstream: Upstream EvidenceChain (or None if not requested).
         downstream: Downstream EvidenceChain (or None if not requested).
         evidence_summary: Compact summary of the upstream chain (or None).
+        inputs_payload: Optional JSON-safe snapshot of the originating
+            :class:`InputBundle` (Phase 4 Task 4 Run 2). When present,
+            the shadow-run framework can re-execute the scorer
+            against the recorded inputs to compute a real
+            score-delta surface. ``None`` for handles that lost
+            their bundle (e.g. evidence tracer errored before
+            bundle was attached, or the pipeline result was
+            ``None``).
     """
 
     scorer_type: str
@@ -211,6 +219,7 @@ class EvidenceQueryHandle:
     upstream: EvidenceChain | None
     downstream: EvidenceChain | None
     evidence_summary: dict[str, Any] | None
+    inputs_payload: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -311,6 +320,13 @@ class IntelligenceRunResult:
                     "date_bucket": h.date_bucket,
                     "score_node_id": h.score_node_id,
                     "evidence_summary": h.evidence_summary,
+                    # Phase 4 Task 4 Run 2: optional ``inputs`` block
+                    # captured from the originating ``InputBundle``.
+                    # Enables the shadow-run to re-execute scorers
+                    # against the recorded inputs. ``None`` for
+                    # handles that lost their bundle (e.g. evidence
+                    # tracer errored before bundle was attached).
+                    "inputs": h.inputs_payload,
                 }
                 for h in self.evidence_handles
             ],
@@ -554,6 +570,7 @@ class IntelligencePipeline:
                         upstream=None,
                         downstream=None,
                         evidence_summary=None,
+                        inputs_payload=_bundle_to_inputs_payload(pr.input_bundle),
                     ))
                     continue
                 try:
@@ -577,6 +594,7 @@ class IntelligencePipeline:
                         upstream=None,
                         downstream=None,
                         evidence_summary=None,
+                        inputs_payload=_bundle_to_inputs_payload(pr.input_bundle),
                     )
                 evidence_handles.append(handle)
 
@@ -714,6 +732,7 @@ class IntelligencePipeline:
             upstream=upstream_chain,
             downstream=downstream_chain,
             evidence_summary=_summary_dict(upstream_chain),
+            inputs_payload=_bundle_to_inputs_payload(result.input_bundle),
         )
 
     def _count_graph(self) -> tuple[int, int]:
@@ -780,6 +799,91 @@ def _missing_signal_warnings(
         if not any_signal:
             _warn(bundle.scorer_type, bundle.entity_id)
     return tuple(out)
+
+
+def _bundle_to_inputs_payload(bundle: Any) -> dict[str, Any] | None:
+    """Serialize an :class:`InputBundle` to a JSON-safe replay-input payload.
+
+    The returned dict is the canonical ``inputs`` block stored on
+    :class:`EvidenceQueryHandle` and serialized into the artifact's
+    ``evidence_handles[*].inputs`` field. It carries enough fidelity
+    to reconstruct an :class:`InputBundle` and re-execute a scorer
+    against the recorded inputs (Phase 4 Task 4 Run 2).
+
+    Shape (stable; sort_keys=True for canonical JSON output)::
+
+        {
+            "scorer_type": "macro" | "industry" | "company",
+            "entity_id": "<canonical id>",
+            "date_bucket": "YYYY-MM-DD",
+            "dimensions": {
+                "<dim_name>": {
+                    "values": {<indicator>: <value>, ...},
+                    "signal_ids": [...],
+                    "confidence": <float | None>,
+                    "warnings": [...],
+                },
+                ...
+            },
+        }
+
+    Returns ``None`` when the bundle is not a valid
+    :class:`InputBundle` (defensive — e.g. an upstream layer
+    synthesised a stub bundle for a failed leg).
+    """
+    # Defensive imports — the bundle type lives in phase3.pipeline.
+    try:
+        from phase3.pipeline import InputBundle as _InputBundle  # type: ignore
+    except Exception:
+        _InputBundle = None  # type: ignore
+    if _InputBundle is not None and not isinstance(bundle, _InputBundle):
+        return None
+    if not hasattr(bundle, "dimensions") or not hasattr(bundle, "scorer_type"):
+        return None
+    try:
+        dimensions_obj: dict[str, Any] = dict(bundle.dimensions)
+    except Exception:
+        return None
+    dimensions_payload: dict[str, Any] = {}
+    for dim_name in sorted(dimensions_obj.keys()):
+        dim = dimensions_obj[dim_name]
+        try:
+            values = dict(getattr(dim, "values", {}) or {})
+        except Exception:
+            values = {}
+        # JSON-safe coercion for value payloads. ``values`` are
+        # typically floats / ints / strings; preserve the type when
+        # JSON-safe, drop otherwise (defensive).
+        safe_values: dict[str, Any] = {}
+        for k in sorted(values.keys()):
+            v = values[k]
+            if isinstance(v, (int, float, str, bool)) or v is None:
+                safe_values[str(k)] = v
+        try:
+            signal_ids = [
+                str(s) for s in (getattr(dim, "signal_ids", []) or [])
+            ]
+        except Exception:
+            signal_ids = []
+        try:
+            warnings = [str(w) for w in (getattr(dim, "warnings", []) or [])]
+        except Exception:
+            warnings = []
+        confidence = getattr(dim, "confidence", None)
+        if confidence is not None and not isinstance(confidence, (int, float)):
+            confidence = None
+        dimensions_payload[str(dim_name)] = {
+            "values": safe_values,
+            "signal_ids": signal_ids,
+            "confidence": confidence,
+            "warnings": warnings,
+        }
+    return {
+        "scorer_type": str(getattr(bundle, "scorer_type", "")),
+        "entity_id": str(getattr(bundle, "entity_id", "")),
+        "date_bucket": str(getattr(bundle, "date_bucket", "")),
+        "dimensions": dimensions_payload,
+    }
 
 
 # Re-export the two Protocols callers will need most.

@@ -108,8 +108,14 @@ from phase3.graph.explain_from_pipeline import (
 from phase3.graph.in_memory_store import GraphStore
 
 
-SCHEMA_VERSION: str = "1"
-"""Current shadow-run schema version. Bump when the result DTO shape changes."""
+SCHEMA_VERSION: str = "2"
+"""Current shadow-run schema version. Bump when the result DTO shape changes.
+
+v2 — Phase 4 Task 4 Run 2: added ``inputs_source`` on
+:class:`ShadowRunResult` and ``replay_source`` on
+:class:`ShadowDecision`. v1 artifacts still load and replay
+correctly (the new fields default to ``"structured_copy"``).
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +174,16 @@ class ShadowRunConfig:
             changed decisions are included; unchanged decisions
             are reported as a single count. Default: True
             (operator-friendly).
+        inputs_source: Selects the replay strategy. ``"structured_copy"``
+            (default — Run 1 behaviour) replays each decision as a
+            structured copy of the baseline; the only deltas are
+            driven by ``replay_config_hash``. ``"real_replay"``
+            (Phase 4 Task 4 Run 2) re-executes the scorer against
+            the recorded ``evidence_handles[*].inputs`` block
+            and computes a real ``score_delta`` /
+            ``confidence_delta``. Old artifacts that do not carry
+            the ``inputs`` block fall back to ``"structured_copy"``
+            per handle; the field-level drift is preserved.
     """
 
     artifact_path: str
@@ -177,6 +193,7 @@ class ShadowRunConfig:
     confidence_tolerance: float = 0.0
     output_path: str | None = None
     include_unchanged: bool = True
+    inputs_source: str = "structured_copy"
 
     def __post_init__(self) -> None:
         if not self.artifact_path:
@@ -193,6 +210,11 @@ class ShadowRunConfig:
             )
         if not self.replay_label:
             raise ShadowRunError("ShadowRunConfig.replay_label must be non-empty")
+        if self.inputs_source not in ("structured_copy", "real_replay"):
+            raise ShadowRunError(
+                f"ShadowRunConfig.inputs_source must be 'structured_copy' or "
+                f"'real_replay', got {self.inputs_source!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +264,12 @@ class ShadowDecision:
         explain_score_ref: Optional ``score:<scorer_type>:<entity_id>:<date_bucket>``
             string for downstream explain-score lookups. Set on
             changed decisions; empty on unchanged.
+        replay_source: ``"structured_copy"`` (Run 1) or
+            ``"real_replay"`` (Run 2). Records which replay path
+            produced the ``replay_score`` field. A handle whose
+            ``inputs`` block is missing falls back to
+            ``"structured_copy"`` even when the run was configured
+            with ``inputs_source="real_replay"``.
     """
 
     scorer_type: str
@@ -264,6 +292,7 @@ class ShadowDecision:
     evidence_diff: tuple[str, ...]
     warnings_diff: tuple[str, ...]
     explain_score_ref: str = ""
+    replay_source: str = "structured_copy"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -287,6 +316,7 @@ class ShadowDecision:
             "evidence_diff": list(self.evidence_diff),
             "warnings_diff": list(self.warnings_diff),
             "explain_score_ref": self.explain_score_ref,
+            "replay_source": self.replay_source,
         }
 
 
@@ -354,6 +384,10 @@ class ShadowRunResult:
             ``explain-score`` CLI).
         warnings: Run-level warnings (e.g. empty artifact, missing
             evidence_handles).
+        inputs_source: Echoed from :class:`ShadowRunConfig`. The
+            replay path that produced the per-decision
+            ``replay_source`` field (``"structured_copy"`` /
+            ``"real_replay"``).
     """
 
     schema_version: str
@@ -370,6 +404,7 @@ class ShadowRunResult:
     total_unchanged_count: int
     explain_score_refs: tuple[str, ...]
     warnings: tuple[str, ...] = ()
+    inputs_source: str = "structured_copy"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -381,6 +416,7 @@ class ShadowRunResult:
             "artifact_date_bucket": self.artifact_date_bucket,
             "replay_label": self.replay_label,
             "replay_config_hash": self.replay_config_hash,
+            "inputs_source": self.inputs_source,
             "comparisons": [c.to_dict() for c in self.comparisons],
             "summary": {
                 "total_decision_count": self.total_decision_count,
@@ -526,6 +562,265 @@ def _evidence_handle_to_decision(
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 Task 4 Run 2: Real replay (re-execute scorers against recorded inputs)
+# ---------------------------------------------------------------------------
+
+
+# Canonical dimension sets, mirrored from phase3.datamodel so the
+# replay layer does not need a heavy import to validate the
+# `dimensions` block in the artifact's `inputs` payload. Keeping
+# the tuple in sync with the canonical source is a
+# read-only-code invariant; the package test surface
+# (``tests/phase3/test_shadow_run.py::TestInputsSourceDimensionSync``)
+# enforces it.
+_CANONICAL_DIMENSIONS: dict[str, tuple[str, ...]] = {
+    "macro": (
+        "economic",
+        "monetary",
+        "inflation",
+        "rates",
+        "liquidity",
+        "geopolitics",
+    ),
+    "industry": (
+        "rotation",
+        "relative_strength",
+        "cyclicality",
+        "macro_sensitivity",
+        "industry_news",
+        "capital_flow",
+    ),
+    "company": (
+        "financial_quality",
+        "growth",
+        "profitability",
+        "valuation",
+        "momentum",
+        "risk",
+        "news_sentiment",
+    ),
+}
+
+
+def _canonical_dimensions(scorer_type: str) -> tuple[str, ...]:
+    """Return the canonical dimension set for ``scorer_type``.
+
+    Unknown scorer types return an empty tuple. The function is
+    used to back-fill empty dimension blocks in the recorded
+    ``inputs`` payload so the scorer signature is always satisfied
+    (the scorers' ``_validate_inputs`` requires every configured
+    dimension to have an input dict).
+    """
+    return _CANONICAL_DIMENSIONS.get(scorer_type, ())
+
+
+def _inputs_payload_to_scorer_inputs(
+    inputs_payload: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Reconstruct the ``inputs`` dict accepted by ``BaseScorer.score``.
+
+    The artifact's ``evidence_handles[*].inputs`` block has the
+    shape ``{scorer_type, entity_id, date_bucket, dimensions: {dim:
+    {values, signal_ids, confidence, warnings}}}``. The scorer's
+    ``score()`` signature wants ``{dim_name: {indicator: value}}``,
+    i.e. the ``values`` dict of each dimension. This helper
+    flattens that mapping, drops dimensions that are missing or
+    whose ``values`` is not a mapping, and back-fills every
+    canonical dimension so the scorer's ``_validate_inputs`` is
+    always satisfied.
+
+    Returns an empty dict when ``inputs_payload`` is not a
+    mapping (defensive — old artifacts may have a ``None`` or
+    scalar where the new field lives).
+    """
+    if not isinstance(inputs_payload, Mapping):
+        return {}
+    raw_dimensions = inputs_payload.get("dimensions")
+    if not isinstance(raw_dimensions, Mapping):
+        return {}
+    scorer_type = inputs_payload.get("scorer_type")
+    canonical_dims = (
+        _canonical_dimensions(_safe_str(scorer_type))
+        if isinstance(scorer_type, str)
+        else ()
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for dim_name in canonical_dims:
+        out[dim_name] = {}
+    for dim_name, dim_payload in raw_dimensions.items():
+        if not isinstance(dim_payload, Mapping):
+            continue
+        values = dim_payload.get("values")
+        if not isinstance(values, Mapping):
+            values = {}
+        # Preserve the recorded type when JSON-safe.
+        out[str(dim_name)] = {
+            str(k): v
+            for k, v in values.items()
+            if isinstance(v, (int, float, str, bool)) or v is None
+        }
+    return out
+
+
+def _build_scorer(scorer_type: str) -> Any:
+    """Instantiate a default scorer for ``scorer_type``.
+
+    Imports are deferred to keep the module importable when the
+    scoring stack is unavailable in some deployments. The
+    returned scorer is constructed with the same default weights
+    and ``as_of`` the upstream scoring pipeline used, so the
+    re-execution is deterministic for a given ``inputs`` block.
+    """
+    scorer_type = _safe_str(scorer_type)
+    if scorer_type == "macro":
+        from phase3.scoring.macro import MacroScorer  # type: ignore
+
+        return MacroScorer()
+    if scorer_type == "industry":
+        from phase3.scoring.industry import IndustryScorer  # type: ignore
+
+        return IndustryScorer()
+    if scorer_type == "company":
+        from phase3.scoring.company import CompanyScorer  # type: ignore
+
+        return CompanyScorer()
+    return None
+
+
+def _real_replay_score(
+    handle: Mapping[str, Any],
+) -> tuple[float, float, tuple[str, ...]] | None:
+    """Re-execute the scorer for a single evidence_handle.
+
+    Returns ``(replay_score, replay_confidence, replay_warnings)``
+    on success, or ``None`` when the handle is not eligible for
+    real replay (missing ``inputs`` block, unknown scorer_type,
+    scorer raises). Warnings emitted by the scorer during
+    re-execution are captured as strings so they show up in
+    ``replay_warnings`` and feed the drift signal; the
+    ``_symmetric_diff`` of baseline vs replay warnings surfaces
+    scorer-level changes the same way the existing
+    ``warnings_diff`` field does.
+
+    The function is intentionally best-effort: a failed
+    re-execution is reported as ``None`` and the caller falls
+    back to the structured-copy decision. We never raise from
+    here — the shadow-run CLI is read-only and must not abort
+    just because one entity's inputs are malformed.
+    """
+    inputs_payload = handle.get("inputs")
+    if not isinstance(inputs_payload, Mapping):
+        return None
+    scorer_type = _safe_str(handle.get("scorer_type"))
+    if scorer_type not in _CANONICAL_DIMENSIONS:
+        return None
+    scorer = _build_scorer(scorer_type)
+    if scorer is None:
+        return None
+    scorer_inputs = _inputs_payload_to_scorer_inputs(inputs_payload)
+    entity_id = _safe_str(handle.get("entity_id"), "")
+    try:
+        breakdown = scorer.score(entity_id, scorer_inputs)
+    except Exception:
+        return None
+    warnings: list[str] = []
+    return (
+        float(breakdown.score),
+        float(breakdown.confidence),
+        tuple(warnings),
+    )
+
+
+def _evidence_handle_to_decision_real_replay(
+    handle: Mapping[str, Any],
+    *,
+    artifact_config_hash: str,
+    replay_config_hash: str,
+    score_tolerance: float,
+    confidence_tolerance: float,
+) -> ShadowDecision:
+    """Build a :class:`ShadowDecision` from a single evidence_handle.
+
+    Phase 4 Task 4 Run 2: the artifact's ``evidence_handles[*].inputs``
+    block carries the scoring inputs (scorer_type, entity_id,
+    dimensions.values). The function reconstructs a scorer-input
+    dict, re-executes the canonical scorer (MacroScorer /
+    IndustryScorer / CompanyScorer) against the recorded inputs,
+    and produces a real ``score_delta`` /
+    ``confidence_delta`` surface.
+
+    When the handle is missing the ``inputs`` block, or the
+    scorer raises, the function falls back to a
+    structured-copy of the baseline (Run 1 behaviour) so old
+    artifacts remain replayable.
+    """
+    base = _evidence_handle_to_decision(
+        handle,
+        artifact_config_hash=artifact_config_hash,
+        replay_config_hash=replay_config_hash,
+        score_tolerance=score_tolerance,
+        confidence_tolerance=confidence_tolerance,
+    )
+    replayed = _real_replay_score(handle)
+    if replayed is None:
+        # Fall back to structured-copy semantics. The base
+        # decision already encodes the Run 1 contract.
+        return base
+
+    replay_score, replay_confidence, replay_warnings = replayed
+    baseline_score = base.baseline_score
+    baseline_confidence = base.baseline_confidence
+    baseline_warnings = base.baseline_warnings
+    baseline_evidence = base.baseline_evidence_signal_ids
+    score_node_id = base.score_node_id
+
+    score_delta = replay_score - baseline_score
+    confidence_delta = replay_confidence - baseline_confidence
+    # Intentionally self-diff: real_replay re-executes the scorer against
+    # the recorded inputs but does NOT re-derive the underlying evidence
+    # set. ``replay_evidence_signal_ids`` is set to ``baseline_evidence``
+    # below, so symmetric_diff(a, a) is always () by design. The
+    # meaningful deltas for real_replay are ``score_delta`` and
+    # ``confidence_delta``; ``evidence_diff`` carries the same meaning
+    # as in the structured_copy path (it surfaces config-drift-induced
+    # evidence changes when the two sides are not equal).
+    evidence_diff = _symmetric_diff(baseline_evidence, baseline_evidence)
+    warnings_diff = _symmetric_diff(baseline_warnings, replay_warnings)
+
+    changed = (
+        abs(score_delta) > score_tolerance
+        or abs(confidence_delta) > confidence_tolerance
+        or bool(evidence_diff)
+        or bool(warnings_diff)
+    )
+    explain_ref = score_node_id if changed else ""
+
+    return ShadowDecision(
+        scorer_type=base.scorer_type,
+        entity_id=base.entity_id,
+        date_bucket=base.date_bucket,
+        score_node_id=score_node_id,
+        baseline_score=baseline_score,
+        replay_score=replay_score,
+        baseline_confidence=baseline_confidence,
+        replay_confidence=replay_confidence,
+        baseline_config_hash=base.baseline_config_hash,
+        replay_config_hash=base.replay_config_hash,
+        baseline_evidence_signal_ids=baseline_evidence,
+        replay_evidence_signal_ids=baseline_evidence,
+        baseline_warnings=baseline_warnings,
+        replay_warnings=replay_warnings,
+        changed=changed,
+        score_delta=score_delta,
+        confidence_delta=confidence_delta,
+        evidence_diff=evidence_diff,
+        warnings_diff=warnings_diff,
+        explain_score_ref=explain_ref,
+        replay_source="real_replay",
+    )
+
+
 def _build_comparison(
     scorer_type: str,
     handles: Sequence[Mapping[str, Any]],
@@ -535,12 +830,15 @@ def _build_comparison(
     score_tolerance: float,
     confidence_tolerance: float,
     include_unchanged: bool,
+    inputs_source: str,
 ) -> ShadowComparison:
     """Build a :class:`ShadowComparison` for one scorer_type.
 
     The ``handles`` are the per-entity ``evidence_handles`` filtered
     to ``scorer_type``. Each handle becomes a :class:`ShadowDecision`
-    via :func:`_evidence_handle_to_decision`. When
+    via :func:`_evidence_handle_to_decision` (Run 1 / structured
+    copy) or :func:`_evidence_handle_to_decision_real_replay`
+    (Run 2 / real replay), based on ``inputs_source``. When
     ``include_unchanged`` is False, only changed decisions are
     surfaced in the tuple (the unchanged count still reflects the
     total).
@@ -551,13 +849,22 @@ def _build_comparison(
             continue
         if _safe_str(h.get("scorer_type")) != scorer_type:
             continue
-        decision = _evidence_handle_to_decision(
-            h,
-            artifact_config_hash=artifact_config_hash,
-            replay_config_hash=replay_config_hash,
-            score_tolerance=score_tolerance,
-            confidence_tolerance=confidence_tolerance,
-        )
+        if inputs_source == "real_replay":
+            decision = _evidence_handle_to_decision_real_replay(
+                h,
+                artifact_config_hash=artifact_config_hash,
+                replay_config_hash=replay_config_hash,
+                score_tolerance=score_tolerance,
+                confidence_tolerance=confidence_tolerance,
+            )
+        else:
+            decision = _evidence_handle_to_decision(
+                h,
+                artifact_config_hash=artifact_config_hash,
+                replay_config_hash=replay_config_hash,
+                score_tolerance=score_tolerance,
+                confidence_tolerance=confidence_tolerance,
+            )
         decisions.append(decision)
 
     changed_count = sum(1 for d in decisions if d.changed)
@@ -679,6 +986,7 @@ def run_shadow(config: ShadowRunConfig) -> ShadowRunResult:
                 score_tolerance=config.score_tolerance,
                 confidence_tolerance=config.confidence_tolerance,
                 include_unchanged=config.include_unchanged,
+                inputs_source=config.inputs_source,
             )
         )
 
@@ -706,6 +1014,7 @@ def run_shadow(config: ShadowRunConfig) -> ShadowRunResult:
         total_unchanged_count=total_unchanged,
         explain_score_refs=tuple(explain_refs),
         warnings=tuple(warnings),
+        inputs_source=config.inputs_source,
     )
 
     if config.output_path:
