@@ -151,6 +151,20 @@ from phase3.pipeline.reporting import (  # noqa: E402
     render_recovery_markdown_report,
 )
 
+# Shadow Run / Decision Replay (Phase 4 Task 4 Run 1) — read-only
+# comparison of a recorded pipeline artifact against a replay run.
+# Never writes to production DB; never schedules anything; never
+# mutates the input artifact.
+from phase3.pipeline.shadow_run import (  # noqa: E402
+    SCHEMA_VERSION as SHADOW_RUN_SCHEMA_VERSION,
+    ShadowComparison,
+    ShadowDecision,
+    ShadowRunConfig,
+    ShadowRunError,
+    ShadowRunResult,
+    run_shadow,
+)
+
 __all__ = [
     "LoadedSignals",
     "InputDimension",
@@ -191,4 +205,12 @@ __all__ = [
     "render_markdown_report",
     "render_recovery_markdown_report",
     "export_report",
+    # Shadow Run / Decision Replay (Phase 4 Task 4 Run 1)
+    "SHADOW_RUN_SCHEMA_VERSION",
+    "ShadowRunConfig",
+    "ShadowDecision",
+    "ShadowComparison",
+    "ShadowRunResult",
+    "ShadowRunError",
+    "run_shadow",
 ]

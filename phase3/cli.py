@@ -1689,6 +1689,180 @@ def cmd_pipeline_export(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------- Phase 4 Task 4 Run 1: shadow-run / decision replay ----------
+
+
+def cmd_shadow_run(args: argparse.Namespace) -> int:
+    """Phase 4 Task 4 Run 1: read-only shadow run / decision replay.
+
+    Loads a ``build_json_export`` JSON artifact (produced by
+    :func:`phase3.pipeline.reporting.export_report` or
+    :func:`build_json_export`), reconstructs a fresh in-memory
+    graph + :class:`PipelineResult` via
+    :func:`phase3.graph.explain_from_pipeline.load_pipeline_envelope`,
+    compares the artifact's recorded decisions against a replay
+    pass (which for Run 1 is a structured copy of the baseline —
+    the artifact does not yet carry the scoring inputs), and
+    emits a per-scorer comparison summary.
+
+    The framework is **read-only**:
+
+    * No production DB writes.
+    * No scheduling, no cron integration, no automatic
+      execution.
+    * No mutation of the input artifact.
+
+    Output paths
+    ------------
+    * ``--output PATH``: writes the JSON-serialised
+      :class:`ShadowRunResult` to PATH. ``-`` writes to stdout
+      (implies ``--json``). The parent directory must exist; the
+      CLI does not create it.
+    * ``--output`` and the default-mode human-readable text are
+      mutually exclusive — the CLI returns exit code 2 if the
+      caller asks for ``--output`` but does not pass a non-empty
+      path, and exit code 2 if the caller asks for the
+      human-readable form without a non-empty ``--output``.
+
+    Flags
+    -----
+    ``--artifact`` (required)
+        Path to a ``build_json_export`` JSON artifact. Refused
+        if it resolves to ``macro_history.db`` (case-insensitive
+        basename), matching the F2 hardening applied across the
+        rest of the CLI surface.
+    ``--replay-label``
+        Human-readable label for the replay (default: ``"replay"``).
+    ``--replay-config-hash``
+        Optional config hash the replay is considered to have run
+        with. When ``None`` (the default) the artifact's own
+        ``config_hash`` is used (i.e. the comparison is a
+        determinism check). When set to a different value, the
+        comparison is a forward-looking drift check.
+    ``--score-tolerance``
+        Absolute tolerance for the ``score`` delta (default: 0).
+    ``--confidence-tolerance``
+        Absolute tolerance for the ``confidence`` delta
+        (default: 0).
+    ``--include-unchanged``
+        When set, the result surfaces every decision. Default:
+        only changed decisions are surfaced (unchanged count is
+        still reported in the summary).
+    ``--json``
+        Emit the result JSON on stdout (default: human-readable).
+    """
+    artifact_path = args.artifact
+    output_path = args.output
+
+    if not artifact_path:
+        print("shadow-run: --artifact PATH is required", file=sys.stderr)
+        return 2
+
+    # Refuse macro_history.db at the CLI layer (case-insensitive
+    # basename) so this subcommand honors the same F2 hardening as
+    # the other Phase 4 Task 3B subcommands. The shadow-run
+    # framework does not open any DB on its own (the artifact
+    # loader is read-only), but the refusal is a defense-in-depth
+    # measure in case a future Run extends the framework to
+    # query a graph store directly.
+    basename = os.path.basename(artifact_path)
+    if basename.lower() == "macro_history.db":
+        print(
+            f"shadow-run: refusing to open {artifact_path!r} "
+            f"(basename is reserved)",
+            file=sys.stderr,
+        )
+        return 2
+
+    if output_path is not None and output_path == "":
+        print("shadow-run: --output cannot be empty", file=sys.stderr)
+        return 2
+
+    # Late import keeps the top-of-file light and the module
+    # importable when persistence is missing in some deployments.
+    from phase3.pipeline.shadow_run import (
+        ShadowRunConfig,
+        ShadowRunError,
+        run_shadow,
+    )
+
+    config = ShadowRunConfig(
+        artifact_path=artifact_path,
+        replay_label=args.replay_label,
+        replay_config_hash=args.replay_config_hash,
+        score_tolerance=args.score_tolerance,
+        confidence_tolerance=args.confidence_tolerance,
+        output_path=output_path,
+        include_unchanged=args.include_unchanged,
+    )
+
+    try:
+        result = run_shadow(config)
+    except ShadowRunError as exc:
+        print(f"shadow-run failed: {exc}", file=sys.stderr)
+        return 1
+
+    if output_path and output_path != "-":
+        # The framework already wrote the JSON; we just emit the
+        # summary text on stdout.
+        payload = result.to_dict()
+        print(
+            f"shadow-run: wrote {os.path.abspath(output_path)} "
+            f"({os.path.getsize(output_path)} bytes)"
+        )
+        print(
+            f"  artifact_run_id: {payload['artifact_run_id']}\n"
+            f"  artifact_config_hash: {payload['artifact_config_hash']}\n"
+            f"  replay_config_hash: {payload['replay_config_hash']}\n"
+            f"  total_decisions: {payload['summary']['total_decision_count']}\n"
+            f"  total_changed: {payload['summary']['total_changed_count']}\n"
+            f"  total_unchanged: {payload['summary']['total_unchanged_count']}\n"
+            f"  explain_score_refs: {payload['summary']['explain_score_ref_count']}"
+        )
+        return 0
+
+    payload = result.to_dict()
+    if args.json:
+        # stdout-only JSON dump (--output was not passed; "-" is
+        # handled by the same condition as the empty-output case
+        # above).
+        print(json.dumps(payload, sort_keys=True, ensure_ascii=False, indent=2))
+        return 0
+
+    # Human-readable text summary. The framework's full JSON is
+    # always available via --output; this is the canonical
+    # operator surface.
+    print("=== Shadow Run (Phase 4 Task 4 Run 1) ===")
+    print(f"  artifact: {payload['artifact_path']}")
+    print(f"  run_id:   {payload['artifact_run_id']}")
+    print(f"  config_hash (baseline): {payload['artifact_config_hash']}")
+    print(f"  config_hash (replay):   {payload['replay_config_hash']}")
+    print(f"  date_bucket: {payload['artifact_date_bucket']}")
+    print(f"  replay_label: {payload['replay_label']}")
+    print()
+    print("Summary:")
+    summary = payload["summary"]
+    print(f"  total_decisions: {summary['total_decision_count']}")
+    print(f"  total_changed:   {summary['total_changed_count']}")
+    print(f"  total_unchanged: {summary['total_unchanged_count']}")
+    print(f"  explain_score_refs: {summary['explain_score_ref_count']}")
+    print()
+    print("Per-scorer comparison:")
+    for cmp_payload in payload["comparisons"]:
+        print(
+            f"  - {cmp_payload['scorer_type']:<8} "
+            f"decisions={cmp_payload['decision_count']:<4} "
+            f"changed={cmp_payload['changed_count']:<3} "
+            f"unchanged={cmp_payload['unchanged_count']}"
+        )
+    if payload["warnings"]:
+        print()
+        print("Warnings:")
+        for w in payload["warnings"]:
+            print(f"  - {w}")
+    return 0
+
+
 # ---------- argparse ----------
 
 
@@ -2265,6 +2439,64 @@ def _build_parser() -> argparse.ArgumentParser:
              "to macro_history.db (case-insensitive basename).",
     )
     p18.set_defaults(func=cmd_explain_score)
+
+    p19 = sub.add_parser(
+        "shadow-run",
+        help="Phase 4 Task 4 Run 1: read-only shadow run / "
+             "decision replay. Loads a build_json_export JSON "
+             "artifact, compares its recorded decisions against "
+             "a replay pass, and writes a per-scorer comparison "
+             "summary. No production DB writes; no scheduling; "
+             "no automatic execution. Output: human-readable "
+             "text (default) or JSON (--json / --output).",
+    )
+    p19.add_argument(
+        "--artifact", default=None,
+        help="Path to a build_json_export JSON artifact "
+             "(required). Refused if it resolves to "
+             "macro_history.db (case-insensitive basename).",
+    )
+    p19.add_argument(
+        "--replay-label", default="replay",
+        help="Human-readable label for the replay "
+             "(default: 'replay').",
+    )
+    p19.add_argument(
+        "--replay-config-hash", default=None,
+        help="Optional config hash the replay is considered to "
+             "have run with. When None the artifact's own "
+             "config_hash is used (determinism check). When set "
+             "to a different value the comparison is a "
+             "forward-looking drift check.",
+    )
+    p19.add_argument(
+        "--score-tolerance", type=float, default=0.0,
+        help="Absolute tolerance for the score delta "
+             "(default: 0 — any non-zero delta is 'changed').",
+    )
+    p19.add_argument(
+        "--confidence-tolerance", type=float, default=0.0,
+        help="Absolute tolerance for the confidence delta "
+             "(default: 0).",
+    )
+    p19.add_argument(
+        "--include-unchanged", action="store_true",
+        help="Surface every decision in the result (default: "
+             "only changed decisions; unchanged count is "
+             "still reported in the summary).",
+    )
+    p19.add_argument(
+        "--output", default=None,
+        help="Write the JSON-serialised ShadowRunResult to "
+             "PATH. Parent directory must exist. CLI does not "
+             "create it.",
+    )
+    p19.add_argument(
+        "--json", action="store_true",
+        help="Emit the result JSON on stdout (default: "
+             "human-readable).",
+    )
+    p19.set_defaults(func=cmd_shadow_run)
 
     return p
 
