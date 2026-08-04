@@ -41,11 +41,15 @@ from phase3.portfolio.domain import (
 )
 from phase3.portfolio.risk import (
     ConcentrationReport,
+    CorrelationReport,
     DrawdownReport,
     ExposureReport,
+    RiskBudgetReport,
     compute_concentration,
+    compute_correlation,
     compute_drawdown,
     compute_exposure,
+    compute_risk_budget,
 )
 
 __all__ = [
@@ -68,4 +72,9 @@ __all__ = [
     "compute_concentration",
     "DrawdownReport",
     "compute_drawdown",
+    # Risk engine (M3-S3)
+    "CorrelationReport",
+    "compute_correlation",
+    "RiskBudgetReport",
+    "compute_risk_budget",
 ]

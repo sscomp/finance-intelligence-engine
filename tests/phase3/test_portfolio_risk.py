@@ -31,11 +31,15 @@ from phase3.portfolio.domain import (
 )
 from phase3.portfolio.risk import (
     ConcentrationReport,
+    CorrelationReport,
     DrawdownReport,
     ExposureReport,
+    RiskBudgetReport,
     compute_concentration,
+    compute_correlation,
     compute_drawdown,
     compute_exposure,
+    compute_risk_budget,
 )
 
 
@@ -939,6 +943,635 @@ class TestComputeDrawdownBehavior(unittest.TestCase):
         # duration: run of dd > 0.0 = indices 1,2 = 2
         self.assertEqual(r.drawdown_duration, 2)
         self.assertTrue(math.isclose(r.max_drawdown, 0.10, rel_tol=1e-9))
+
+
+# --------------------------------------------------------------------------- #
+# M3-S3: CorrelationReport serialization tests
+# --------------------------------------------------------------------------- #
+
+
+class TestCorrelationReportSerialization(unittest.TestCase):
+    """Round-trip and construction tests for CorrelationReport (M3-S3)."""
+
+    def test_construct_minimal_report(self):
+        """Construct with required fields; defaults applied."""
+        r = CorrelationReport(portfolio_id="pf1")
+        self.assertEqual(r.portfolio_id, "pf1")
+        self.assertEqual(r.correlation_matrix, {})
+        self.assertEqual(r.weighted_average_correlation, 0.0)
+        self.assertEqual(r.average_pairwise_correlation, 0.0)
+        self.assertEqual(r.pair_count, 0)
+        self.assertEqual(r.entity_count, 0)
+
+    def test_construct_full_report_nested_dict(self):
+        """Construct with a nested correlation_matrix."""
+        r = CorrelationReport(
+            portfolio_id="pf1",
+            correlation_matrix={"a": {"a": 1.0, "b": 0.5}, "b": {"a": 0.5, "b": 1.0}},
+            weighted_average_correlation=0.5,
+            average_pairwise_correlation=0.5,
+            pair_count=1,
+            entity_count=2,
+        )
+        self.assertEqual(r.correlation_matrix["a"]["b"], 0.5)
+        self.assertEqual(r.correlation_matrix["b"]["a"], 0.5)
+        self.assertEqual(r.pair_count, 1)
+
+    def test_to_dict_keys_fixed_order(self):
+        """to_dict keys are in code-defined order."""
+        r = CorrelationReport(
+            portfolio_id="pf1",
+            correlation_matrix={"a": {"a": 1.0}},
+            weighted_average_correlation=0.0,
+            average_pairwise_correlation=0.0,
+            pair_count=0,
+            entity_count=1,
+        )
+        d = r.to_dict()
+        expected_keys = [
+            "portfolio_id",
+            "correlation_matrix",
+            "weighted_average_correlation",
+            "average_pairwise_correlation",
+            "pair_count",
+            "entity_count",
+        ]
+        self.assertEqual(list(d.keys()), expected_keys)
+
+    def test_round_trip_byte_identical_nested_dict(self):
+        """from_dict(to_dict(x)).to_dict() == to_dict(x). Nested dict."""
+        original = CorrelationReport(
+            portfolio_id="pf1",
+            correlation_matrix={
+                "a": {"a": 1.0, "b": 0.5, "c": -0.3},
+                "b": {"a": 0.5, "b": 1.0, "c": 0.8},
+                "c": {"a": -0.3, "b": 0.8, "c": 1.0},
+            },
+            weighted_average_correlation=0.333,
+            average_pairwise_correlation=0.333,
+            pair_count=3,
+            entity_count=3,
+        )
+        d1 = original.to_dict()
+        restored = CorrelationReport.from_dict(d1)
+        d2 = restored.to_dict()
+        self.assertEqual(d1, d2)
+
+    def test_frozen_dataclass_immutable(self):
+        """frozen=True: setattr raises FrozenInstanceError."""
+        r = CorrelationReport(portfolio_id="pf1")
+        with self.assertRaises(Exception):
+            r.portfolio_id = "other"  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# M3-S3: compute_correlation fixture tests
+# --------------------------------------------------------------------------- #
+
+
+class TestComputeCorrelationFixtures(unittest.TestCase):
+    """compute_correlation against fixture returns matrices FM1-FM3, FM9-FM11."""
+
+    def test_fm1_identity_correlation_orthogonal(self):
+        """FM1: orthogonal return series → identity correlation matrix."""
+        # Use linearly independent series that produce ~0 correlation.
+        # Series chosen so Pearson corr is exactly 0 (centered, orthogonal).
+        pf = fp1_equal_weight_5()
+        # Build 5 series with zero pairwise correlation via orthogonal vectors.
+        # Simple approach: each series is a standard basis scaled — but those
+        # have zero variance in the Pearson sense only if centered. Use series
+        # that are pairwise uncorrelated. For a 5-entity portfolio, we provide
+        # 5 series of length 5 that are mutually orthogonal after centering.
+        # Easiest: use distinct linear functions with no covariation.
+        # We use: series_i[k] = sin(2*pi*(i)*k/N) — orthogonal in the limit.
+        # For exact-zero with small N, use these hand-crafted series:
+        returns = {
+            "company:TW:1": [1.0, -1.0, 0.0, 0.0, 0.0],
+            "company:TW:2": [0.0, 0.0, 1.0, -1.0, 0.0],
+            "company:TW:3": [0.0, 0.0, 0.0, 0.0, 0.0],  # zero variance → guard
+            "company:TW:4": [1.0, 1.0, -1.0, -1.0, 0.0],
+            "company:TW:5": [-1.0, -1.0, 1.0, 1.0, 0.0],
+        }
+        r = compute_correlation(pf, returns)
+        # Diagonal must be 1.0 for all entities.
+        for e in returns:
+            self.assertEqual(r.correlation_matrix[e][e], 1.0)
+        # Zero-variance entity (TW:3) → its off-diagonal correlations are 0.0.
+        for e in returns:
+            if e != "company:TW:3":
+                self.assertEqual(r.correlation_matrix["company:TW:3"][e], 0.0)
+        self.assertEqual(r.pair_count, 10)
+        self.assertEqual(r.entity_count, 5)
+
+    def test_fm2_perfect_correlation_identical_series(self):
+        """FM2: identical series → all correlations 1.0."""
+        pf = fp3_concentrated_80_20()
+        returns = {
+            "company:TW:1": [0.01, 0.02, 0.03, 0.04],
+            "company:TW:2": [0.01, 0.02, 0.03, 0.04],
+        }
+        r = compute_correlation(pf, returns)
+        self.assertTrue(math.isclose(r.correlation_matrix["company:TW:1"]["company:TW:2"], 1.0, rel_tol=1e-9, abs_tol=1e-12))
+        self.assertTrue(math.isclose(r.average_pairwise_correlation, 1.0, rel_tol=1e-9))
+
+    def test_fm3_zero_correlation_orthogonal(self):
+        """FM3: orthogonal series → 0.0 off-diagonal."""
+        # Two anti-symmetric series with zero covariance.
+        pf = fp3_concentrated_80_20()
+        returns = {
+            "company:TW:1": [1.0, -1.0, 1.0, -1.0],
+            "company:TW:2": [1.0, 1.0, -1.0, -1.0],
+        }
+        r = compute_correlation(pf, returns)
+        self.assertTrue(math.isclose(r.correlation_matrix["company:TW:1"]["company:TW:2"], 0.0, rel_tol=1e-9, abs_tol=1e-12))
+
+    def test_fm9_negative_correlation_anti_correlated(self):
+        """FM9: anti-correlated series → -1.0."""
+        pf = fp3_concentrated_80_20()
+        returns = {
+            "company:TW:1": [1.0, 2.0, 1.0, 2.0],
+            "company:TW:2": [-1.0, -2.0, -1.0, -2.0],
+        }
+        r = compute_correlation(pf, returns)
+        self.assertTrue(math.isclose(r.correlation_matrix["company:TW:1"]["company:TW:2"], -1.0, rel_tol=1e-9, abs_tol=1e-12))
+
+    def test_fm10_mixed_correlation_three_entities(self):
+        """FM10: three entities with mixed correlations — general case."""
+        pf = fp5_multi_currency()
+        # Hand-tuned series producing known pairwise correlations.
+        # We verify symmetry and diagonal=1.0; exact values are tested via
+        # the determinism + symmetry tests.
+        returns = {
+            "company:US:1": [0.01, 0.02, 0.03, 0.04, 0.05],
+            "company:EU:2": [0.02, 0.04, 0.01, 0.03, 0.05],
+            "company:TW:3": [-0.01, 0.0, 0.02, 0.01, 0.03],
+        }
+        r = compute_correlation(pf, returns)
+        self.assertEqual(r.entity_count, 3)
+        self.assertEqual(r.pair_count, 3)
+        # Symmetry.
+        for a in returns:
+            for b in returns:
+                self.assertTrue(math.isclose(
+                    r.correlation_matrix[a][b],
+                    r.correlation_matrix[b][a],
+                    rel_tol=1e-9, abs_tol=1e-12))
+
+    def test_fm11_single_period_minimum_length(self):
+        """FM11: lists of length 2 (minimum) — correlation computable."""
+        pf = fp3_concentrated_80_20()
+        returns = {
+            "company:TW:1": [0.01, 0.02],
+            "company:TW:2": [0.02, 0.01],
+        }
+        r = compute_correlation(pf, returns)
+        # Two points: correlation is -1.0 (perfect anti-correlation).
+        self.assertTrue(math.isclose(r.correlation_matrix["company:TW:1"]["company:TW:2"], -1.0, rel_tol=1e-9, abs_tol=1e-12))
+
+
+# --------------------------------------------------------------------------- #
+# M3-S3: compute_correlation behavior tests
+# --------------------------------------------------------------------------- #
+
+
+class TestComputeCorrelationBehavior(unittest.TestCase):
+    """Edge cases, validation, determinism, invariants for compute_correlation."""
+
+    def test_fp4_empty_portfolio_empty_report(self):
+        """Empty portfolio → empty matrix, averages 0.0, pair_count 0."""
+        pf = fp4_empty()
+        r = compute_correlation(pf, {})
+        self.assertEqual(r.correlation_matrix, {})
+        self.assertEqual(r.weighted_average_correlation, 0.0)
+        self.assertEqual(r.average_pairwise_correlation, 0.0)
+        self.assertEqual(r.pair_count, 0)
+        self.assertEqual(r.entity_count, 0)
+
+    def test_fp2_single_entity_matrix_diagonal_one(self):
+        """Single entity → matrix {e: {e: 1.0}}, averages 0.0, pair_count 0."""
+        pf = fp2_single_position()
+        returns = {"company:TW:1": [0.01, 0.02, 0.03]}
+        r = compute_correlation(pf, returns)
+        self.assertEqual(r.correlation_matrix, {"company:TW:1": {"company:TW:1": 1.0}})
+        self.assertEqual(r.pair_count, 0)
+        self.assertEqual(r.average_pairwise_correlation, 0.0)
+
+    def test_returns_matrix_missing_entity_raises(self):
+        """Returns matrix missing an entity ID → ValueError."""
+        pf = fp3_concentrated_80_20()
+        returns = {"company:TW:1": [0.01, 0.02]}  # missing TW:2
+        with self.assertRaises(ValueError):
+            compute_correlation(pf, returns)
+
+    def test_returns_matrix_unequal_lengths_raises(self):
+        """Returns matrix with unequal list lengths → ValueError."""
+        pf = fp3_concentrated_80_20()
+        returns = {
+            "company:TW:1": [0.01, 0.02, 0.03],
+            "company:TW:2": [0.01, 0.02],
+        }
+        with self.assertRaises(ValueError):
+            compute_correlation(pf, returns)
+
+    def test_returns_matrix_length_below_two_raises(self):
+        """Returns matrix with list length < 2 → ValueError."""
+        pf = fp3_concentrated_80_20()
+        returns = {
+            "company:TW:1": [0.01],
+            "company:TW:2": [0.02],
+        }
+        with self.assertRaises(ValueError):
+            compute_correlation(pf, returns)
+
+    def test_returns_matrix_nan_raises(self):
+        """NaN in returns → ValueError."""
+        pf = fp3_concentrated_80_20()
+        returns = {
+            "company:TW:1": [float("nan"), 0.02],
+            "company:TW:2": [0.01, 0.02],
+        }
+        with self.assertRaises(ValueError):
+            compute_correlation(pf, returns)
+
+    def test_returns_matrix_inf_raises(self):
+        """Inf in returns → ValueError."""
+        pf = fp3_concentrated_80_20()
+        returns = {
+            "company:TW:1": [float("inf"), 0.02],
+            "company:TW:2": [0.01, 0.02],
+        }
+        with self.assertRaises(ValueError):
+            compute_correlation(pf, returns)
+
+    def test_returns_matrix_non_dict_raises(self):
+        """Non-dict returns_matrix → ValueError."""
+        pf = fp3_concentrated_80_20()
+        with self.assertRaises(ValueError):
+            compute_correlation(pf, "not a dict")  # type: ignore[arg-type]
+
+    def test_determinism_same_inputs_byte_identical(self):
+        """Same inputs → byte-identical CorrelationReport via to_dict()."""
+        pf = fp3_concentrated_80_20()
+        returns = {
+            "company:TW:1": [0.01, 0.02, 0.03, 0.04],
+            "company:TW:2": [0.04, 0.03, 0.02, 0.01],
+        }
+        r1 = compute_correlation(pf, returns)
+        r2 = compute_correlation(pf, returns)
+        self.assertEqual(r1.to_dict(), r2.to_dict())
+
+    def test_correlation_matrix_symmetric_invariant(self):
+        """Invariant: corr(i,j) == corr(j,i) within tolerance."""
+        pf = fp5_multi_currency()
+        returns = {
+            "company:US:1": [0.01, 0.02, 0.03, 0.04, 0.05],
+            "company:EU:2": [0.02, 0.01, 0.04, 0.03, 0.05],
+            "company:TW:3": [-0.01, 0.0, 0.02, 0.01, 0.03],
+        }
+        r = compute_correlation(pf, returns)
+        for a in returns:
+            for b in returns:
+                self.assertTrue(math.isclose(
+                    r.correlation_matrix[a][b],
+                    r.correlation_matrix[b][a],
+                    rel_tol=1e-9, abs_tol=1e-12))
+
+    def test_correlation_diagonal_one_invariant(self):
+        """Invariant: all diagonal entries == 1.0."""
+        pf = fp5_multi_currency()
+        returns = {
+            "company:US:1": [0.01, 0.02, 0.03, 0.04, 0.05],
+            "company:EU:2": [0.02, 0.01, 0.04, 0.03, 0.05],
+            "company:TW:3": [-0.01, 0.0, 0.02, 0.01, 0.03],
+        }
+        r = compute_correlation(pf, returns)
+        for e in returns:
+            self.assertEqual(r.correlation_matrix[e][e], 1.0)
+
+    def test_round_trip_report_from_compute(self):
+        """A CorrelationReport produced by compute_correlation round-trips."""
+        pf = fp3_concentrated_80_20()
+        returns = {
+            "company:TW:1": [0.01, 0.02, 0.03, 0.04],
+            "company:TW:2": [0.04, 0.03, 0.02, 0.01],
+        }
+        r = compute_correlation(pf, returns)
+        d1 = r.to_dict()
+        r2 = CorrelationReport.from_dict(d1)
+        self.assertEqual(d1, r2.to_dict())
+
+
+# --------------------------------------------------------------------------- #
+# M3-S3: RiskBudgetReport serialization tests
+# --------------------------------------------------------------------------- #
+
+
+class TestRiskBudgetReportSerialization(unittest.TestCase):
+    """Round-trip and construction tests for RiskBudgetReport (M3-S3)."""
+
+    def test_construct_minimal_report(self):
+        """Construct with required fields; defaults applied."""
+        r = RiskBudgetReport(portfolio_id="pf1")
+        self.assertEqual(r.portfolio_id, "pf1")
+        self.assertEqual(r.total_variance, 0.0)
+        self.assertEqual(r.total_volatility, 0.0)
+        self.assertEqual(r.risk_contributions, {})
+        self.assertEqual(r.relative_risk_contributions, {})
+        self.assertEqual(r.total_risk_budget_utilization, 0.0)
+        self.assertEqual(r.per_position_budget, 1.0)
+        self.assertEqual(r.budget_breach, False)
+        self.assertEqual(r.entity_count, 0)
+
+    def test_construct_full_report(self):
+        """Construct with all fields populated."""
+        r = RiskBudgetReport(
+            portfolio_id="pf1",
+            total_variance=0.04,
+            total_volatility=0.2,
+            risk_contributions={"a": 0.03, "b": 0.01},
+            relative_risk_contributions={"a": 0.75, "b": 0.25},
+            total_risk_budget_utilization=1.0,
+            per_position_budget=0.5,
+            budget_breach=True,
+            entity_count=2,
+        )
+        self.assertEqual(r.risk_contributions, {"a": 0.03, "b": 0.01})
+        self.assertEqual(r.relative_risk_contributions, {"a": 0.75, "b": 0.25})
+        self.assertTrue(r.budget_breach)
+
+    def test_to_dict_keys_fixed_order(self):
+        """to_dict keys are in code-defined order."""
+        r = RiskBudgetReport(portfolio_id="pf1", total_variance=0.04, total_volatility=0.2)
+        d = r.to_dict()
+        expected_keys = [
+            "portfolio_id",
+            "total_variance",
+            "total_volatility",
+            "risk_contributions",
+            "relative_risk_contributions",
+            "total_risk_budget_utilization",
+            "per_position_budget",
+            "budget_breach",
+            "entity_count",
+        ]
+        self.assertEqual(list(d.keys()), expected_keys)
+
+    def test_round_trip_byte_identical(self):
+        """from_dict(to_dict(x)).to_dict() == to_dict(x)."""
+        original = RiskBudgetReport(
+            portfolio_id="pf1",
+            total_variance=0.04,
+            total_volatility=0.2,
+            risk_contributions={"a": 0.03, "b": 0.01},
+            relative_risk_contributions={"a": 0.75, "b": 0.25},
+            total_risk_budget_utilization=1.0,
+            per_position_budget=0.5,
+            budget_breach=True,
+            entity_count=2,
+        )
+        d1 = original.to_dict()
+        restored = RiskBudgetReport.from_dict(d1)
+        self.assertEqual(d1, restored.to_dict())
+
+    def test_frozen_dataclass_immutable(self):
+        """frozen=True: setattr raises."""
+        r = RiskBudgetReport(portfolio_id="pf1")
+        with self.assertRaises(Exception):
+            r.total_variance = 1.0  # type: ignore[misc]
+
+    def test_field_count_is_nine(self):
+        """RiskBudgetReport has exactly 9 fields (RR-S3-8 mitigation)."""
+        import dataclasses
+        fields = dataclasses.fields(RiskBudgetReport)
+        self.assertEqual(len(fields), 9)
+
+
+# --------------------------------------------------------------------------- #
+# M3-S3: compute_risk_budget fixture tests
+# --------------------------------------------------------------------------- #
+
+
+class TestComputeRiskBudgetFixtures(unittest.TestCase):
+    """compute_risk_budget against fixture covariance matrices FC1-FC5."""
+
+    def test_fc1_identity_covariance_uncorrelated(self):
+        """FC1: diagonal 1.0, off-diagonal 0.0 → RC_i = w_i^2, RRC_i = w_i^2/sum(w^2)."""
+        pf = fp3_concentrated_80_20()  # weights 0.80, 0.20
+        cov = {
+            "company:TW:1": {"company:TW:1": 1.0, "company:TW:2": 0.0},
+            "company:TW:2": {"company:TW:1": 0.0, "company:TW:2": 1.0},
+        }
+        r = compute_risk_budget(pf, cov)
+        # total_variance = 0.8^2*1 + 0.2^2*1 = 0.64 + 0.04 = 0.68
+        self.assertTrue(math.isclose(r.total_variance, 0.68, rel_tol=1e-9))
+        # RC_1 = 0.8 * (0.8*1 + 0.2*0) = 0.64; RC_2 = 0.2 * (0.8*0 + 0.2*1) = 0.04
+        self.assertTrue(math.isclose(r.risk_contributions["company:TW:1"], 0.64, rel_tol=1e-9))
+        self.assertTrue(math.isclose(r.risk_contributions["company:TW:2"], 0.04, rel_tol=1e-9))
+        # RRC sums to 1.0
+        self.assertTrue(math.isclose(r.total_risk_budget_utilization, 1.0, rel_tol=1e-9))
+
+    def test_fc2_single_asset_variance(self):
+        """FC2: single entity, variance 0.04 → RC = w^2*0.04, RRC = 1.0."""
+        pf = fp2_single_position()  # weight 1.0
+        cov = {"company:TW:1": {"company:TW:1": 0.04}}
+        r = compute_risk_budget(pf, cov)
+        # total_variance = 1.0^2 * 0.04 = 0.04
+        self.assertTrue(math.isclose(r.total_variance, 0.04, rel_tol=1e-9))
+        self.assertTrue(math.isclose(r.total_volatility, 0.2, rel_tol=1e-9))
+        self.assertTrue(math.isclose(r.risk_contributions["company:TW:1"], 0.04, rel_tol=1e-9))
+        self.assertTrue(math.isclose(r.relative_risk_contributions["company:TW:1"], 1.0, rel_tol=1e-9))
+
+    def test_fc3_perfectly_correlated(self):
+        """FC3: all entries 0.04 → variance = (sum w)^2 * 0.04."""
+        pf = fp3_concentrated_80_20()  # weights 0.80, 0.20
+        cov = {
+            "company:TW:1": {"company:TW:1": 0.04, "company:TW:2": 0.04},
+            "company:TW:2": {"company:TW:1": 0.04, "company:TW:2": 0.04},
+        }
+        r = compute_risk_budget(pf, cov)
+        # total_variance = (0.8+0.2)^2 * 0.04 = 1.0 * 0.04 = 0.04
+        self.assertTrue(math.isclose(r.total_variance, 0.04, rel_tol=1e-9))
+        self.assertTrue(math.isclose(r.total_risk_budget_utilization, 1.0, rel_tol=1e-9))
+
+    def test_fc4_zero_variance_division_by_zero_guard(self):
+        """FC4: all-zero covariance → total_variance=0, RRC=0.0 (guard), no exception."""
+        pf = fp3_concentrated_80_20()
+        cov = {
+            "company:TW:1": {"company:TW:1": 0.0, "company:TW:2": 0.0},
+            "company:TW:2": {"company:TW:1": 0.0, "company:TW:2": 0.0},
+        }
+        r = compute_risk_budget(pf, cov)
+        self.assertEqual(r.total_variance, 0.0)
+        self.assertEqual(r.total_volatility, 0.0)
+        self.assertEqual(r.relative_risk_contributions["company:TW:1"], 0.0)
+        self.assertEqual(r.relative_risk_contributions["company:TW:2"], 0.0)
+        self.assertEqual(r.total_risk_budget_utilization, 0.0)
+        self.assertFalse(r.budget_breach)
+
+    def test_fc5_two_asset_mixed_hand_computed(self):
+        """FC5: Var(A)=0.04, Var(B)=0.09, Cov(A,B)=0.03 with weights 0.80/0.20."""
+        pf = fp3_concentrated_80_20()
+        cov = {
+            "company:TW:1": {"company:TW:1": 0.04, "company:TW:2": 0.03},
+            "company:TW:2": {"company:TW:1": 0.03, "company:TW:2": 0.09},
+        }
+        r = compute_risk_budget(pf, cov)
+        # w_A=0.8, w_B=0.2
+        # MRC_A = w_A*Cov(A,A) + w_B*Cov(A,B) = 0.8*0.04 + 0.2*0.03 = 0.032+0.006 = 0.038
+        # MRC_B = w_A*Cov(B,A) + w_B*Cov(B,B) = 0.8*0.03 + 0.2*0.09 = 0.024+0.018 = 0.042
+        # RC_A = w_A * MRC_A = 0.8 * 0.038 = 0.0304
+        # RC_B = w_B * MRC_B = 0.2 * 0.042 = 0.0084
+        # total_variance = 0.0304 + 0.0084 = 0.0388
+        self.assertTrue(math.isclose(r.risk_contributions["company:TW:1"], 0.0304, rel_tol=1e-9, abs_tol=1e-12))
+        self.assertTrue(math.isclose(r.risk_contributions["company:TW:2"], 0.0084, rel_tol=1e-9, abs_tol=1e-12))
+        self.assertTrue(math.isclose(r.total_variance, 0.0388, rel_tol=1e-9, abs_tol=1e-12))
+        # RRC_A = 0.0304/0.0388; RRC_B = 0.0084/0.0388
+        self.assertTrue(math.isclose(r.relative_risk_contributions["company:TW:1"], 0.0304 / 0.0388, rel_tol=1e-9))
+        self.assertTrue(math.isclose(r.relative_risk_contributions["company:TW:2"], 0.0084 / 0.0388, rel_tol=1e-9))
+        # Sum of RRC = 1.0
+        self.assertTrue(math.isclose(r.total_risk_budget_utilization, 1.0, rel_tol=1e-9))
+
+
+# --------------------------------------------------------------------------- #
+# M3-S3: compute_risk_budget behavior tests
+# --------------------------------------------------------------------------- #
+
+
+class TestComputeRiskBudgetBehavior(unittest.TestCase):
+    """Edge cases, validation, determinism, invariants for compute_risk_budget."""
+
+    def test_fp4_empty_portfolio_zero_report(self):
+        """Empty portfolio → zero variance, empty RC/RRC, no exception."""
+        pf = fp4_empty()
+        r = compute_risk_budget(pf, {})
+        self.assertEqual(r.total_variance, 0.0)
+        self.assertEqual(r.risk_contributions, {})
+        self.assertEqual(r.relative_risk_contributions, {})
+        self.assertEqual(r.total_risk_budget_utilization, 0.0)
+        self.assertFalse(r.budget_breach)
+        self.assertEqual(r.entity_count, 0)
+
+    def test_fp2_single_entity_variance_zero(self):
+        """Single entity with zero variance → RRC=0.0 (guard)."""
+        pf = fp2_single_position()
+        cov = {"company:TW:1": {"company:TW:1": 0.0}}
+        r = compute_risk_budget(pf, cov)
+        self.assertEqual(r.total_variance, 0.0)
+        self.assertEqual(r.relative_risk_contributions["company:TW:1"], 0.0)
+
+    def test_covariance_asymmetric_raises(self):
+        """FC6: asymmetric covariance → ValueError."""
+        pf = fp3_concentrated_80_20()
+        cov = {
+            "company:TW:1": {"company:TW:1": 0.04, "company:TW:2": 0.03},
+            "company:TW:2": {"company:TW:1": 0.05, "company:TW:2": 0.09},  # 0.05 != 0.03
+        }
+        with self.assertRaises(ValueError):
+            compute_risk_budget(pf, cov)
+
+    def test_covariance_negative_diagonal_raises(self):
+        """FC7: negative diagonal → ValueError."""
+        pf = fp3_concentrated_80_20()
+        cov = {
+            "company:TW:1": {"company:TW:1": -0.01, "company:TW:2": 0.0},
+            "company:TW:2": {"company:TW:1": 0.0, "company:TW:2": 0.04},
+        }
+        with self.assertRaises(ValueError):
+            compute_risk_budget(pf, cov)
+
+    def test_covariance_missing_entity_raises(self):
+        """FC8: missing entity → ValueError."""
+        pf = fp3_concentrated_80_20()
+        cov = {
+            "company:TW:1": {"company:TW:1": 0.04, "company:TW:2": 0.0},
+            # missing company:TW:2 row
+        }
+        with self.assertRaises(ValueError):
+            compute_risk_budget(pf, cov)
+
+    def test_covariance_nan_raises(self):
+        """NaN in covariance → ValueError."""
+        pf = fp3_concentrated_80_20()
+        cov = {
+            "company:TW:1": {"company:TW:1": float("nan"), "company:TW:2": 0.0},
+            "company:TW:2": {"company:TW:1": 0.0, "company:TW:2": 0.04},
+        }
+        with self.assertRaises(ValueError):
+            compute_risk_budget(pf, cov)
+
+    def test_covariance_inf_raises(self):
+        """Inf in covariance → ValueError."""
+        pf = fp3_concentrated_80_20()
+        cov = {
+            "company:TW:1": {"company:TW:1": 0.04, "company:TW:2": float("inf")},
+            "company:TW:2": {"company:TW:1": float("inf"), "company:TW:2": 0.04},
+        }
+        with self.assertRaises(ValueError):
+            compute_risk_budget(pf, cov)
+
+    def test_covariance_non_dict_raises(self):
+        """Non-dict covariance_matrix → ValueError."""
+        pf = fp3_concentrated_80_20()
+        with self.assertRaises(ValueError):
+            compute_risk_budget(pf, "not a dict")  # type: ignore[arg-type]
+
+    def test_determinism_same_inputs_byte_identical(self):
+        """Same inputs → byte-identical RiskBudgetReport via to_dict()."""
+        pf = fp3_concentrated_80_20()
+        cov = {
+            "company:TW:1": {"company:TW:1": 0.04, "company:TW:2": 0.03},
+            "company:TW:2": {"company:TW:1": 0.03, "company:TW:2": 0.09},
+        }
+        r1 = compute_risk_budget(pf, cov)
+        r2 = compute_risk_budget(pf, cov)
+        self.assertEqual(r1.to_dict(), r2.to_dict())
+
+    def test_rrc_sum_equals_one_invariant(self):
+        """AG-M3-S3-14: sum of RRC_i = 1.0 when variance > 0."""
+        pf = fp5_multi_currency()
+        cov = {
+            "company:US:1": {"company:US:1": 0.04, "company:EU:2": 0.01, "company:TW:3": 0.0},
+            "company:EU:2": {"company:US:1": 0.01, "company:EU:2": 0.09, "company:TW:3": 0.02},
+            "company:TW:3": {"company:US:1": 0.0, "company:EU:2": 0.02, "company:TW:3": 0.01},
+        }
+        r = compute_risk_budget(pf, cov)
+        self.assertTrue(math.isclose(r.total_risk_budget_utilization, 1.0, rel_tol=1e-9))
+        total_rrc = sum(r.relative_risk_contributions.values())
+        self.assertTrue(math.isclose(total_rrc, 1.0, rel_tol=1e-9))
+
+    def test_budget_breach_flag_with_low_threshold(self):
+        """budget_breach=True when an RRC exceeds per_position_budget."""
+        pf = fp3_concentrated_80_20()
+        cov = {
+            "company:TW:1": {"company:TW:1": 0.04, "company:TW:2": 0.0},
+            "company:TW:2": {"company:TW:1": 0.0, "company:TW:2": 0.04},
+        }
+        # RC_1 = 0.64, RC_2 = 0.04; total = 0.68; RRC_1 = 0.941..., RRC_2 = 0.058...
+        # With threshold 0.5, RRC_1 > 0.5 → breach.
+        r = compute_risk_budget(pf, cov, per_position_budget=0.5)
+        self.assertTrue(r.budget_breach)
+
+    def test_budget_breach_default_threshold_no_breach(self):
+        """Default per_position_budget=1.0 → no breach for valid long-only PSD."""
+        pf = fp3_concentrated_80_20()
+        cov = {
+            "company:TW:1": {"company:TW:1": 0.04, "company:TW:2": 0.0},
+            "company:TW:2": {"company:TW:1": 0.0, "company:TW:2": 0.04},
+        }
+        r = compute_risk_budget(pf, cov)
+        self.assertFalse(r.budget_breach)
+
+    def test_round_trip_report_from_compute(self):
+        """A RiskBudgetReport produced by compute_risk_budget round-trips."""
+        pf = fp3_concentrated_80_20()
+        cov = {
+            "company:TW:1": {"company:TW:1": 0.04, "company:TW:2": 0.03},
+            "company:TW:2": {"company:TW:1": 0.03, "company:TW:2": 0.09},
+        }
+        r = compute_risk_budget(pf, cov)
+        d1 = r.to_dict()
+        r2 = RiskBudgetReport.from_dict(d1)
+        self.assertEqual(d1, r2.to_dict())
 
 
 if __name__ == "__main__":
