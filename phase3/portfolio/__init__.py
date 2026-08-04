@@ -51,6 +51,8 @@ from phase3.portfolio.risk import (
     compute_exposure,
     compute_risk_budget,
 )
+from phase3.portfolio.allocation import Allocation
+from phase3.portfolio.decision import PortfolioDecision, PortfolioDecisionEngine
 
 __all__ = [
     # Value objects
@@ -77,4 +79,8 @@ __all__ = [
     "compute_correlation",
     "RiskBudgetReport",
     "compute_risk_budget",
+    # Allocation & decision engine (M4-S1)
+    "Allocation",
+    "PortfolioDecision",
+    "PortfolioDecisionEngine",
 ]
