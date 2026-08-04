@@ -39,7 +39,14 @@ from phase3.portfolio.domain import (
     Quantity,
     Weight,
 )
-from phase3.portfolio.risk import ExposureReport, compute_exposure
+from phase3.portfolio.risk import (
+    ConcentrationReport,
+    DrawdownReport,
+    ExposureReport,
+    compute_concentration,
+    compute_drawdown,
+    compute_exposure,
+)
 
 __all__ = [
     # Value objects
@@ -56,4 +63,9 @@ __all__ = [
     # Risk engine (M3-S1)
     "ExposureReport",
     "compute_exposure",
+    # Risk engine (M3-S2)
+    "ConcentrationReport",
+    "compute_concentration",
+    "DrawdownReport",
+    "compute_drawdown",
 ]
