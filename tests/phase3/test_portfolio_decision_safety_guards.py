@@ -68,13 +68,16 @@ DATAMODEL_FILES = [
 ]
 
 # Imports forbidden in phase3.portfolio.decision + phase3.portfolio.allocation
-# per boundary rules 1–2 (M4 kickoff plan §2.4). Mirrors TD7's forbidden set
-# + adds the M4-specific IntelligencePipeline namespace guard.
+# per boundary rules 1–2 (M4 kickoff plan §2.4). Mirrors TD7's forbidden set.
+#
+# M4-S2 UPDATE: phase3.pipeline and phase3.datamodel are REMOVED from the
+# forbidden set for decision.py (boundary rule 8 — the portfolio↔intelligence
+# crossing is now permitted for TYPE ANNOTATIONS + READ-ONLY access only,
+# via 4 narrowly-allowlisted symbols). allocation.py retains the FULL
+# forbidden set (it does NOT cross the boundary).
 FORBIDDEN_IMPORT_NAMES = {
     "sqlite3",
     "macro_history",
-    "phase3.pipeline",
-    "phase3.datamodel",
     "phase3.graph",
     "requests",
     "urllib.request",
@@ -89,6 +92,35 @@ FORBIDDEN_IMPORT_NAMES = {
     "random",
 }
 
+# phase3.pipeline and phase3.datamodel are forbidden for allocation.py
+# (which must NOT cross the intelligence boundary), but permitted for
+# decision.py (M4-S2 boundary crossing via narrow allowlist).
+FORBIDDEN_IMPORT_NAMES_ALLOCATION = FORBIDDEN_IMPORT_NAMES | {
+    "phase3.pipeline",
+    "phase3.datamodel",
+}
+
+# Allowed intelligence imports for decision.py (M4-S2 boundary rule 8).
+# decision.py may import ONLY these 4 named symbols from these 3 modules.
+# Any other import from phase3.pipeline / phase3.datamodel is forbidden.
+ALLOWED_INTELLIGENCE_MODULES = {
+    "phase3.pipeline.scoring_pipeline",
+    "phase3.datamodel.scores",
+    "phase3.pipeline.intelligence_pipeline",
+}
+ALLOWED_INTELLIGENCE_SYMBOLS = {
+    "PipelineResult",
+    "PipelineRunReport",
+    "ScoreBreakdown",
+    "EvidenceQueryHandle",
+}
+
+# IntelligencePipeline is forbidden to import (not in allowlist) and
+# MUST NOT be instantiated (AG-M4-2).
+FORBIDDEN_INTELLIGENCE_IMPORTS = {
+    "phase3.pipeline.intelligence_pipeline.IntelligencePipeline",
+}
+
 # Known M2 + M3 baseline SHAs (captured at M3-S3 commit 13219ab; M4-S1
 # must not modify these files).
 M2_M3_BASELINE = {
@@ -97,6 +129,19 @@ M2_M3_BASELINE = {
     "test_portfolio_domain.py": "f72748113bda9b49cf072af19f8e1ed3d571e86a27c557bd0a12a5bdbabb6603",
     "test_portfolio_risk.py": "f955bc10dd8647a7ce85341582a0d7910c347beff146299fdefd996acefd32ed",
     "test_portfolio_safety_guards.py": "390cf41d7fe97d37304e53d7f2e5ff6f962a9aa79414a9fcb6d1753ba4860db4",
+}
+
+# M4-S1 baseline SHAs (captured at M4-S1 commit 09c01f7; M4-S2 must not
+# modify allocation.py — decision.py and __init__.py are extended by M4-S2).
+M4_S1_BASELINE = {
+    "allocation.py": "9133f66d25342c0ccfbcdf2809de3388f1f1cc79fd26a8c9f952047c5a7a6e08",
+}
+
+# M4-S2 current SHAs (decision.py and __init__.py are MODIFIED by M4-S2;
+# these are the post-M4-S2 baselines that future milestones must preserve).
+M4_S2_BASELINE = {
+    "decision.py": "32ada6f6f9b335e57b84ea53ab09ad8a077f5eb84f03ea90cea825a2b6197648",
+    "init.py": "afd3bb4c962be622f90f13967071d5968f477d4d238aa785928d6bd3977a589f",
 }
 
 # Known phase3 top-level + pipeline + datamodel baseline SHAs (M4-S1 must
@@ -125,7 +170,10 @@ def _file_exists(path: Path) -> bool:
 
 
 def _scan_forbidden_imports(path: Path) -> list[str]:
-    """AST-walk a .py file and return the list of forbidden imports found."""
+    """AST-walk a .py file and return the list of forbidden imports found.
+
+    Uses the default ``FORBIDDEN_IMPORT_NAMES`` set (which excludes
+    phase3.pipeline and phase3.datamodel for M4-S2 decision.py)."""
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
     forbidden_found: list[str] = []
@@ -139,6 +187,27 @@ def _scan_forbidden_imports(path: Path) -> list[str]:
             mod = node.module or ""
             top = mod.split(".")[0]
             if top in FORBIDDEN_IMPORT_NAMES or mod in FORBIDDEN_IMPORT_NAMES:
+                forbidden_found.append(mod)
+    return forbidden_found
+
+
+def _scan_forbidden_imports_with_set(path: Path, forbidden_set: set[str]) -> list[str]:
+    """AST-walk a .py file and return the list of forbidden imports found,
+    using a custom forbidden set (e.g. the stricter set for allocation.py
+    that includes phase3.pipeline and phase3.datamodel)."""
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+    forbidden_found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if top in forbidden_set or alias.name in forbidden_set:
+                    forbidden_found.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            top = mod.split(".")[0]
+            if top in forbidden_set or mod in forbidden_set:
                 forbidden_found.append(mod)
     return forbidden_found
 
@@ -179,16 +248,57 @@ class TestAGM41AstScanForbiddenImports(unittest.TestCase):
         self.assertTrue(_file_exists(DECISION_PY), f"{DECISION_PY} does not exist")
 
     def test_allocation_py_no_forbidden_imports(self):
-        """AST scan of allocation.py: 0 forbidden import statements."""
+        """AST scan of allocation.py: 0 forbidden import statements.
+
+        allocation.py uses the FULL forbidden set (includes phase3.pipeline
+        and phase3.datamodel) because it must NOT cross the intelligence
+        boundary (boundary rule 8 — crossing is decision.py only in M4-S2)."""
         self.assertTrue(_file_exists(ALLOCATION_PY))
-        forbidden = _scan_forbidden_imports(ALLOCATION_PY)
+        forbidden = _scan_forbidden_imports_with_set(
+            ALLOCATION_PY, FORBIDDEN_IMPORT_NAMES_ALLOCATION
+        )
         self.assertEqual(forbidden, [], f"allocation.py forbidden imports: {forbidden}")
 
     def test_decision_py_no_forbidden_imports(self):
-        """AST scan of decision.py: 0 forbidden import statements."""
+        """AST scan of decision.py: 0 forbidden import statements.
+
+        M4-S2 UPDATE: decision.py now imports from phase3.pipeline and
+        phase3.datamodel (boundary rule 8 crossing). These are removed
+        from the forbidden set for decision.py. The narrow allowlist
+        (4 named symbols from 3 modules) is enforced by
+        test_decision_py_intelligence_import_allowlist below."""
         self.assertTrue(_file_exists(DECISION_PY))
         forbidden = _scan_forbidden_imports(DECISION_PY)
         self.assertEqual(forbidden, [], f"decision.py forbidden imports: {forbidden}")
+
+    def test_decision_py_intelligence_import_allowlist(self):
+        """M4-S2 NEW: decision.py intelligence imports are narrowly
+        allowlisted. Only PipelineResult, PipelineRunReport, ScoreBreakdown,
+        and EvidenceQueryHandle may be imported from phase3.pipeline and
+        phase3.datamodel. Any other symbol is forbidden."""
+        self.assertTrue(_file_exists(DECISION_PY))
+        source = DECISION_PY.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(DECISION_PY))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                mod = node.module or ""
+                if mod in ALLOWED_INTELLIGENCE_MODULES:
+                    for alias in node.names:
+                        self.assertIn(
+                            alias.name,
+                            ALLOWED_INTELLIGENCE_SYMBOLS,
+                            f"decision.py imports {alias.name!r} from {mod!r} "
+                            f"which is not in the allowlist "
+                            f"{ALLOWED_INTELLIGENCE_SYMBOLS}",
+                        )
+                elif mod.startswith("phase3.pipeline.") or mod.startswith("phase3.datamodel."):
+                    # Any import from phase3.pipeline/datamodel NOT in the
+                    # allowlist is forbidden.
+                    self.fail(
+                        f"decision.py imports from {mod!r} which is not in "
+                        f"the allowed intelligence modules "
+                        f"{ALLOWED_INTELLIGENCE_MODULES}"
+                    )
 
     def test_allocation_py_imports_domain(self):
         """allocation.py must import from phase3.portfolio.domain (positive)."""
@@ -348,8 +458,41 @@ class TestAGM43FileLevelSha256(unittest.TestCase):
             )
 
     def test_allocation_py_is_new_file(self):
-        """allocation.py is an M4 new file; it must exist."""
+        """allocation.py is an M4 new file; it must exist.
+
+        M4-S2: allocation.py must be UNCHANGED from M4-S1 baseline
+        (sha 9133f66d...). M4-S2 consumes it read-only."""
         self.assertTrue(_file_exists(ALLOCATION_PY), "allocation.py must exist (M4-S1)")
+        actual = _sha256_file(ALLOCATION_PY)
+        self.assertEqual(
+            actual,
+            M4_S1_BASELINE["allocation.py"],
+            "allocation.py was modified by M4-S2 — must be read-only (M4-S1 baseline)",
+        )
+
+    def test_decision_py_matches_m4s2_baseline(self):
+        """M4-S2: decision.py sha matches the post-M4-S2 baseline
+        (it was extended by M4-S2 from the M4-S1 stub)."""
+        self.assertTrue(_file_exists(DECISION_PY), "decision.py must exist")
+        actual = _sha256_file(DECISION_PY)
+        self.assertEqual(
+            actual,
+            M4_S2_BASELINE["decision.py"],
+            "decision.py sha does not match M4-S2 baseline — "
+            "expected the extended implementation",
+        )
+
+    def test_init_py_matches_m4s2_baseline(self):
+        """M4-S2: __init__.py sha matches the post-M4-S2 baseline
+        (additive +1 re-export of AllocationPolicyConfig)."""
+        self.assertTrue(_file_exists(INIT_PY), "__init__.py must exist")
+        actual = _sha256_file(INIT_PY)
+        self.assertEqual(
+            actual,
+            M4_S2_BASELINE["init.py"],
+            "__init__.py sha does not match M4-S2 baseline — "
+            "expected additive +1 re-export",
+        )
 
     def test_decision_py_is_new_file(self):
         """decision.py is an M4 new file; it must exist."""
@@ -456,7 +599,9 @@ class TestAGM47MPortfolioPackageReExports(unittest.TestCase):
 
     def test_m4_symbols_added(self):
         """M4-S1 symbols (Allocation, PortfolioDecision,
-        PortfolioDecisionEngine) are re-exported by the package."""
+        PortfolioDecisionEngine) are re-exported by the package.
+
+        M4-S2: AllocationPolicyConfig is also re-exported (additive +1)."""
         try:
             import phase3.portfolio as pkg
         except ModuleNotFoundError as exc:
@@ -464,10 +609,11 @@ class TestAGM47MPortfolioPackageReExports(unittest.TestCase):
         self.assertTrue(hasattr(pkg, "Allocation"))
         self.assertTrue(hasattr(pkg, "PortfolioDecision"))
         self.assertTrue(hasattr(pkg, "PortfolioDecisionEngine"))
+        self.assertTrue(hasattr(pkg, "AllocationPolicyConfig"))
 
     def test_init_all_contains_m4_symbols(self):
         """``__all__`` contains the M4 symbols (additive — 19 M2+M3
-        symbols preserved + 3 M4 symbols appended)."""
+        symbols preserved + 3 M4-S1 symbols + 1 M4-S2 symbol = 23 total)."""
         try:
             import phase3.portfolio as pkg
         except ModuleNotFoundError as exc:
@@ -475,6 +621,7 @@ class TestAGM47MPortfolioPackageReExports(unittest.TestCase):
         self.assertIn("Allocation", pkg.__all__)
         self.assertIn("PortfolioDecision", pkg.__all__)
         self.assertIn("PortfolioDecisionEngine", pkg.__all__)
+        self.assertIn("AllocationPolicyConfig", pkg.__all__)
         # M2 + M3 symbols preserved (19 total).
         for sym in (
             "EntityId", "PortfolioId", "PositionId", "Weight", "Quantity",

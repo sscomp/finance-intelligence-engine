@@ -52,7 +52,11 @@ from phase3.portfolio.risk import (
     compute_risk_budget,
 )
 from phase3.portfolio.allocation import Allocation
-from phase3.portfolio.decision import PortfolioDecision, PortfolioDecisionEngine
+from phase3.portfolio.decision import (
+    AllocationPolicyConfig,
+    PortfolioDecision,
+    PortfolioDecisionEngine,
+)
 
 __all__ = [
     # Value objects
@@ -83,4 +87,6 @@ __all__ = [
     "Allocation",
     "PortfolioDecision",
     "PortfolioDecisionEngine",
+    # Decision engine config (M4-S2)
+    "AllocationPolicyConfig",
 ]
