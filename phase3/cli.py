@@ -2514,7 +2514,259 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p19.set_defaults(func=cmd_shadow_run)
 
+    # Phase 5 M4-S3 — Portfolio Decision Engine CLI.
+    p20 = sub.add_parser(
+        "portfolio-run",
+        help="Phase 5 M4-S3: run the PortfolioDecisionEngine on a "
+             "pipeline-export artifact + portfolio JSON. Produces a "
+             "PortfolioDecision with target allocation + risk summary.",
+    )
+    p20.add_argument(
+        "--pipeline-artifact", default=None,
+        help="Path to a pipeline-export JSON artifact (required). "
+             "Refused if it resolves to macro_history.db.",
+    )
+    p20.add_argument(
+        "--portfolio-file", default=None,
+        help="Path to a portfolio JSON file (required). Format: "
+             '{"portfolio_id": "...", "positions": [...]}',
+    )
+    p20.add_argument(
+        "--policy-type", default="score_weighted",
+        choices=("score_weighted", "risk_aware"),
+        help="Allocation policy type (default: score_weighted).",
+    )
+    p20.add_argument(
+        "--target-total", type=float, default=1.0,
+        help="Target sum of weights (default: 1.0).",
+    )
+    p20.add_argument(
+        "--per-position-cap", type=float, default=0.25,
+        help="Maximum weight per position (default: 0.25).",
+    )
+    p20.add_argument(
+        "--generated-at", default="",
+        help="ISO 8601 timestamp for determinism (default: empty).",
+    )
+    p20.add_argument(
+        "--max-gross", type=float, default=1.0,
+        help="Maximum gross exposure (default: 1.0).",
+    )
+    p20.add_argument(
+        "--max-hhi", type=float, default=0.40,
+        help="Maximum HHI concentration index (default: 0.40).",
+    )
+    p20.add_argument(
+        "--max-top-n", type=float, default=0.60,
+        help="Maximum top-N weight concentration (default: 0.60).",
+    )
+    p20.add_argument(
+        "--top-n", type=int, default=5,
+        help="N for top-N concentration cap (default: 5).",
+    )
+    p20.add_argument(
+        "--max-utilization", type=float, default=1.0,
+        help="Maximum risk budget utilization (default: 1.0).",
+    )
+    p20.add_argument(
+        "--max-correlation", type=float, default=None,
+        help="Maximum weighted average correlation (optional).",
+    )
+    p20.add_argument(
+        "--max-iterations", type=int, default=100,
+        help="Maximum constraint enforcement iterations (default: 100).",
+    )
+    p20.add_argument(
+        "--no-strict", action="store_false", dest="strict",
+        help="Advisory mode: do not raise on constraint failure.",
+    )
+    p20.add_argument(
+        "--output", default=None,
+        help="Write the JSON-serialised PortfolioDecision to PATH. "
+             "Use '-' for stdout. Implies --json.",
+    )
+    p20.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON on stdout (default: human-readable).",
+    )
+    p20.set_defaults(func=cmd_portfolio_run, strict=True)
+
     return p
+
+
+# ---------- Phase 5 M4-S3: portfolio-run subcommand ---------- #
+
+
+def cmd_portfolio_run(args: argparse.Namespace) -> int:
+    """Phase 5 M4-S3: run the PortfolioDecisionEngine on a
+    pipeline-export JSON artifact + portfolio JSON, producing
+    a PortfolioDecision JSON.
+
+    Loads a PipelineRunReport from --pipeline-artifact and a
+    Portfolio from --portfolio-file, constructs an
+    AllocationPolicyConfig from CLI flags, and runs the engine.
+    Output: JSON on stdout (--json) or human-readable text (default).
+    """
+    import json as _json
+    from phase3.portfolio.domain import (
+        EntityId, Portfolio, PortfolioId, Position, PositionId,
+        Quantity, Weight,
+    )
+    from phase3.portfolio.decision import (
+        AllocationPolicyConfig, PortfolioDecisionEngine,
+    )
+
+    # Load pipeline export artifact.
+    artifact_path = args.pipeline_artifact
+    if not artifact_path:
+        print("Error: --pipeline-artifact is required", file=sys.stderr)
+        return 2
+
+    artifact_p = Path(artifact_path)
+    if not artifact_p.is_file():
+        print(f"Error: artifact not found: {artifact_path}", file=sys.stderr)
+        return 2
+
+    # Refuse macro_history.db (safety guard).
+    if artifact_p.name.lower() == "macro_history.db":
+        print("Error: artifact path resolves to macro_history.db (refused)", file=sys.stderr)
+        return 2
+
+    with open(artifact_p, "r") as f:
+        report_data = _json.load(f)
+
+    # Deserialize PipelineRunReport.
+    from phase3.pipeline.scoring_pipeline import PipelineResult, PipelineRunReport
+    from phase3.datamodel.scores import ScoreBreakdown
+    from datetime import datetime as _dt
+
+    def _deserialize_result(data):
+        score_data = data.get("score", {})
+        breakdown_data = score_data.get("breakdown") if score_data else None
+        if breakdown_data:
+            breakdown = ScoreBreakdown(
+                scorer_type=breakdown_data["scorer_type"],
+                entity_type=breakdown_data["entity_type"],
+                entity_id=breakdown_data["entity_id"],
+                score=float(breakdown_data["score"]),
+                confidence=float(breakdown_data["confidence"]),
+                dimensions=[],
+                overall_evidence=[],
+                timestamp=_dt.fromisoformat(breakdown_data["timestamp"]),
+                config_hash=breakdown_data["config_hash"],
+                valid_until=_dt.fromisoformat(breakdown_data["valid_until"]),
+                cross_layer_adjustments=[],
+                schema_version=breakdown_data.get("schema_version", "2.0"),
+            )
+
+            class _MockScore:
+                def __init__(self, b):
+                    self.breakdown = b
+            score = _MockScore(breakdown)
+        else:
+            score = None
+        return PipelineResult(
+            score=score,
+            input_bundle=None,
+            evidence_signal_ids=tuple(data.get("evidence_signal_ids", [])),
+            snapshot_id=data.get("snapshot_id"),
+            warnings=tuple(data.get("warnings", [])),
+            metadata=dict(data.get("metadata", {})),
+        )
+
+    macro = None
+    if report_data.get("macro") is not None:
+        macro = _deserialize_result(report_data["macro"])
+    industries = tuple(
+        _deserialize_result(r) for r in report_data.get("industries", [])
+    )
+    companies = tuple(
+        _deserialize_result(r) for r in report_data.get("companies", [])
+    )
+    report = PipelineRunReport(
+        macro=macro, industries=industries, companies=companies,
+        warnings=tuple(report_data.get("warnings", [])),
+    )
+
+    # Load portfolio JSON.
+    portfolio_path = args.portfolio_file
+    if not portfolio_path:
+        print("Error: --portfolio-file is required", file=sys.stderr)
+        return 2
+
+    with open(portfolio_path, "r") as f:
+        portfolio_data = _json.load(f)
+
+    positions = []
+    for i, pos_data in enumerate(portfolio_data.get("positions", [])):
+        positions.append(Position(
+            position_id=PositionId(pos_data.get("position_id", f"pos-{i:04d}")),
+            entity_id=EntityId(pos_data["entity_id"]),
+            weight=Weight(float(pos_data.get("weight", 0.0))),
+            quantity=Quantity(int(pos_data.get("quantity", 0))),
+        ))
+    portfolio = Portfolio(
+        portfolio_id=PortfolioId(portfolio_data.get("portfolio_id", "portfolio-001")),
+        name=portfolio_data.get("name", "Portfolio"),
+        positions=tuple(positions),
+    )
+
+    # Build AllocationPolicyConfig from CLI flags.
+    config_kwargs = {
+        "policy_type": args.policy_type,
+        "target_total": args.target_total,
+        "per_position_cap": args.per_position_cap,
+        "generated_at": args.generated_at,
+        "max_gross": args.max_gross,
+        "max_hhi": args.max_hhi,
+        "max_top_n": args.max_top_n,
+        "top_n": args.top_n,
+        "max_utilization": args.max_utilization,
+        "max_iterations": args.max_iterations,
+        "strict": args.strict,
+    }
+    if args.max_correlation is not None:
+        config_kwargs["max_correlation"] = args.max_correlation
+
+    config = AllocationPolicyConfig(**config_kwargs)
+
+    # Run the engine.
+    engine = PortfolioDecisionEngine()
+    try:
+        decision = engine.run(report, portfolio, config)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    # Output.
+    decision_dict = decision.to_dict()
+
+    if args.output:
+        output_path = args.output
+        if output_path == "-":
+            print(_json.dumps(decision_dict, indent=2, default=str))
+        else:
+            with open(output_path, "w") as f:
+                _json.dump(decision_dict, f, indent=2, default=str)
+            print(f"Decision written to {output_path}")
+    elif args.json:
+        print(_json.dumps(decision_dict, indent=2, default=str))
+    else:
+        # Human-readable.
+        print(f"Decision ID: {decision.decision_id}")
+        print(f"Portfolio ID: {decision.portfolio_id}")
+        print(f"Policy: {config.policy_type}")
+        print(f"Generated at: {decision.generated_at}")
+        print(f"Positions ({len(decision.allocation.positions)}):")
+        for pos in decision.allocation.positions:
+            print(f"  {pos.entity_id.value}: {pos.weight.value:.6f}")
+        print(f"Target total: {decision.allocation.target_total:.6f}")
+        if decision.risk_summary:
+            print(f"Risk summary keys: {list(decision.risk_summary.keys())}")
+        print(f"Evidence refs: {len(decision.evidence_refs)}")
+        print(f"Rationale: {decision.rationale[:200]}...")
+
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

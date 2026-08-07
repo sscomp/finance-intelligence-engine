@@ -53,6 +53,7 @@ from phase3.portfolio.risk import (
 )
 from phase3.portfolio.allocation import Allocation
 from phase3.portfolio.decision import (
+    AllocationConstraintError,
     AllocationPolicyConfig,
     PortfolioDecision,
     PortfolioDecisionEngine,
@@ -89,4 +90,6 @@ __all__ = [
     "PortfolioDecisionEngine",
     # Decision engine config (M4-S2)
     "AllocationPolicyConfig",
+    # Constraint error (M4-S3)
+    "AllocationConstraintError",
 ]

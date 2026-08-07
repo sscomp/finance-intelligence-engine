@@ -137,19 +137,23 @@ M4_S1_BASELINE = {
     "allocation.py": "9133f66d25342c0ccfbcdf2809de3388f1f1cc79fd26a8c9f952047c5a7a6e08",
 }
 
-# M4-S2 current SHAs (decision.py and __init__.py are MODIFIED by M4-S2;
+# M4-S2 baseline SHAs (decision.py and __init__.py were MODIFIED by M4-S2;
 # these are the post-M4-S2 baselines that future milestones must preserve).
+# M4-S3 UPDATE: decision.py and __init__.py are MODIFIED by M4-S3 (risk-aware
+# policy + constraint enforcement + AllocationConstraintError re-export).
+# cli.py is MODIFIED by M4-S3 (additive portfolio-run subcommand).
 M4_S2_BASELINE = {
-    "decision.py": "32ada6f6f9b335e57b84ea53ab09ad8a077f5eb84f03ea90cea825a2b6197648",
-    "init.py": "afd3bb4c962be622f90f13967071d5968f477d4d238aa785928d6bd3977a589f",
+    "decision.py": "2bbcb209dd189ca1e76213b9fcea3015661fad13c333c1011c968a727d22679f",
+    "init.py": "62b9c036325172aeb1c1c0606f6d0d7e3ed8c0a8d7d20c470ddd5708816e1603",
 }
 
 # Known phase3 top-level + pipeline + datamodel baseline SHAs (M4-S1 must
 # not modify any file outside phase3.portfolio.*).
+# M4-S3 UPDATE: cli.py is MODIFIED by M4-S3 (additive portfolio-run subcommand).
 PHASE3_BASELINE = {
     "phase3/__init__.py": "3020382849864e92f78ae38b2c9cbd0e48419e3120e76786f905d43a5eafaeaa",
     "phase3/api.py": "539d58838ff86088d7e71178fed3127065ead83c58786d8f62952d06a3cf50fe",
-    "phase3/cli.py": "108c899ac5de128810dfff04775c7de2fb84330527e0f89aef221204dbd689e0",
+    "phase3/cli.py": "f33d9b7795487df26f53b2c0dd64bc5df70dd016ee864d7535cd02be0e674c93",
     "phase3/pipeline/scoring_pipeline.py": "5b778e00c99cec04c7d90965f291d70acada9507d5a99fb938f94fa03fb4dd59",
     "phase3/pipeline/intelligence_pipeline.py": "025af0e538572fc056a73a9dc8ef2686f7518fd95723525693726f1da6fe5570",
     "phase3/datamodel/scores.py": "cc934edd423b1cea8a51cd0554547546a5bc2a34bac169d0ba154332599a090c",
@@ -333,6 +337,22 @@ class TestAGM41AstScanForbiddenImports(unittest.TestCase):
             found_internal,
             "decision.py must import from phase3.portfolio.domain or "
             "phase3.portfolio.allocation",
+        )
+
+    def test_decision_py_imports_risk(self):
+        """M4-S3 NEW: decision.py imports from phase3.portfolio.risk
+        (the first M4 slice to consume the M3 risk engine layer)."""
+        self.assertTrue(_file_exists(DECISION_PY))
+        source = DECISION_PY.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(DECISION_PY))
+        imports_risk = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.module == "phase3.portfolio.risk":
+                    imports_risk = True
+        self.assertTrue(
+            imports_risk,
+            "decision.py must import from phase3.portfolio.risk (M4-S3)",
         )
 
 
@@ -601,7 +621,8 @@ class TestAGM47MPortfolioPackageReExports(unittest.TestCase):
         """M4-S1 symbols (Allocation, PortfolioDecision,
         PortfolioDecisionEngine) are re-exported by the package.
 
-        M4-S2: AllocationPolicyConfig is also re-exported (additive +1)."""
+        M4-S2: AllocationPolicyConfig is also re-exported (additive +1).
+        M4-S3: AllocationConstraintError is also re-exported (additive +1)."""
         try:
             import phase3.portfolio as pkg
         except ModuleNotFoundError as exc:
@@ -610,10 +631,12 @@ class TestAGM47MPortfolioPackageReExports(unittest.TestCase):
         self.assertTrue(hasattr(pkg, "PortfolioDecision"))
         self.assertTrue(hasattr(pkg, "PortfolioDecisionEngine"))
         self.assertTrue(hasattr(pkg, "AllocationPolicyConfig"))
+        self.assertTrue(hasattr(pkg, "AllocationConstraintError"))
 
     def test_init_all_contains_m4_symbols(self):
         """``__all__`` contains the M4 symbols (additive — 19 M2+M3
-        symbols preserved + 3 M4-S1 symbols + 1 M4-S2 symbol = 23 total)."""
+        symbols preserved + 3 M4-S1 symbols + 1 M4-S2 symbol + 1 M4-S3
+        symbol = 24 total)."""
         try:
             import phase3.portfolio as pkg
         except ModuleNotFoundError as exc:
@@ -622,6 +645,7 @@ class TestAGM47MPortfolioPackageReExports(unittest.TestCase):
         self.assertIn("PortfolioDecision", pkg.__all__)
         self.assertIn("PortfolioDecisionEngine", pkg.__all__)
         self.assertIn("AllocationPolicyConfig", pkg.__all__)
+        self.assertIn("AllocationConstraintError", pkg.__all__)
         # M2 + M3 symbols preserved (19 total).
         for sym in (
             "EntityId", "PortfolioId", "PositionId", "Weight", "Quantity",

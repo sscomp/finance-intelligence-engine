@@ -722,3 +722,386 @@ class TestEdgeCases(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+# --------------------------------------------------------------------------- #
+# M4-S3: Risk-Aware Policy + Constraint Enforcement Tests
+# --------------------------------------------------------------------------- #
+
+
+class TestRiskAwarePolicy(unittest.TestCase):
+    """RA1-RA9: Risk-aware allocation policy correctness."""
+
+    def test_ra1_risk_aware_policy_type_accepted(self):
+        """RA1: policy_type='risk_aware' is accepted."""
+        config = AllocationPolicyConfig(
+            policy_type="risk_aware",
+            generated_at="2026-08-07T00:00:00Z",
+        )
+        self.assertEqual(config.policy_type, "risk_aware")
+
+    def test_ra2_risk_aware_produces_decision(self):
+        """RA2: risk_aware policy produces a PortfolioDecision."""
+        eids = ["company:TW:2330", "company:TW:2317", "company:TW:2454"]
+        results = tuple(
+            _make_pipeline_result(eid, s, 1.0)
+            for eid, s in zip(eids, [80.0, 60.0, 10.0])
+        )
+        report = PipelineRunReport(macro=None, companies=results, industries=())
+        portfolio = _make_portfolio(eids)
+        config = AllocationPolicyConfig(
+            policy_type="risk_aware",
+            generated_at="2026-08-07T00:00:00Z",
+            per_position_cap=0.50,
+            max_top_n=1.0,
+            max_hhi=1.0,
+        )
+        engine = PortfolioDecisionEngine()
+        decision = engine.run(report, portfolio, config)
+        self.assertIsInstance(decision, PortfolioDecision)
+
+    def test_ra3_risk_summary_populated(self):
+        """RA3: risk_summary is populated with exposure + concentration."""
+        eids = ["company:TW:2330", "company:TW:2317", "company:TW:2454"]
+        results = tuple(
+            _make_pipeline_result(eid, s, 1.0)
+            for eid, s in zip(eids, [80.0, 60.0, 10.0])
+        )
+        report = PipelineRunReport(macro=None, companies=results, industries=())
+        portfolio = _make_portfolio(eids)
+        config = AllocationPolicyConfig(
+            policy_type="risk_aware",
+            generated_at="2026-08-07T00:00:00Z",
+            per_position_cap=0.50,
+            max_top_n=1.0,
+            max_hhi=1.0,
+        )
+        engine = PortfolioDecisionEngine()
+        decision = engine.run(report, portfolio, config)
+        self.assertIn("exposure", decision.risk_summary)
+        self.assertIn("concentration", decision.risk_summary)
+        self.assertIn("iterations_used", decision.risk_summary)
+
+    def test_ra4_per_position_cap_enforced(self):
+        """RA4: risk-aware policy enforces per_position_cap."""
+        eids = ["company:TW:2330", "company:TW:2317"]
+        results = tuple(
+            _make_pipeline_result(eid, s, 1.0)
+            for eid, s in zip(eids, [90.0, 10.0])
+        )
+        report = PipelineRunReport(macro=None, companies=results, industries=())
+        portfolio = _make_portfolio(eids)
+        config = AllocationPolicyConfig(
+            policy_type="risk_aware",
+            generated_at="2026-08-07T00:00:00Z",
+            per_position_cap=0.30,
+            max_iterations=50,
+        )
+        engine = PortfolioDecisionEngine()
+        decision = engine.run(report, portfolio, config)
+        for pos in decision.allocation.positions:
+            self.assertLessEqual(pos.weight.value, 0.30 + _FP_REL_TOL)
+
+    def test_ra5_hhi_constraint_enforced(self):
+        """RA5: risk-aware policy enforces max_hhi constraint."""
+        eids = ["company:TW:2330", "company:TW:2317", "company:TW:2454"]
+        results = tuple(
+            _make_pipeline_result(eid, s, 1.0)
+            for eid, s in zip(eids, [90.0, 5.0, 5.0])
+        )
+        report = PipelineRunReport(macro=None, companies=results, industries=())
+        portfolio = _make_portfolio(eids)
+        config = AllocationPolicyConfig(
+            policy_type="risk_aware",
+            generated_at="2026-08-07T00:00:00Z",
+            per_position_cap=0.50,
+            max_hhi=0.35,
+            max_top_n=1.0,
+            max_iterations=100,
+        )
+        engine = PortfolioDecisionEngine()
+        decision = engine.run(report, portfolio, config)
+        hhi = decision.risk_summary.get("concentration", {}).get("hhi", 1.0)
+        self.assertLessEqual(hhi, 0.35 + 0.01)
+
+    def test_ra6_gross_exposure_constraint(self):
+        """RA6: risk-aware policy enforces max_gross constraint."""
+        eids = ["company:TW:2330", "company:TW:2317"]
+        results = tuple(
+            _make_pipeline_result(eid, s, 1.0)
+            for eid, s in zip(eids, [80.0, 60.0])
+        )
+        report = PipelineRunReport(macro=None, companies=results, industries=())
+        portfolio = _make_portfolio(eids)
+        config = AllocationPolicyConfig(
+            policy_type="risk_aware",
+            generated_at="2026-08-07T00:00:00Z",
+            per_position_cap=0.50,
+            max_gross=0.80,
+            max_top_n=1.0,
+            max_hhi=1.0,
+            max_iterations=100,
+        )
+        engine = PortfolioDecisionEngine()
+        decision = engine.run(report, portfolio, config)
+        gross = decision.risk_summary.get("exposure", {}).get("gross_exposure", 2.0)
+        self.assertLessEqual(gross, 0.80 + _FP_REL_TOL)
+
+    def test_ra7_score_weighted_still_works(self):
+        """RA7: score_weighted policy still works (backward compat)."""
+        eids = ["company:TW:2330", "company:TW:2317"]
+        results = tuple(
+            _make_pipeline_result(eid, s, 1.0)
+            for eid, s in zip(eids, [80.0, 20.0])
+        )
+        report = PipelineRunReport(macro=None, companies=results, industries=())
+        portfolio = _make_portfolio(eids)
+        config = AllocationPolicyConfig(
+            policy_type="score_weighted",
+            generated_at="2026-08-07T00:00:00Z",
+            per_position_cap=1.0,
+        )
+        engine = PortfolioDecisionEngine()
+        decision = engine.run(report, portfolio, config)
+        self.assertEqual(decision.risk_summary, {})
+
+    def test_ra8_constraint_error_on_impossible(self):
+        """RA8: AllocationConstraintError raised when constraints
+        are impossible in strict mode."""
+        from phase3.portfolio.decision import AllocationConstraintError
+        eids = ["company:TW:2330"]
+        results = tuple(
+            _make_pipeline_result(eid, s, 1.0)
+            for eid, s in zip(eids, [100.0])
+        )
+        report = PipelineRunReport(macro=None, companies=results, industries=())
+        portfolio = _make_portfolio(eids)
+        config = AllocationPolicyConfig(
+            policy_type="risk_aware",
+            generated_at="2026-08-07T00:00:00Z",
+            per_position_cap=0.05,
+            max_hhi=0.001,
+            max_iterations=5,
+            strict=True,
+        )
+        engine = PortfolioDecisionEngine()
+        with self.assertRaises(AllocationConstraintError) as ctx:
+            engine.run(report, portfolio, config)
+        self.assertGreater(ctx.exception.iterations_used, 0)
+
+    def test_ra9_advisory_mode_no_raise(self):
+        """RA9: advisory mode (strict=False) does not raise."""
+        eids = ["company:TW:2330"]
+        results = tuple(
+            _make_pipeline_result(eid, s, 1.0)
+            for eid, s in zip(eids, [100.0])
+        )
+        report = PipelineRunReport(macro=None, companies=results, industries=())
+        portfolio = _make_portfolio(eids)
+        config = AllocationPolicyConfig(
+            policy_type="risk_aware",
+            generated_at="2026-08-07T00:00:00Z",
+            per_position_cap=0.05,
+            max_hhi=0.001,
+            max_iterations=5,
+            strict=False,
+        )
+        engine = PortfolioDecisionEngine()
+        decision = engine.run(report, portfolio, config)
+        self.assertIsInstance(decision, PortfolioDecision)
+
+
+class TestAllocationPolicyConfigM4S3(unittest.TestCase):
+    """CFG7-CFG12: M4-S3 constraint field validation."""
+
+    def test_cfg7_risk_aware_policy_type(self):
+        """CFG7: risk_aware policy_type is accepted."""
+        config = AllocationPolicyConfig(
+            policy_type="risk_aware",
+            generated_at="2026-08-07T00:00:00Z",
+        )
+        self.assertEqual(config.policy_type, "risk_aware")
+
+    def test_cfg8_constraint_fields_defaults(self):
+        """CFG8: M4-S3 constraint fields have correct defaults."""
+        config = AllocationPolicyConfig(
+            generated_at="2026-08-07T00:00:00Z",
+        )
+        self.assertEqual(config.max_gross, 1.0)
+        self.assertEqual(config.max_hhi, 0.40)
+        self.assertEqual(config.max_top_n, 0.60)
+        self.assertEqual(config.top_n, 5)
+        self.assertEqual(config.max_utilization, 1.0)
+        self.assertIsNone(config.max_correlation)
+        self.assertEqual(config.max_iterations, 100)
+        self.assertTrue(config.strict)
+        self.assertEqual(config.per_position_budget, 1.0)
+
+    def test_cfg9_to_dict_includes_m4s3_fields(self):
+        """CFG9: to_dict includes M4-S3 constraint fields."""
+        config = AllocationPolicyConfig(
+            policy_type="risk_aware",
+            generated_at="2026-08-07T00:00:00Z",
+        )
+        d = config.to_dict()
+        self.assertIn("max_gross", d)
+        self.assertIn("max_hhi", d)
+        self.assertIn("max_top_n", d)
+        self.assertIn("top_n", d)
+        self.assertIn("max_utilization", d)
+        self.assertIn("max_correlation", d)
+        self.assertIn("max_iterations", d)
+        self.assertIn("strict", d)
+        self.assertIn("per_position_budget", d)
+
+    def test_cfg10_from_dict_round_trip_m4s3(self):
+        """CFG10: from_dict/to_dict round-trip with M4-S3 fields."""
+        config = AllocationPolicyConfig(
+            policy_type="risk_aware",
+            generated_at="2026-08-07T00:00:00Z",
+            max_gross=0.9,
+            max_hhi=0.30,
+            max_top_n=0.50,
+            top_n=3,
+            max_utilization=0.8,
+            max_correlation=0.5,
+            max_iterations=50,
+            strict=False,
+            per_position_budget=0.5,
+        )
+        d = config.to_dict()
+        config2 = AllocationPolicyConfig.from_dict(d)
+        self.assertEqual(config2.max_gross, 0.9)
+        self.assertEqual(config2.max_hhi, 0.30)
+        self.assertEqual(config2.max_top_n, 0.50)
+        self.assertEqual(config2.top_n, 3)
+        self.assertEqual(config2.max_utilization, 0.8)
+        self.assertEqual(config2.max_correlation, 0.5)
+        self.assertEqual(config2.max_iterations, 50)
+        self.assertFalse(config2.strict)
+        self.assertEqual(config2.per_position_budget, 0.5)
+        self.assertEqual(config2.to_dict(), d)
+
+    def test_cfg11_m4s2_dict_backward_compat(self):
+        """CFG11: M4-S2 dict (no M4-S3 fields) round-trips with defaults."""
+        m4s2_dict = {
+            "policy_type": "score_weighted",
+            "target_total": 1.0,
+            "per_position_cap": 0.25,
+            "generated_at": "2026-08-05T00:00:00Z",
+            "negative_score_handling": "cash",
+            "out_of_range_score_handling": "clamp",
+            "decision_id": "",
+            "rationale_template": "",
+        }
+        config = AllocationPolicyConfig.from_dict(m4s2_dict)
+        self.assertEqual(config.max_gross, 1.0)
+        self.assertEqual(config.max_hhi, 0.40)
+        self.assertEqual(config.max_iterations, 100)
+        self.assertTrue(config.strict)
+
+    def test_cfg12_invalid_constraint_values_rejected(self):
+        """CFG12: invalid M4-S3 constraint values raise ValueError."""
+        with self.assertRaises(ValueError):
+            AllocationPolicyConfig(
+                generated_at="2026-08-07T00:00:00Z",
+                max_hhi=-0.1,
+            )
+        with self.assertRaises(ValueError):
+            AllocationPolicyConfig(
+                generated_at="2026-08-07T00:00:00Z",
+                max_hhi=1.5,
+            )
+        with self.assertRaises(ValueError):
+            AllocationPolicyConfig(
+                generated_at="2026-08-07T00:00:00Z",
+                top_n=0,
+            )
+        with self.assertRaises(ValueError):
+            AllocationPolicyConfig(
+                generated_at="2026-08-07T00:00:00Z",
+                max_iterations=0,
+            )
+        with self.assertRaises(ValueError):
+            AllocationPolicyConfig(
+                generated_at="2026-08-07T00:00:00Z",
+                max_correlation=2.0,
+            )
+
+
+class TestAllocationConstraintError(unittest.TestCase):
+    """ACE1-ACE4: AllocationConstraintError class tests."""
+
+    def test_ace1_error_construction(self):
+        """ACE1: AllocationConstraintError can be constructed."""
+        from phase3.portfolio.decision import AllocationConstraintError
+        err = AllocationConstraintError(
+            "test error",
+            breaches={"hhi": {"value": 0.5, "limit": 0.3}},
+            iterations_used=10,
+        )
+        self.assertEqual(err.message, "test error")
+        self.assertEqual(err.iterations_used, 10)
+        self.assertIn("hhi", err.breaches)
+
+    def test_ace2_to_dict(self):
+        """ACE2: AllocationConstraintError.to_dict works."""
+        from phase3.portfolio.decision import AllocationConstraintError
+        err = AllocationConstraintError(
+            "test",
+            breaches={"x": 1},
+            iterations_used=5,
+        )
+        d = err.to_dict()
+        self.assertEqual(d["message"], "test")
+        self.assertEqual(d["iterations_used"], 5)
+        self.assertEqual(d["breaches"], {"x": 1})
+
+    def test_ace3_is_exception(self):
+        """ACE3: AllocationConstraintError is an Exception subclass."""
+        from phase3.portfolio.decision import AllocationConstraintError
+        self.assertTrue(issubclass(AllocationConstraintError, Exception))
+
+    def test_ace4_re_exported_from_package(self):
+        """ACE4: AllocationConstraintError is re-exported from package."""
+        import phase3.portfolio as pkg
+        self.assertTrue(hasattr(pkg, "AllocationConstraintError"))
+        self.assertIn("AllocationConstraintError", pkg.__all__)
+
+
+class TestRiskAwareDeterminism(unittest.TestCase):
+    """DET4-DET5: Determinism for risk-aware policy."""
+
+    def test_det4_risk_aware_deterministic(self):
+        """DET4: Same inputs produce same outputs (risk-aware policy)."""
+        eids = ["company:TW:2330", "company:TW:2317", "company:TW:2454"]
+        results = tuple(
+            _make_pipeline_result(eid, s, 1.0)
+            for eid, s in zip(eids, [80.0, 60.0, 10.0])
+        )
+        report = PipelineRunReport(macro=None, companies=results, industries=())
+        portfolio = _make_portfolio(eids)
+        config = AllocationPolicyConfig(
+            policy_type="risk_aware",
+            generated_at="2026-08-07T00:00:00Z",
+            per_position_cap=0.40,
+            max_top_n=1.0,
+            max_hhi=1.0,
+        )
+        engine = PortfolioDecisionEngine()
+        d1 = engine.run(report, portfolio, config)
+        d2 = engine.run(report, portfolio, config)
+        self.assertEqual(d1.to_dict(), d2.to_dict())
+
+    def test_det5_config_hash_includes_constraints(self):
+        """DET5: config_hash includes M4-S3 constraint fields."""
+        c1 = AllocationPolicyConfig(
+            policy_type="risk_aware",
+            generated_at="2026-08-07T00:00:00Z",
+            max_hhi=0.30,
+        )
+        c2 = AllocationPolicyConfig(
+            policy_type="risk_aware",
+            generated_at="2026-08-07T00:00:00Z",
+            max_hhi=0.40,
+        )
+        self.assertNotEqual(c1.config_hash, c2.config_hash)
