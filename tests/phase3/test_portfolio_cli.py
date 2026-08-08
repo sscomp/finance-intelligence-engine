@@ -200,5 +200,123 @@ class TestPortfolioRunCLI(unittest.TestCase):
         self.assertNotEqual(rc, 0)
 
 
+# --------------------------------------------------------------------------- #
+# M6: portfolio-report CLI tests
+# --------------------------------------------------------------------------- #
+
+
+class TestPortfolioReportCLI(unittest.TestCase):
+    """PRF1-PRF6: portfolio-report subcommand functional tests."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.portfolio_path = Path(self.tmpdir) / "test_portfolio.json"
+        portfolio_data = {
+            "portfolio_id": "test-portfolio-001",
+            "name": "Test Portfolio",
+            "positions": [
+                {"position_id": "pos-0001", "entity_id": "company:TW:2330", "weight": 0.40, "quantity": 100},
+                {"position_id": "pos-0002", "entity_id": "company:TW:2317", "weight": 0.35, "quantity": 200},
+                {"position_id": "pos-0003", "entity_id": "industry:TW:finance", "weight": 0.25, "quantity": 50},
+            ],
+        }
+        with open(self.portfolio_path, "w") as f:
+            json.dump(portfolio_data, f)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_prf1_subcommand_registered(self):
+        """PRF1: portfolio-report subcommand is registered (M6 NEW)."""
+        from phase3.cli import _build_parser
+        parser = _build_parser()
+        try:
+            parser.parse_args(["portfolio-report", "--help"])
+        except SystemExit:
+            pass  # --help causes SystemExit(0)
+
+    def test_prf2_json_output(self):
+        """PRF2: portfolio-report produces JSON output."""
+        from phase3.cli import main
+        output_path = Path(self.tmpdir) / "report.json"
+        argv = [
+            "portfolio-report",
+            "--portfolio-file", str(self.portfolio_path),
+            "--date", "2026-08-08",
+            "--generated-at", "2026-08-08T00:00:00Z",
+            "--output", str(output_path),
+        ]
+        rc = main(argv)
+        self.assertEqual(rc, 0)
+        self.assertTrue(output_path.is_file())
+        with open(output_path) as f:
+            data = json.load(f)
+        self.assertIn("report_id", data)
+        self.assertIn("report_type", data)
+        self.assertIn("sections", data)
+        self.assertIn("summary", data)
+
+    def test_prf3_markdown_output(self):
+        """PRF3: portfolio-report produces Markdown output."""
+        from phase3.cli import main
+        md_path = Path(self.tmpdir) / "report.md"
+        argv = [
+            "portfolio-report",
+            "--portfolio-file", str(self.portfolio_path),
+            "--date", "2026-08-08",
+            "--generated-at", "2026-08-08T00:00:00Z",
+            "--markdown", str(md_path),
+        ]
+        rc = main(argv)
+        self.assertEqual(rc, 0)
+        self.assertTrue(md_path.is_file())
+        md = md_path.read_text()
+        self.assertIn("# Daily Portfolio Report", md)
+        self.assertIn("company:TW:2330", md)
+
+    def test_prf4_missing_portfolio_returns_error(self):
+        """PRF4: missing --portfolio-file returns non-zero exit."""
+        from phase3.cli import main
+        argv = [
+            "portfolio-report",
+            "--date", "2026-08-08",
+            "--generated-at", "2026-08-08T00:00:00Z",
+        ]
+        rc = main(argv)
+        self.assertNotEqual(rc, 0)
+
+    def test_prf5_human_readable_output(self):
+        """PRF5: without --json/--output/--markdown, output is human-readable."""
+        from phase3.cli import main
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            argv = [
+                "portfolio-report",
+                "--portfolio-file", str(self.portfolio_path),
+                "--date", "2026-08-08",
+                "--generated-at", "2026-08-08T00:00:00Z",
+            ]
+            rc = main(argv)
+            output = sys.stdout.getvalue()
+        finally:
+            sys.stdout = old_stdout
+        self.assertEqual(rc, 0)
+        self.assertIn("Report ID:", output)
+
+    def test_prf6_macro_history_db_refused(self):
+        """PRF6: macro_history.db as portfolio file is refused."""
+        from phase3.cli import main
+        argv = [
+            "portfolio-report",
+            "--portfolio-file", "macro_history.db",
+            "--date", "2026-08-08",
+            "--generated-at", "2026-08-08T00:00:00Z",
+        ]
+        rc = main(argv)
+        self.assertNotEqual(rc, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

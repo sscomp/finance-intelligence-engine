@@ -65,6 +65,26 @@ FORBIDDEN_IMPORT_NAMES = {
     "sys",
 }
 
+# Imports forbidden in phase3.portfolio.report per the M6 boundary contract.
+# (Same set as risk + execution — report is a pure presentation layer.)
+M6_FORBIDDEN_IMPORT_NAMES = {
+    "sqlite3",
+    "macro_history",
+    "phase3.pipeline",
+    "phase3.datamodel",
+    "phase3.graph",
+    "requests",
+    "urllib.request",
+    "http",
+    "socket",
+    "asyncio",
+    "multiprocessing",
+    "threading",
+    "subprocess",
+    "os",
+    "sys",
+}
+
 
 def _sha256_file(path: Path) -> str:
     """Compute sha256 hex digest of a file."""
@@ -329,6 +349,142 @@ class TestAGM36M2SourceIntegrity(unittest.TestCase):
         # M2 symbols preserved
         self.assertTrue(hasattr(pkg, "Portfolio"))
         self.assertTrue(hasattr(pkg, "Position"))
+
+
+# --------------------------------------------------------------------------- #
+# AG-M6-1: AST scan — 0 forbidden imports in report.py (M6 NEW)
+# --------------------------------------------------------------------------- #
+
+
+class TestAGM61AstScanReportPy(unittest.TestCase):
+    """AG-M6-1: report.py must not import any forbidden module."""
+
+    def test_report_py_exists(self):
+        """report.py must exist (M6 deliverable)."""
+        report_py = REPO_ROOT / "phase3" / "portfolio" / "report.py"
+        self.assertTrue(_file_exists(report_py), f"{report_py} does not exist")
+
+    def test_ast_scan_no_forbidden_imports(self):
+        """AST scan of report.py: 0 forbidden import statements."""
+        report_py = REPO_ROOT / "phase3" / "portfolio" / "report.py"
+        self.assertTrue(_file_exists(report_py))
+        source = report_py.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(report_py))
+        forbidden_found = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    top = alias.name.split(".")[0]
+                    if top in M6_FORBIDDEN_IMPORT_NAMES or alias.name in M6_FORBIDDEN_IMPORT_NAMES:
+                        forbidden_found.append(alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                mod = node.module or ""
+                top = mod.split(".")[0]
+                if top in M6_FORBIDDEN_IMPORT_NAMES or mod in M6_FORBIDDEN_IMPORT_NAMES:
+                    forbidden_found.append(mod)
+        self.assertEqual(
+            forbidden_found,
+            [],
+            f"report.py contains forbidden imports: {forbidden_found}",
+        )
+
+    def test_report_py_imports_domain(self):
+        """report.py must import from phase3.portfolio.domain (positive check)."""
+        report_py = REPO_ROOT / "phase3" / "portfolio" / "report.py"
+        self.assertTrue(_file_exists(report_py))
+        source = report_py.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(report_py))
+        imports_domain = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.module and node.module.startswith("phase3.portfolio"):
+                    imports_domain = True
+        self.assertTrue(imports_domain, "report.py must import from phase3.portfolio.*")
+
+
+# --------------------------------------------------------------------------- #
+# AG-M6-2: report.py uses stdlib + phase3.portfolio only
+# --------------------------------------------------------------------------- #
+
+
+class TestAGM62ReportPyImportsAllowed(unittest.TestCase):
+    """AG-M6-2: report.py imports must be stdlib or phase3.portfolio only."""
+
+    def test_report_py_uses_allowed_imports_only(self):
+        """All imports in report.py must be from stdlib or phase3.portfolio."""
+        report_py = REPO_ROOT / "phase3" / "portfolio" / "report.py"
+        self.assertTrue(_file_exists(report_py))
+        source = report_py.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(report_py))
+        allowed = {
+            "re", "dataclasses", "typing", "__future__",
+            "hashlib",
+            "phase3.portfolio.domain",
+            "phase3.portfolio.decision",
+            "phase3.portfolio.execution",
+            "phase3.portfolio.risk",
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    top = alias.name.split(".")[0]
+                    self.assertIn(
+                        top, allowed,
+                        f"non-allowed import: {alias.name}",
+                    )
+            elif isinstance(node, ast.ImportFrom):
+                mod = node.module or ""
+                top = mod.split(".")[0]
+                ok = mod in allowed or top in allowed
+                self.assertTrue(ok, f"non-allowed import: {mod}")
+
+
+# --------------------------------------------------------------------------- #
+# AG-M6-3: M6 report test file exists
+# --------------------------------------------------------------------------- #
+
+
+class TestAGM63ReportTestExists(unittest.TestCase):
+    """AG-M6-3: M6 test files must exist."""
+
+    def test_test_portfolio_report_py_exists(self):
+        """test_portfolio_report.py must exist (M6 deliverable)."""
+        self.assertTrue(
+            _file_exists(REPO_ROOT / "tests" / "phase3" / "test_portfolio_report.py"),
+            "test_portfolio_report.py must exist (M6 deliverable)",
+        )
+
+    def test_report_py_is_new_file(self):
+        """report.py is an M6 new file; it must exist."""
+        report_py = REPO_ROOT / "phase3" / "portfolio" / "report.py"
+        self.assertTrue(_file_exists(report_py), "report.py must exist (M6 deliverable)")
+
+
+# --------------------------------------------------------------------------- #
+# AG-M6-4: report.py has no datetime.now() calls (determinism)
+# --------------------------------------------------------------------------- #
+
+
+class TestAGM64ReportDeterminism(unittest.TestCase):
+    """AG-M6-4: report.py must not call datetime.now() (determinism)."""
+
+    def test_no_datetime_now_calls(self):
+        """AST scan of report.py: 0 datetime.now() calls."""
+        report_py = REPO_ROOT / "phase3" / "portfolio" / "report.py"
+        self.assertTrue(_file_exists(report_py))
+        source = report_py.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(report_py))
+        datetime_now_calls = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                # Match datetime.now(...) or dt.now(...)
+                if isinstance(func, ast.Attribute) and func.attr == "now":
+                    datetime_now_calls.append(func)
+        self.assertEqual(
+            datetime_now_calls, [],
+            "report.py must not call datetime.now() — use injected timestamps",
+        )
 
 
 if __name__ == "__main__":

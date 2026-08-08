@@ -66,6 +66,11 @@ from phase3.portfolio.execution import (
     SuggestedOrder,
     plan_execution,
 )
+from phase3.portfolio.report import (
+    PortfolioReport,
+    ReportSection,
+    build_portfolio_report,
+)
 
 __all__ = [
     # Value objects
@@ -107,4 +112,8 @@ __all__ = [
     "ExecutionPlanConfig",
     "ExecutionPlanResult",
     "plan_execution",
+    # Reporting (M6)
+    "PortfolioReport",
+    "ReportSection",
+    "build_portfolio_report",
 ]

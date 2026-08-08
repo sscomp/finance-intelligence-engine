@@ -128,7 +128,7 @@ M2_M3_BASELINE = {
     "risk.py": "5f1e5ddab0b274254fdcb9f735cd4644da0ea2fa213073d38f5621b4ab96bb05",
     "test_portfolio_domain.py": "f72748113bda9b49cf072af19f8e1ed3d571e86a27c557bd0a12a5bdbabb6603",
     "test_portfolio_risk.py": "f955bc10dd8647a7ce85341582a0d7910c347beff146299fdefd996acefd32ed",
-    "test_portfolio_safety_guards.py": "390cf41d7fe97d37304e53d7f2e5ff6f962a9aa79414a9fcb6d1753ba4860db4",
+    "test_portfolio_safety_guards.py": "6a0f05994a2ae898a6ae4f897d30c73190bbc91e5088d27960c60a83e038ed03",
 }
 
 # M4-S1 baseline SHAs (captured at M4-S1 commit 09c01f7; M4-S2 must not
@@ -144,9 +144,12 @@ M4_S1_BASELINE = {
 # cli.py is MODIFIED by M4-S3 (additive portfolio-run subcommand).
 # M5 UPDATE: __init__.py is MODIFIED by M5 (additive M5 re-exports).
 # cli.py is MODIFIED by M5 (additive portfolio-orders subcommand).
+# M6 UPDATE: __init__.py is MODIFIED by M6 (additive M6 re-exports).
+# test_portfolio_safety_guards.py is MODIFIED by M6 (additive M6 guards).
+# cli.py is MODIFIED by M6 (additive portfolio-report subcommand).
 M4_S2_BASELINE = {
     "decision.py": "2bbcb209dd189ca1e76213b9fcea3015661fad13c333c1011c968a727d22679f",
-    "init.py": "408173a2279c20cb921bb4899ea51da4059ea24ff4c6b93c47e1ae03228757c4",
+    "init.py": "bf19b5ea0fc01f574c374cefe48dd582da2d067ceb4db51f95e0da5a312278ff",
 }
 
 # Known phase3 top-level + pipeline + datamodel baseline SHAs (M4-S1 must
@@ -155,7 +158,7 @@ M4_S2_BASELINE = {
 PHASE3_BASELINE = {
     "phase3/__init__.py": "3020382849864e92f78ae38b2c9cbd0e48419e3120e76786f905d43a5eafaeaa",
     "phase3/api.py": "539d58838ff86088d7e71178fed3127065ead83c58786d8f62952d06a3cf50fe",
-    "phase3/cli.py": "fbdaa69448bb7e36f0cbf7427366252e396a4847d3e19e8ec924b412e800f74d",
+    "phase3/cli.py": "187e8b84c5e6b66d6918a372aef84517ee96c2f06d8485e6a0545f2f9765eb1d",
     "phase3/pipeline/scoring_pipeline.py": "5b778e00c99cec04c7d90965f291d70acada9507d5a99fb938f94fa03fb4dd59",
     "phase3/pipeline/intelligence_pipeline.py": "025af0e538572fc056a73a9dc8ef2686f7518fd95723525693726f1da6fe5570",
     "phase3/datamodel/scores.py": "cc934edd423b1cea8a51cd0554547546a5bc2a34bac169d0ba154332599a090c",

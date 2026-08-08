@@ -2649,6 +2649,61 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p21.set_defaults(func=cmd_portfolio_orders, strict=True)
 
+    # Phase 5 M6 — Portfolio Reporting CLI.
+    p22 = sub.add_parser(
+        "portfolio-report",
+        help="Phase 5 M6: generate a portfolio report (Markdown + JSON) "
+             "from a portfolio, optional decision, and optional execution "
+             "plan. Pure presentation — no business logic.",
+    )
+    p22.add_argument(
+        "--portfolio-file", default=None,
+        help="Path to a portfolio JSON file (required). Format: "
+             "'{\"portfolio_id\": \"...\", \"positions\": [...]}',",
+    )
+    p22.add_argument(
+        "--decision-file", default=None,
+        help="Path to a PortfolioDecision JSON file (optional). "
+             "Produced by 'portfolio-run --output'.",
+    )
+    p22.add_argument(
+        "--execution-file", default=None,
+        help="Path to an ExecutionPlanResult JSON file (optional). "
+             "Produced by 'portfolio-orders --output'.",
+    )
+    p22.add_argument(
+        "--report-type", default="daily",
+        choices=("daily", "weekly", "custom"),
+        help="Report type (default: daily).",
+    )
+    p22.add_argument(
+        "--date", default="",
+        help="Date or date range for the report (e.g. '2026-08-08' or "
+             "'2026-08-01..2026-08-07'). Default: empty.",
+    )
+    p22.add_argument(
+        "--generated-at", default="",
+        help="ISO 8601 timestamp for determinism (default: empty).",
+    )
+    p22.add_argument(
+        "--report-id", default="",
+        help="Optional report identifier (default: auto-generated).",
+    )
+    p22.add_argument(
+        "--output", default=None,
+        help="Write the JSON-serialised PortfolioReport to PATH. "
+             "Use '-' for stdout. Implies --json.",
+    )
+    p22.add_argument(
+        "--markdown", default=None,
+        help="Write the Markdown rendering to PATH. Use '-' for stdout.",
+    )
+    p22.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON on stdout (default: human-readable).",
+    )
+    p22.set_defaults(func=cmd_portfolio_report, strict=True)
+
     return p
 
 
@@ -2949,6 +3004,141 @@ def cmd_portfolio_orders(args: argparse.Namespace) -> int:
                 print(f"  {order.entity_id.value} ({order.action}) "
                       f"delta={order.delta_weight:+.6f} "
                       f"priority={order.priority}")
+
+    return 0
+
+
+# ---------- Phase 5 M6: portfolio-report subcommand ---------- #
+
+
+def cmd_portfolio_report(args: argparse.Namespace) -> int:
+    """Phase 5 M6: generate a portfolio report (Markdown + JSON) from
+    a portfolio, optional decision, and optional execution plan.
+
+    Loads a Portfolio from --portfolio-file, optionally a
+    PortfolioDecision from --decision-file and an ExecutionPlanResult
+    from --execution-file, then calls build_portfolio_report.
+    Output: JSON on stdout (--json) or human-readable text (default).
+    Markdown can be written to a separate file via --markdown.
+    """
+    import json as _json
+    from phase3.portfolio.domain import (
+        EntityId, Portfolio, PortfolioId, Position, PositionId,
+        Quantity, Weight,
+    )
+    from phase3.portfolio.decision import PortfolioDecision
+    from phase3.portfolio.execution import ExecutionPlanResult
+    from phase3.portfolio.report import build_portfolio_report
+
+    # Load portfolio JSON (required).
+    portfolio_path = args.portfolio_file
+    if not portfolio_path:
+        print("Error: --portfolio-file is required", file=sys.stderr)
+        return 2
+
+    portfolio_p = Path(portfolio_path)
+    if not portfolio_p.is_file():
+        print(f"Error: portfolio file not found: {portfolio_path}", file=sys.stderr)
+        return 2
+
+    # Refuse macro_history.db (safety guard).
+    if portfolio_p.name.lower() == "macro_history.db":
+        print("Error: portfolio path resolves to macro_history.db (refused)", file=sys.stderr)
+        return 2
+
+    with open(portfolio_p, "r") as f:
+        portfolio_data = _json.load(f)
+
+    positions = []
+    for i, pos_data in enumerate(portfolio_data.get("positions", [])):
+        positions.append(Position(
+            position_id=PositionId(pos_data.get("position_id", f"pos-{i:04d}")),
+            entity_id=EntityId(pos_data["entity_id"]),
+            weight=Weight(float(pos_data.get("weight", 0.0))),
+            quantity=Quantity(int(pos_data.get("quantity", 0))),
+        ))
+    portfolio = Portfolio(
+        portfolio_id=PortfolioId(portfolio_data.get("portfolio_id", "portfolio-001")),
+        name=portfolio_data.get("name", "Portfolio"),
+        positions=tuple(positions),
+    )
+
+    # Load decision JSON (optional).
+    decision = None
+    if args.decision_file:
+        decision_p = Path(args.decision_file)
+        if not decision_p.is_file():
+            print(f"Error: decision file not found: {args.decision_file}", file=sys.stderr)
+            return 2
+        if decision_p.name.lower() == "macro_history.db":
+            print("Error: decision path resolves to macro_history.db (refused)", file=sys.stderr)
+            return 2
+        with open(decision_p, "r") as f:
+            decision_data = _json.load(f)
+        decision = PortfolioDecision.from_dict(decision_data)
+
+    # Load execution plan JSON (optional).
+    execution_plan = None
+    if args.execution_file:
+        exec_p = Path(args.execution_file)
+        if not exec_p.is_file():
+            print(f"Error: execution file not found: {args.execution_file}", file=sys.stderr)
+            return 2
+        if exec_p.name.lower() == "macro_history.db":
+            print("Error: execution path resolves to macro_history.db (refused)", file=sys.stderr)
+            return 2
+        with open(exec_p, "r") as f:
+            exec_data = _json.load(f)
+        execution_plan = ExecutionPlanResult.from_dict(exec_data)
+
+    # Build the report.
+    try:
+        report = build_portfolio_report(
+            portfolio,
+            decision=decision,
+            execution_plan=execution_plan,
+            report_type=args.report_type,
+            date_range=args.date,
+            generated_at=args.generated_at,
+            report_id=args.report_id,
+        )
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    report_dict = report.to_dict()
+
+    # Output JSON.
+    if args.output:
+        output_path = args.output
+        if output_path == "-":
+            print(_json.dumps(report_dict, indent=2, default=str))
+        else:
+            with open(output_path, "w") as f:
+                _json.dump(report_dict, f, indent=2, default=str)
+            print(f"Report JSON written to {output_path}")
+    elif args.json:
+        print(_json.dumps(report_dict, indent=2, default=str))
+
+    # Output Markdown.
+    if args.markdown:
+        md = report.to_markdown()
+        if args.markdown == "-":
+            print(md)
+        else:
+            with open(args.markdown, "w") as f:
+                f.write(md)
+            print(f"Report Markdown written to {args.markdown}")
+
+    # Human-readable default if no output option.
+    if not args.output and not args.json and not args.markdown:
+        print(f"Report ID: {report.report_id}")
+        print(f"Type: {report.report_type}")
+        print(f"Portfolio: {report.portfolio_id}")
+        print(f"Date Range: {report.date_range}")
+        print(f"Generated At: {report.generated_at}")
+        print(f"Sections: {len(report.sections)}")
+        print(f"Summary keys: {list(report.summary.keys())}")
 
     return 0
 
