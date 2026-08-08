@@ -58,6 +58,14 @@ from phase3.portfolio.decision import (
     PortfolioDecision,
     PortfolioDecisionEngine,
 )
+from phase3.portfolio.execution import (
+    ExecutionPlanConfig,
+    ExecutionPlanResult,
+    ExecutionQueue,
+    ReviewQueue,
+    SuggestedOrder,
+    plan_execution,
+)
 
 __all__ = [
     # Value objects
@@ -92,4 +100,11 @@ __all__ = [
     "AllocationPolicyConfig",
     # Constraint error (M4-S3)
     "AllocationConstraintError",
+    # Execution planning (M5)
+    "SuggestedOrder",
+    "ExecutionQueue",
+    "ReviewQueue",
+    "ExecutionPlanConfig",
+    "ExecutionPlanResult",
+    "plan_execution",
 ]

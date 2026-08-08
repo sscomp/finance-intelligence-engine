@@ -2591,6 +2591,64 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p20.set_defaults(func=cmd_portfolio_run, strict=True)
 
+    # Phase 5 M5 — Execution Planning CLI.
+    p21 = sub.add_parser(
+        "portfolio-orders",
+        help="Phase 5 M5: transform a PortfolioDecision + current "
+             "Portfolio into suggested orders partitioned into "
+             "ExecutionQueue (actionable) and ReviewQueue (needs "
+             "human review). Output-only — no broker integration.",
+    )
+    p21.add_argument(
+        "--decision-file", default=None,
+        help="Path to a PortfolioDecision JSON file (required). "
+             "Produced by 'portfolio-run --output'.",
+    )
+    p21.add_argument(
+        "--portfolio-file", default=None,
+        help="Path to a portfolio JSON file (required). Format: "
+             "'{\"portfolio_id\": \"...\", \"positions\": [...]}'",
+    )
+    p21.add_argument(
+        "--review-delta-threshold", type=float, default=0.05,
+        help="Weight delta above which an order is routed to the "
+             "review queue (default: 0.05).",
+    )
+    p21.add_argument(
+        "--no-review-new-positions", action="store_false",
+        dest="review_new_positions",
+        help="Do not route new positions (buy from zero) to review.",
+    )
+    p21.add_argument(
+        "--no-review-full-exits", action="store_false",
+        dest="review_full_exits",
+        help="Do not route full exits (sell to zero) to review.",
+    )
+    p21.add_argument(
+        "--max-order-weight", type=float, default=0.25,
+        help="Maximum weight for a single order before review "
+             "(default: 0.25).",
+    )
+    p21.add_argument(
+        "--generated-at", default="",
+        help="ISO 8601 timestamp for determinism (default: empty).",
+    )
+    p21.add_argument(
+        "--queue-id", default="",
+        help="Optional queue pair identifier (default: auto from "
+             "decision_id).",
+    )
+    p21.add_argument(
+        "--output", default=None,
+        help="Write the JSON-serialised ExecutionPlanResult to PATH. "
+             "Use '-' for stdout. Implies --json.",
+    )
+    p21.add_argument(
+        "--json", action="store_true",
+        help="Emit JSON on stdout (default: human-readable).",
+    )
+    p21.set_defaults(func=cmd_portfolio_orders, strict=True)
+
     return p
 
 
@@ -2765,6 +2823,132 @@ def cmd_portfolio_run(args: argparse.Namespace) -> int:
             print(f"Risk summary keys: {list(decision.risk_summary.keys())}")
         print(f"Evidence refs: {len(decision.evidence_refs)}")
         print(f"Rationale: {decision.rationale[:200]}...")
+
+    return 0
+
+
+# ---------- Phase 5 M5: portfolio-orders subcommand ---------- #
+
+
+def cmd_portfolio_orders(args: argparse.Namespace) -> int:
+    """Phase 5 M5: transform a PortfolioDecision + current Portfolio
+    into suggested orders partitioned into ExecutionQueue and ReviewQueue.
+
+    Loads a PortfolioDecision from --decision-file and a Portfolio from
+    --portfolio-file, constructs an ExecutionPlanConfig from CLI flags,
+    and runs plan_execution. Output: JSON on stdout (--json) or
+    human-readable text (default).
+    """
+    import json as _json
+    from phase3.portfolio.domain import (
+        EntityId, Portfolio, PortfolioId, Position, PositionId,
+        Quantity, Weight,
+    )
+    from phase3.portfolio.decision import PortfolioDecision
+    from phase3.portfolio.execution import (
+        ExecutionPlanConfig, plan_execution,
+    )
+
+    # Load decision JSON.
+    decision_path = args.decision_file
+    if not decision_path:
+        print("Error: --decision-file is required", file=sys.stderr)
+        return 2
+
+    decision_p = Path(decision_path)
+    if not decision_p.is_file():
+        print(f"Error: decision file not found: {decision_path}", file=sys.stderr)
+        return 2
+
+    # Refuse macro_history.db (safety guard).
+    if decision_p.name.lower() == "macro_history.db":
+        print("Error: decision path resolves to macro_history.db (refused)", file=sys.stderr)
+        return 2
+
+    with open(decision_p, "r") as f:
+        decision_data = _json.load(f)
+
+    # Deserialize PortfolioDecision.
+    decision = PortfolioDecision.from_dict(decision_data)
+
+    # Load portfolio JSON.
+    portfolio_path = args.portfolio_file
+    if not portfolio_path:
+        print("Error: --portfolio-file is required", file=sys.stderr)
+        return 2
+
+    with open(portfolio_path, "r") as f:
+        portfolio_data = _json.load(f)
+
+    positions = []
+    for i, pos_data in enumerate(portfolio_data.get("positions", [])):
+        positions.append(Position(
+            position_id=PositionId(pos_data.get("position_id", f"pos-{i:04d}")),
+            entity_id=EntityId(pos_data["entity_id"]),
+            weight=Weight(float(pos_data.get("weight", 0.0))),
+            quantity=Quantity(int(pos_data.get("quantity", 0))),
+        ))
+    portfolio = Portfolio(
+        portfolio_id=PortfolioId(portfolio_data.get("portfolio_id", "portfolio-001")),
+        name=portfolio_data.get("name", "Portfolio"),
+        positions=tuple(positions),
+    )
+
+    # Build ExecutionPlanConfig from CLI flags.
+    config = ExecutionPlanConfig(
+        review_delta_threshold=args.review_delta_threshold,
+        review_new_positions=args.review_new_positions,
+        review_full_exits=args.review_full_exits,
+        max_order_weight=args.max_order_weight,
+        generated_at=args.generated_at,
+        queue_id=args.queue_id,
+    )
+
+    # Run plan_execution.
+    try:
+        result = plan_execution(decision, portfolio, config)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    # Output.
+    result_dict = result.to_dict()
+
+    if args.output:
+        output_path = args.output
+        if output_path == "-":
+            print(_json.dumps(result_dict, indent=2, default=str))
+        else:
+            with open(output_path, "w") as f:
+                _json.dump(result_dict, f, indent=2, default=str)
+            print(f"Execution plan written to {output_path}")
+    elif args.json:
+        print(_json.dumps(result_dict, indent=2, default=str))
+    else:
+        # Human-readable.
+        print(f"Plan ID: {result.plan_id}")
+        print(f"Portfolio ID: {decision.portfolio_id}")
+        print(f"Generated at: {result.generated_at}")
+        print(f"Total orders: {result.total_order_count}")
+        print(f"Execution queue: {result.execution_queue.order_count} orders")
+        print(f"  Buys: {result.execution_queue.buy_count}")
+        print(f"  Sells: {result.execution_queue.sell_count}")
+        print(f"  Holds: {result.execution_queue.hold_count}")
+        print(f"Review queue: {result.review_queue.order_count} orders")
+        if result.review_queue.order_count > 0:
+            for order in result.review_queue.orders:
+                reasons = result.review_queue.review_reasons.get(order.order_id, [])
+                reason_str = "; ".join(reasons) if reasons else "unknown"
+                print(f"  {order.entity_id.value} ({order.action}) "
+                      f"delta={order.delta_weight:+.6f} "
+                      f"priority={order.priority} "
+                      f"reasons: {reason_str}")
+        if result.execution_queue.order_count > 0:
+            print("Execution orders:")
+            for order in result.execution_queue.orders:
+                print(f"  {order.entity_id.value} ({order.action}) "
+                      f"delta={order.delta_weight:+.6f} "
+                      f"priority={order.priority}")
 
     return 0
 

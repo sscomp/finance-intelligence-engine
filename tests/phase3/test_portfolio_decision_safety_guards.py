@@ -142,9 +142,11 @@ M4_S1_BASELINE = {
 # M4-S3 UPDATE: decision.py and __init__.py are MODIFIED by M4-S3 (risk-aware
 # policy + constraint enforcement + AllocationConstraintError re-export).
 # cli.py is MODIFIED by M4-S3 (additive portfolio-run subcommand).
+# M5 UPDATE: __init__.py is MODIFIED by M5 (additive M5 re-exports).
+# cli.py is MODIFIED by M5 (additive portfolio-orders subcommand).
 M4_S2_BASELINE = {
     "decision.py": "2bbcb209dd189ca1e76213b9fcea3015661fad13c333c1011c968a727d22679f",
-    "init.py": "62b9c036325172aeb1c1c0606f6d0d7e3ed8c0a8d7d20c470ddd5708816e1603",
+    "init.py": "408173a2279c20cb921bb4899ea51da4059ea24ff4c6b93c47e1ae03228757c4",
 }
 
 # Known phase3 top-level + pipeline + datamodel baseline SHAs (M4-S1 must
@@ -153,7 +155,7 @@ M4_S2_BASELINE = {
 PHASE3_BASELINE = {
     "phase3/__init__.py": "3020382849864e92f78ae38b2c9cbd0e48419e3120e76786f905d43a5eafaeaa",
     "phase3/api.py": "539d58838ff86088d7e71178fed3127065ead83c58786d8f62952d06a3cf50fe",
-    "phase3/cli.py": "f33d9b7795487df26f53b2c0dd64bc5df70dd016ee864d7535cd02be0e674c93",
+    "phase3/cli.py": "fbdaa69448bb7e36f0cbf7427366252e396a4847d3e19e8ec924b412e800f74d",
     "phase3/pipeline/scoring_pipeline.py": "5b778e00c99cec04c7d90965f291d70acada9507d5a99fb938f94fa03fb4dd59",
     "phase3/pipeline/intelligence_pipeline.py": "025af0e538572fc056a73a9dc8ef2686f7518fd95723525693726f1da6fe5570",
     "phase3/datamodel/scores.py": "cc934edd423b1cea8a51cd0554547546a5bc2a34bac169d0ba154332599a090c",
