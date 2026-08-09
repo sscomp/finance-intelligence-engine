@@ -1,0 +1,11 @@
+{
+  "portfolio_id": "shadow-test-portfolio-001",
+  "name": "Shadow Test Portfolio",
+  "positions": [
+    {"position_id": "pos-0000", "entity_id": "company:TW:2330", "weight": 0.0, "quantity": 0},
+    {"position_id": "pos-0001", "entity_id": "company:TW:2317", "weight": 0.0, "quantity": 0},
+    {"position_id": "pos-0002", "entity_id": "company:TW:2454", "weight": 0.0, "quantity": 0},
+    {"position_id": "pos-0003", "entity_id": "industry:TW:semiconductor", "weight": 0.0, "quantity": 0},
+    {"position_id": "pos-0004", "entity_id": "industry:TW:finance", "weight": 0.0, "quantity": 0}
+  ]
+}

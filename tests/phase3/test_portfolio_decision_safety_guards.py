@@ -147,6 +147,7 @@ M4_S1_BASELINE = {
 # M6 UPDATE: __init__.py is MODIFIED by M6 (additive M6 re-exports).
 # test_portfolio_safety_guards.py is MODIFIED by M6 (additive M6 guards).
 # cli.py is MODIFIED by M6 (additive portfolio-report subcommand).
+# M8 UPDATE: cli.py is MODIFIED by M8 (additive portfolio-shadow-run subcommand).
 M4_S2_BASELINE = {
     "decision.py": "2bbcb209dd189ca1e76213b9fcea3015661fad13c333c1011c968a727d22679f",
     "init.py": "bf19b5ea0fc01f574c374cefe48dd582da2d067ceb4db51f95e0da5a312278ff",
@@ -158,7 +159,7 @@ M4_S2_BASELINE = {
 PHASE3_BASELINE = {
     "phase3/__init__.py": "3020382849864e92f78ae38b2c9cbd0e48419e3120e76786f905d43a5eafaeaa",
     "phase3/api.py": "539d58838ff86088d7e71178fed3127065ead83c58786d8f62952d06a3cf50fe",
-    "phase3/cli.py": "187e8b84c5e6b66d6918a372aef84517ee96c2f06d8485e6a0545f2f9765eb1d",
+    "phase3/cli.py": "c2772e61a6c414f7bfa9557c83c2def27f57ad79f043ecf2af1c9393357509e1",
     "phase3/pipeline/scoring_pipeline.py": "5b778e00c99cec04c7d90965f291d70acada9507d5a99fb938f94fa03fb4dd59",
     "phase3/pipeline/intelligence_pipeline.py": "025af0e538572fc056a73a9dc8ef2686f7518fd95723525693726f1da6fe5570",
     "phase3/datamodel/scores.py": "cc934edd423b1cea8a51cd0554547546a5bc2a34bac169d0ba154332599a090c",

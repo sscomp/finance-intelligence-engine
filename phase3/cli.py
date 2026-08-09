@@ -1870,6 +1870,151 @@ def cmd_shadow_run(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------- Phase 5 M8: portfolio-shadow-run subcommand ---------- #
+
+
+def cmd_portfolio_shadow_run(args: argparse.Namespace) -> int:
+    """Phase 5 M8: portfolio shadow-run extension.
+
+    Executes ``portfolio-run`` against a pipeline-export artifact +
+    portfolio JSON, captures the output as a baseline, re-executes
+    for determinism check (byte-identical modulo ``generated_at``),
+    and emits a reconciliation row.
+
+    This is an ADDITIVE subcommand — the existing ``shadow-run``
+    subcommand is NOT modified. The framework is read-only:
+    no production DB writes, no broker calls, no scheduling.
+
+    Flags
+    ------
+    ``--artifact`` (required)
+        Path to a pipeline-export JSON artifact OR an intelligence-report
+        JSON (morning-brief artifact). Both formats are supported.
+    ``--portfolio-file`` (required)
+        Path to a portfolio JSON file with ``portfolio_id`` and
+        ``positions``.
+    ``--replay-label``
+        Human-readable label for the replay (default: ``"replay"``).
+    ``--generated-at``
+        ISO-8601 timestamp for determinism (default: empty — both
+        runs use the same timestamp when provided).
+    ``--policy-type``
+        Allocation policy type (default: ``score_weighted``).
+    ``--per-position-cap``
+        Maximum weight per position (default: 0.25).
+    ``--target-total``
+        Target sum of weights (default: 1.0).
+    ``--output``
+        Write the result JSON to PATH. Use ``-`` for stdout.
+    ``--json``
+        Emit JSON on stdout (default: human-readable).
+    """
+    artifact_path = args.artifact
+    portfolio_path = args.portfolio_file
+
+    if not artifact_path:
+        print("portfolio-shadow-run: --artifact PATH is required",
+              file=sys.stderr)
+        return 2
+    if not portfolio_path:
+        print("portfolio-shadow-run: --portfolio-file PATH is required",
+              file=sys.stderr)
+        return 2
+
+    # Refuse macro_history.db (safety guard).
+    basename = os.path.basename(artifact_path)
+    if basename.lower() == "macro_history.db":
+        print(
+            f"portfolio-shadow-run: refusing to open {artifact_path!r} "
+            f"(basename is reserved)",
+            file=sys.stderr,
+        )
+        return 2
+
+    output_path = args.output
+    if output_path is not None and output_path == "":
+        print("portfolio-shadow-run: --output cannot be empty",
+              file=sys.stderr)
+        return 2
+
+    # Late import keeps the top-of-file light.
+    from phase3.pipeline.portfolio_shadow_run import (
+        PortfolioShadowRunConfig,
+        PortfolioShadowRunError,
+        run_portfolio_shadow,
+    )
+
+    config = PortfolioShadowRunConfig(
+        artifact_path=artifact_path,
+        portfolio_path=portfolio_path,
+        replay_label=args.replay_label,
+        output_path=output_path,
+        generated_at=args.generated_at or "",
+        policy_type=args.policy_type,
+        per_position_cap=args.per_position_cap,
+        target_total=args.target_total,
+    )
+
+    try:
+        result = run_portfolio_shadow(config)
+    except PortfolioShadowRunError as exc:
+        print(f"portfolio-shadow-run failed: {exc}", file=sys.stderr)
+        return 1
+
+    payload = result.to_dict()
+
+    if output_path and output_path != "-":
+        print(
+            f"portfolio-shadow-run: wrote {os.path.abspath(output_path)} "
+            f"({os.path.getsize(output_path)} bytes)"
+        )
+        print(
+            f"  artifact_format: {payload['artifact_format']}\n"
+            f"  deterministic: {payload['deterministic']}\n"
+            f"  baseline_success: {payload['baseline']['success']}\n"
+            f"  replay_success: {payload['replay']['success']}"
+        )
+        return 0
+
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                          indent=2))
+        return 0
+
+    # Human-readable text.
+    print("=== Portfolio Shadow Run (Phase 5 M8) ===")
+    print(f"  artifact: {payload['artifact_path']}")
+    print(f"  portfolio: {payload['portfolio_path']}")
+    print(f"  artifact_format: {payload['artifact_format']}")
+    print()
+    print("Baseline:")
+    b = payload["baseline"]
+    print(f"  success: {b['success']}")
+    print(f"  decision_id: {b['decision_id']}")
+    print(f"  portfolio_id: {b['portfolio_id']}")
+    print(f"  generated_at: {b['generated_at']}")
+    print(f"  position_count: {b['position_count']}")
+    print(f"  target_total: {b['target_total']}")
+    if b["error"]:
+        print(f"  error: {b['error']}")
+    print()
+    print(f"Replay ({payload['replay']['label']}):")
+    r = payload["replay"]
+    print(f"  success: {r['success']}")
+    print(f"  decision_id: {r['decision_id']}")
+    print(f"  position_count: {r['position_count']}")
+    if r["error"]:
+        print(f"  error: {r['error']}")
+    print()
+    print(f"Deterministic: {payload['deterministic']}")
+    if payload["warnings"]:
+        print()
+        print("Warnings:")
+        for w in payload["warnings"]:
+            print(f"  - {w}")
+    return 0
+
+
 # ---------- argparse ----------
 
 
@@ -2703,6 +2848,66 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit JSON on stdout (default: human-readable).",
     )
     p22.set_defaults(func=cmd_portfolio_report, strict=True)
+
+    # Phase 5 M8 — Portfolio Shadow-Run Extension (additive).
+    p23 = sub.add_parser(
+        "portfolio-shadow-run",
+        help="Phase 5 M8: portfolio shadow-run extension. "
+             "Replays portfolio-run against a pipeline-export "
+             "artifact + portfolio JSON, captures the baseline, "
+             "re-executes for determinism check, and emits a "
+             "reconciliation row. No production DB writes; no "
+             "broker calls; no scheduling. The existing shadow-run "
+             "subcommand is NOT modified.",
+    )
+    p23.add_argument(
+        "--artifact", default=None,
+        help="Path to a pipeline-export JSON artifact OR an "
+             "intelligence-report JSON (morning-brief artifact). "
+             "Required. Refused if it resolves to "
+             "macro_history.db (case-insensitive basename).",
+    )
+    p23.add_argument(
+        "--portfolio-file", default=None,
+        help="Path to a portfolio JSON file (required). "
+             "Format: '{\"portfolio_id\": \"...\", "
+             "\"positions\": [...]}'.",
+    )
+    p23.add_argument(
+        "--replay-label", default="replay",
+        help="Human-readable label for the replay "
+             "(default: 'replay').",
+    )
+    p23.add_argument(
+        "--generated-at", default="",
+        help="ISO 8601 timestamp for determinism (default: "
+             "empty). When provided, both baseline and replay "
+             "use the same timestamp.",
+    )
+    p23.add_argument(
+        "--policy-type", default="score_weighted",
+        choices=("score_weighted", "risk_aware"),
+        help="Allocation policy type (default: score_weighted).",
+    )
+    p23.add_argument(
+        "--per-position-cap", type=float, default=0.25,
+        help="Maximum weight per position (default: 0.25).",
+    )
+    p23.add_argument(
+        "--target-total", type=float, default=1.0,
+        help="Target sum of weights (default: 1.0).",
+    )
+    p23.add_argument(
+        "--output", default=None,
+        help="Write the JSON-serialised result to PATH. "
+             "Use '-' for stdout. Implies --json.",
+    )
+    p23.add_argument(
+        "--json", action="store_true",
+        help="Emit the result JSON on stdout (default: "
+             "human-readable).",
+    )
+    p23.set_defaults(func=cmd_portfolio_shadow_run)
 
     return p
 
