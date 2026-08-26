@@ -1,0 +1,140 @@
+# =============================================================================
+# Company Monthly — Phase 2A 草稿 manifest
+# =============================================================================
+# 狀態：DRAFT / 非執行階段（NOT LOADED BY PRODUCTION）
+# 用途：Phase 2B BaseReport plugin 對齊用
+# 對應章節：ARCHITECTURE_REVIEW_PHASE2.md §3.2、§7
+# 對應合約：docs/contracts/report_contract_v0.md
+#
+# ⚠️ IMPORTANT ⚠️
+# - 本檔案目前沒有任何 production runtime 載入它
+# - company_monthly.py 仍讀 taiwan50_config.json 與 institutional.py
+# - 任何把本檔接上現有 .py 的改動都屬於 Phase 2B 範圍
+# =============================================================================
+
+report_id_prefix: company_monthly
+report_type: company_monthly
+schedule_name: 公司研究月報
+display_name: 公司研究月報
+version: 1.0.0
+
+# Scheduler（凍結）
+scheduler:
+  kind: hermes_cronjob
+  cron_job_id: 5eaa5fa9a50d
+  cron_expr: "0 8 12 * *"
+  timezone: Asia/Taipei
+  note: "每月 12 號 08:00 觸發"
+
+# 觸發後行為
+entrypoint:
+  script: run_monthly.sh
+  workdir: /home/ubuntu/macro-report
+  venv: /home/ubuntu/macro-venv
+  python_module: company_monthly
+  python_function: main
+
+# 輸入源
+input_sources:
+  - name: yfinance_50_stocks
+    kind: external_api
+    module: company_monthly
+    function: fetch_all_stocks
+    config_source: taiwan50_config.json
+    refresh: monthly
+    expected_size_kb: 30
+  - name: twse_t86_institutional
+    kind: external_api
+    module: institutional
+    function: accumulate_institutional_data
+    config_source: taiwan50_config.json
+    refresh: monthly
+    expected_size_kb: 50
+    known_issue: "T86 API 偶發 90s timeout，需 retry_policy 緩衝"
+
+# 評分
+analyzer:
+  module: company_monthly
+  function: assess_stock
+  inputs_from: input_sources
+  outputs:
+    - verdict         # 推薦 / 中性 / 觀望
+    - signals         # ROE / EPS / 配息 / 法人買賣超
+    - score           # 0–100
+  note: "金融股 8 檔改用 NIM 成長率 / 利差 / ROA（Phase 1 變更）"
+
+# 渲染
+renderer:
+  module: company_monthly
+  function: format_monthly_report
+  template_id: inline:v1
+  template_version: n/a
+  template_path_phase2b: templates/reports/company_monthly_v0.md.j2
+  note: |
+    format_monthly_report 太長（~10KB stdout），Phase 2C 末拆 5 個小函式。
+    Phase 2A 不動此函式。
+
+# 派送
+publisher:
+  type: telegram
+  channel: stdout
+  target_chat_id: "5132341473"
+  secondary_targets: ["8029464467"]   # 月報也送彪彪
+  retry_policy: none
+  failure_action: cron_agent_reports_error
+  max_message_length: 4096
+
+# 歸檔
+archive:
+  log_format: logs/<job>-<date>.json
+  log_archive_path: logs/
+  phase2b_archive_dir: metadata/reports/company_monthly/<yyyymmdd>/<task_id>/
+
+# 寫入 SQLite
+sqlite:
+  database: /home/ubuntu/macro-report/macro_history.db
+  tables:
+    - table: stock_monthly
+      primary_key: [date, code]
+      writes_per_run: 50
+    - table: institutional_daily
+      primary_key: [date, code]
+      writes_per_run: 50
+      note: "PK 邏輯反直覺（F7），但 schema 凍結"
+
+# 預期執行 profile
+performance:
+  expected_duration_seconds: 90
+  p95_duration_seconds: 180
+  timeout_seconds: 300
+  timeout_known_issues:
+    - "T86 API 92s timeout（90s 上限）"
+    - "yfinance 月初第一週偶發 cache miss"
+
+# Retry / rerun
+retry_policy:
+  max_attempts: 2
+  backoff_seconds: 120
+  retryable_errors:
+    - twse_t86_timeout
+    - yfinance_rate_limit
+    - transient_network
+  non_retryable_errors:
+    - configuration_error
+    - missing_ticker
+
+# Policy reference
+policies:
+  scoring: config/policies/scoring.yaml
+  retry: config/policies/retry.yaml
+  publisher: config/publishers/telegram.yaml
+
+# Phase 2B plugin 對應
+phase2b_plugin:
+  path: reports/company_monthly_plugin.py
+  class: CompanyMonthlyPlugin
+  base_class: reports.base.BaseReport
+  estimated_loc: 80  # 含 T86 + 金融股特殊邏輯
+  known_complexity:
+    - "format_monthly_report 616 行，render 介面要拆 5 段"
+    - "金融股 vs 一般股 logic 分流"

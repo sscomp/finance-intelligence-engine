@@ -1,0 +1,94 @@
+# =============================================================================
+# Scoring Policy — Phase 2A 草稿
+# =============================================================================
+# 狀態：DRAFT / 非執行階段（NOT LOADED BY PRODUCTION）
+# 用途：Phase 2B plugin 評分門檻對齊用
+# 對應章節：ARCHITECTURE_REVIEW_PHASE2.md §7（F10 magic number 抽 config）
+#
+# ⚠️ IMPORTANT ⚠️
+# - 本檔案目前沒有任何 production runtime 載入它
+# - macro_daily / company_monthly / industry_weekly 的 magic number
+#   （VIX 15/20/30、ROE 25/15/8、NIM 成長率等）目前仍硬編碼在各 .py 內
+# - 變更本檔不會改任何 cron 行為
+# - Phase 2A 任務是「把門檻值先結構化」，Phase 2B 才接 plugin
+# =============================================================================
+
+# 流動性 / VIX 評分（macro_daily 用）
+liquidity:
+  vix:
+    relax_threshold: 15.0             # < 15 視為寬鬆
+    neutral_low: 15.0
+    neutral_high: 20.0
+    caution_threshold: 20.0
+    panic_threshold: 30.0
+    source_code: "macro_daily.assess_liquidity()"   # 既有硬編碼位置
+
+# Stock 評分（company_monthly 用）
+stock:
+  roe:
+    strong_threshold: 25.0
+    neutral_threshold: 15.0
+    weak_threshold: 8.0
+    source_code: "company_monthly.assess_stock()"
+  eps_growth:
+    strong_threshold: 20.0
+    neutral_threshold: 5.0
+    weak_threshold: -5.0
+  dividend_yield:
+    high_threshold: 6.0
+    mid_threshold: 4.0
+    low_threshold: 2.0
+  pe_percentile:
+    cheap_percentile: 20
+    fair_percentile: 50
+    expensive_percentile: 80
+    source_function: "db.get_pe_percentile"
+
+# 金融股特殊評分（company_monthly 內 8 檔金融股）
+financial:
+  nim_growth:
+    strong_threshold: 5.0
+    neutral_threshold: 0.0
+    weak_threshold: -3.0
+  spread:
+    strong_threshold: 1.5
+    neutral_threshold: 1.2
+    weak_threshold: 0.9
+  roa:
+    strong_threshold: 1.0
+    neutral_threshold: 0.6
+    weak_threshold: 0.3
+  note: |
+    金融股改用 NIM 成長率 / 利差 / ROA 取代毛利率（Phase 1 變更），
+    本檔先結構化門檻值，Phase 2B 才接 plugin。
+
+# 法人買賣超（company_monthly + institutional 共用）
+institutional:
+  foreign_streak_days:
+    accumulation_threshold: 3         # 連買 3 天 = accumulation
+    distribution_threshold: -3        # 連賣 3 天 = distribution
+  trust_top_n: 5                      # 投信賣超 Top 5 排行
+  source_function: "db.get_foreign_streak"
+
+# Industry 評分（industry_weekly 用）
+industry:
+  keyword_match:
+    min_keyword_hits: 1
+    strong_signal_hits: 3
+  supply_chain_link:
+    min_related_companies: 2
+  source_code: "industry_weekly.analyze_supply_chain_impact()"
+
+# 通用 verdict 對照（給 dispatcher 顯示用）
+verdict_display:
+  "relax": "🟢 寬鬆"
+  "neutral": "🟡 中性"
+  "caution": "🟠 警戒"
+  "panic": "🔴 緊縮"
+  "strong_buy": "🟢 強力買進"
+  "buy": "🟢 買進"
+  "hold": "🟡 持有"
+  "sell": "🔴 賣出"
+  "watch": "⚪ 觀望"
+  "accumulation": "🟢 法人累積買超"
+  "distribution": "🔴 法人累積賣超"

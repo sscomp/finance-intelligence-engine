@@ -1,0 +1,127 @@
+# =============================================================================
+# Constituents Quarterly Reminder — Phase 2A 草稿 manifest
+# =============================================================================
+# 狀態：DRAFT / 非執行階段（NOT LOADED BY PRODUCTION）
+# 用途：Phase 2B BaseReport plugin 對齊用
+# 對應章節：ARCHITECTURE_REVIEW_PHASE2.md §3.2、§7
+# 對應合約：docs/contracts/report_contract_v0.md
+#
+# ⚠️ IMPORTANT ⚠️
+# - 本檔案目前沒有任何 production runtime 載入它
+# - 此排程的現況是「cron agent 開瀏覽器手動確認元大公告」
+# - 任何把本檔接上 plugin 自動 fetch 的改動都屬於 Phase 2B
+# - Phase 2A 不實作自動 fetch（F18 列入 Phase 2B）
+# =============================================================================
+
+report_id_prefix: constituents_quarterly
+report_type: constituents_quarterly_reminder
+schedule_name: 季度成分股更新提醒
+display_name: 季度成分股更新提醒
+version: 1.0.0
+
+# Scheduler
+scheduler:
+  kind: hermes_cronjob
+  cron_job_id: af64556bc8e9
+  cron_expr: "0 9 1 1,4,7,10 *"
+  timezone: Asia/Taipei
+  note: "1/4/7/10 月 1 號 09:00 觸發（季度初）"
+
+# 觸發後行為（特殊：純 ping，目前無 .py）
+entrypoint:
+  script: null                       # 沒有獨立 .py
+  workdir: /home/ubuntu/macro-report
+  venv: /home/ubuntu/macro-venv
+  python_module: null
+  python_function: null
+  note: |
+    現況 = cron agent 收到 cron 觸發，自行開瀏覽器去元大公告頁確認成分股
+    是否變更，並輸出提醒文字送 telegram。
+    Phase 2B 可選：加自動 fetch 元大公告 + diff taiwan50_config.json。
+
+# 輸入源（設計 only，目前無 fetcher）
+input_sources:
+  - name: manual_browser_check
+    kind: manual
+    module: null
+    function: null
+    note: "Phase 2A：人工檢視"
+  - name: yuanta_announcement_auto_fetch_phase2b
+    kind: external_url
+    module: phase2b
+    function: fetch_yuanta_constituents_announcement
+    note: "Phase 2B 才實作（F18）"
+
+# 評分（無）
+analyzer:
+  module: null
+  function: null
+  inputs_from: null
+  outputs: []
+  note: "此排程無分析步驟"
+
+# 渲染（純文字模板）
+renderer:
+  module: inline
+  function: format_quarterly_reminder
+  template_id: inline:v1
+  template_version: n/a
+  template_path_phase2b: templates/reports/constituents_quarterly_v0.md.j2
+  template_text: |
+    📊 季度成分股更新提醒 — {yyyymm}
+    1. 請確認元大台灣 50 (0050) 成分股是否變更
+    2. 同步確認 taiwan50_config.json
+    3. 若有變更：更新 config + 重跑下一次月報 preview
+    4. 若無變更：標記 ✅
+
+# 派送
+publisher:
+  type: telegram
+  channel: stdout
+  target_chat_id: "5132341473"
+  secondary_targets: []
+  retry_policy: none
+  failure_action: cron_agent_reports_error
+  max_message_length: 4096
+
+# 歸檔
+archive:
+  log_format: logs/<job>-<date>.json
+  log_archive_path: logs/
+  phase2b_archive_dir: metadata/reports/constituents_quarterly/<yyyymmdd>/<task_id>/
+
+# 不寫 SQLite
+sqlite:
+  database: null
+  tables: []
+  note: "此排程不寫 SQLite；狀態以 logs/*.json 為準"
+
+# 預期執行 profile
+performance:
+  expected_duration_seconds: 5       # 純文字模板
+  p95_duration_seconds: 15
+  timeout_seconds: 60
+  timeout_known_issues: []
+
+# Retry / rerun
+retry_policy:
+  max_attempts: 1                    # 純 ping，不 retry
+  backoff_seconds: 0
+  retryable_errors: []
+  non_retryable_errors:
+    - all  # 不需 retry
+
+# Policy reference
+policies:
+  scoring: null                      # 無評分
+  retry: config/policies/retry.yaml
+  publisher: config/publishers/telegram.yaml
+
+# Phase 2B plugin 對應
+phase2b_plugin:
+  path: reports/constituents_quarterly_plugin.py
+  class: ConstituentsQuarterlyPlugin
+  base_class: reports.base.BaseReport
+  estimated_loc: 30  # 純 template
+  known_complexity:
+    - "F18 自動 fetch 元大公告若做，會比這個 manifest 複雜得多"

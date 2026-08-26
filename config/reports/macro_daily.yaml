@@ -1,0 +1,139 @@
+# =============================================================================
+# Macro Daily — Phase 2A 草稿 manifest
+# =============================================================================
+# 狀態：DRAFT / 非執行階段（NOT LOADED BY PRODUCTION）
+# 用途：Phase 2B BaseReport plugin 對齊用
+# 對應章節：ARCHITECTURE_REVIEW_PHASE2.md §3.2、§7
+# 對應合約：docs/contracts/report_contract_v0.md
+#
+# ⚠️ IMPORTANT ⚠️
+# - 本檔案目前沒有任何 production runtime 載入它
+# - macro_daily.py 仍讀硬編碼 ticker 列表（VIX、US10Y、DXY、GOLD、TWII、USDTWD）
+# - 任何把本檔接上現有 .py 的改動都屬於 Phase 2B 範圍
+# - 變更本檔不會影響任何 cron job
+# =============================================================================
+
+# Report 識別（對應 §1 of report_contract_v0）
+report_id_prefix: macro_daily
+report_type: macro_daily
+schedule_name: 總體經濟晨報
+display_name: 總體經濟晨報
+version: 1.0.0  # Phase 2A 起算
+
+# Scheduler（凍結，僅 audit 用）
+scheduler:
+  kind: hermes_cronjob
+  cron_job_id: ed214c19c4ac
+  cron_expr: "30 8 * * 1-6"     # 週一至週六 08:30 Asia/Taipei
+  timezone: Asia/Taipei
+  next_run_strategy: hermes_native  # 凍結：Phase 2 不自己造 scheduler
+
+# 觸發後行為（對應現有 run.sh）
+entrypoint:
+  script: run.sh
+  workdir: /home/ubuntu/macro-report
+  venv: /home/ubuntu/macro-venv
+  python_module: macro_daily
+  python_function: main
+
+# 輸入源（對應 §2 of report_contract_v0）
+input_sources:
+  - name: yfinance_macro_indicators
+    kind: external_api
+    module: macro_daily
+    function: fetch_indicators
+    refresh: daily
+    tickers:
+      - symbol: ^VIX
+        name: VIX
+        role: volatility
+      - symbol: ^TNX
+        name: US10Y
+        role: rates
+      - symbol: DX-Y.NYB
+        name: DXY
+        role: dollar
+      - symbol: GC=F
+        name: GOLD
+        role: safe_haven
+      - symbol: ^TWII
+        name: TWII
+        role: taiwan_market
+      - symbol: TWD=X
+        name: USDTWD
+        role: fx
+    expected_size_kb: 2
+
+# 評分（Phase 2A 純文件，現有 .py 仍硬編碼）
+analyzer:
+  module: macro_daily
+  function: assess_liquidity
+  inputs_from: input_sources
+  outputs:
+    - verdict     # 寬鬆 / 中性 / 緊縮
+    - signals     # 個別指標信號
+    - score       # 綜合分數
+
+# 渲染（Phase 2A 凍結既有 format_report，Phase 2B 可選切到 Jinja2）
+renderer:
+  module: macro_daily
+  function: format_report
+  template_id: inline:v1
+  template_version: n/a
+  template_path_phase2b: templates/reports/macro_daily_v0.md.j2
+
+# 派送（凍結）
+publisher:
+  type: telegram
+  channel: stdout
+  target_chat_id: "5132341473"
+  secondary_targets: []
+  retry_policy: none
+  failure_action: cron_agent_reports_error
+  max_message_length: 4096
+
+# 歸檔
+archive:
+  log_format: logs/<job>-<date>.json  # 既有格式
+  log_archive_path: logs/
+  phase2b_archive_dir: metadata/reports/macro_daily/<yyyymmdd>/<task_id>/
+
+# 寫入 SQLite（既有 macro_history.db.macro_daily 表，schema 凍結）
+sqlite:
+  database: /home/ubuntu/macro-report/macro_history.db
+  table: macro_daily
+  schema_version: 1
+  primary_key: date
+  writes_per_run: 1
+
+# 預期執行 profile（用於 dispatcher 排 timeout）
+performance:
+  expected_duration_seconds: 14
+  p95_duration_seconds: 30
+  timeout_seconds: 60
+  timeout_known_issues:
+    - "週末 macro 資料缺：寫 partial status"
+
+# Retry / rerun（對應 task_lifecycle_v0 §4）
+retry_policy:
+  max_attempts: 2
+  backoff_seconds: 60
+  retryable_errors:
+    - transient_network
+    - yfinance_rate_limit
+  non_retryable_errors:
+    - configuration_error
+    - missing_ticker
+
+# Policy reference（指向 config/policies/）
+policies:
+  scoring: config/policies/scoring.yaml       # Phase 2A draft
+  retry: config/policies/retry.yaml            # Phase 2A draft
+  publisher: config/publishers/telegram.yaml   # Phase 2A draft
+
+# Phase 2B plugin 對應
+phase2b_plugin:
+  path: reports/macro_daily_plugin.py
+  class: MacroDailyPlugin
+  base_class: reports.base.BaseReport
+  estimated_loc: 50  # 薄殼

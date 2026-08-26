@@ -1,0 +1,120 @@
+# =============================================================================
+# Retry Policy — Phase 2A 草稿
+# =============================================================================
+# 狀態：DRAFT / 非執行階段（NOT LOADED BY PRODUCTION）
+# 用途：Phase 2B plugin retry 行為對齊用
+# 對應章節：ARCHITECTURE_REVIEW_PHASE2.md §5.4、§7.4、task_lifecycle_v0 §4
+#
+# ⚠️ IMPORTANT ⚠️
+# - 本檔案目前沒有任何 production runtime 載入它
+# - 4 個 .py 沒有 retry 邏輯（要 Phase 2C 才加 dispatcher 內建 retry）
+# - 變更本檔不會改任何 cron 行為
+# =============================================================================
+
+# 預設 retry 行為（所有 report 共用基線）
+default:
+  max_attempts: 2                    # 1 次主跑 + 1 次 retry
+  backoff_strategy: fixed
+  backoff_seconds: 60
+  jitter_seconds: 5                   # ± 隨機，避免 thundering herd
+  timeout_total_seconds: 300
+
+# 依 report_type 覆寫
+overrides:
+  macro_daily:
+    max_attempts: 2
+    backoff_seconds: 60
+    timeout_total_seconds: 60        # 短任務，timeout 短
+    retryable_errors:
+      - transient_network
+      - yfinance_rate_limit
+
+  industry_weekly:
+    max_attempts: 2
+    backoff_seconds: 60
+    timeout_total_seconds: 120
+    retryable_errors:
+      - rss_timeout
+      - rss_parse_error
+
+  company_monthly:
+    max_attempts: 2
+    backoff_seconds: 120              # 月報重，多等一下
+    timeout_total_seconds: 300
+    retryable_errors:
+      - twse_t86_timeout
+      - yfinance_rate_limit
+      - transient_network
+
+  constituents_quarterly_reminder:
+    max_attempts: 1                   # 純 ping，不 retry
+    backoff_seconds: 0
+    timeout_total_seconds: 60
+    retryable_errors: []
+
+# 錯誤分類規則
+error_classification:
+  transient_network:
+    description: "TCP / DNS / TLS 暫時錯誤"
+    detection:
+      - exception_is: ConnectionError
+      - exception_is: Timeout
+      - exception_is: socket.gaierror
+    retryable: true
+
+  yfinance_rate_limit:
+    description: "yfinance 429 / rate limit"
+    detection:
+      - exception_message_contains: "Rate limited"
+      - exception_message_contains: "Too Many Requests"
+    retryable: true
+
+  rss_timeout:
+    description: "RSS feed 30s 沒回應"
+    detection:
+      - exception_is: requests.exceptions.Timeout
+      - stage: waiting_external
+      - source: rss
+    retryable: true
+
+  rss_parse_error:
+    description: "RSS XML 解析失敗"
+    detection:
+      - exception_is: xml.etree.ElementTree.ParseError
+    retryable: true
+
+  twse_t86_timeout:
+    description: "TWSE T86 API 90s 超時"
+    detection:
+      - stage: waiting_external
+      - source: twse_t86
+      - duration_ms: ">= 90000"
+    retryable: true
+
+  configuration_error:
+    description: "config 缺漏、ticker 拼錯等"
+    detection:
+      - exception_is: KeyError
+      - exception_is: FileNotFoundError
+      - stage: running
+      - kind: config
+    retryable: false
+
+  missing_ticker:
+    description: "yfinance 找不到 ticker"
+    detection:
+      - exception_message_contains: "No data found"
+      - exception_message_contains: "possibly delisted"
+    retryable: false
+
+# 失敗處理（dispatcher 層）
+failure_handling:
+  on_exhausted_retries:
+    status: failed
+    write_event: "event=retries_exhausted, attempts=<n>"
+    notify: telegram                # Phase 2B 末；Phase 2A 仍交給 cron agent
+
+  on_non_retryable:
+    status: failed
+    write_event: "event=non_retryable_error, kind=<kind>"
+    notify: telegram

@@ -1,0 +1,139 @@
+# =============================================================================
+# Industry Weekly — Phase 2A 草稿 manifest
+# =============================================================================
+# 狀態：DRAFT / 非執行階段（NOT LOADED BY PRODUCTION）
+# 用途：Phase 2B BaseReport plugin 對齊用
+# 對應章節：ARCHITECTURE_REVIEW_PHASE2.md §3.2、§7
+# 對應合約：docs/contracts/report_contract_v0.md
+#
+# ⚠️ IMPORTANT ⚠️
+# - 本檔案目前沒有任何 production runtime 載入它
+# - industry_weekly.py 仍讀 industry_config.json
+# - 任何把本檔接上現有 .py 的改動都屬於 Phase 2B 範圍
+# =============================================================================
+
+report_id_prefix: industry_weekly
+report_type: industry_weekly
+schedule_name: 產業趨勢週報
+display_name: 產業趨勢週報
+version: 1.0.0
+
+# Scheduler
+scheduler:
+  kind: hermes_cronjob
+  cron_job_id: 60d92c57b826
+  cron_expr: "0 8 * * 1"
+  timezone: Asia/Taipei
+  note: "每週一 08:00 觸發"
+
+# 觸發後行為
+entrypoint:
+  script: run_weekly.sh
+  workdir: /home/ubuntu/macro-report
+  venv: /home/ubuntu/macro-venv
+  python_module: industry_weekly
+  python_function: main
+
+# 輸入源
+input_sources:
+  - name: digitimes_rss
+    kind: rss
+    module: industry_weekly
+    function: collect_news
+    config_source: industry_config.json
+    feeds:
+      - name: AI
+        feeds_count: 2
+      - name: 半導體
+        feeds_count: 3
+      - name: 伺服器
+        feeds_count: 3
+      - name: PCB
+        feeds_count: 2
+      - name: 網通
+        feeds_count: 3
+      - name: 重電
+        feeds_count: 1
+    refresh: weekly
+    expected_size_kb: 40
+    known_issue: "跨 feed pub_date 時間格式不一致（F11）"
+  - name: cnyes_headline_rss
+    kind: rss
+    module: industry_weekly
+    function: collect_news
+    config_source: industry_config.json
+    feeds_count: 1   # 補強金融/高股息
+    refresh: weekly
+    expected_size_kb: 15
+
+# 評分
+analyzer:
+  module: industry_weekly
+  function: analyze_supply_chain_impact
+  inputs_from: input_sources
+  outputs:
+    - sector_impacts     # 產業影響列表
+    - supply_chain_links  # 受影響個股
+  note: "F11 修法：pub_date 統一標準化"
+
+# 渲染
+renderer:
+  module: industry_weekly
+  function: format_weekly_report
+  template_id: inline:v1
+  template_version: n/a
+  template_path_phase2b: templates/reports/industry_weekly_v0.md.j2
+
+# 派送
+publisher:
+  type: telegram
+  channel: stdout
+  target_chat_id: "5132341473"
+  secondary_targets: []
+  retry_policy: none
+  failure_action: cron_agent_reports_error
+  max_message_length: 4096
+
+# 歸檔
+archive:
+  log_format: logs/<job>-<date>.json
+  log_archive_path: logs/
+  phase2b_archive_dir: metadata/reports/industry_weekly/<yyyymmdd>/<task_id>/
+
+# 不寫 SQLite（純 RSS 收集）
+sqlite:
+  database: null
+  tables: []
+  note: "週報目前不寫 SQLite；Phase 2B 末可考慮 `weekly_news_archive` 表（design only）"
+
+# 預期執行 profile
+performance:
+  expected_duration_seconds: 30
+  p95_duration_seconds: 60
+  timeout_seconds: 120
+  timeout_known_issues:
+    - "RSS feed 偶發 30s+ delay"
+    - "金融/高股息 RSS 可能 0 命中（無產業關鍵字）"
+
+# Retry / rerun
+retry_policy:
+  max_attempts: 2
+  backoff_seconds: 60
+  retryable_errors:
+    - rss_timeout
+    - rss_parse_error
+  non_retryable_errors:
+    - configuration_error
+
+# Policy reference
+policies:
+  scoring: config/policies/scoring.yaml
+  retry: config/policies/retry.yaml
+  publisher: config/publishers/telegram.yaml
+
+# Phase 2B plugin 對應
+phase2b_plugin:
+  path: reports/industry_weekly_plugin.py
+  class: IndustryWeeklyPlugin
+  base_class: reports.base.BaseReport
+  estimated_loc: 60
