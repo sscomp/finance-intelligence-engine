@@ -1,0 +1,169 @@
+{
+  "macro": {
+    "score": {
+      "breakdown": {
+        "scorer_type": "macro",
+        "entity_type": "macro",
+        "entity_id": "macro:global",
+        "score": 60.0,
+        "confidence": 0.8,
+        "dimensions": [],
+        "overall_evidence": [],
+        "timestamp": "2026-08-05T00:00:00",
+        "config_hash": "macro_config_hash_001",
+        "valid_until": "2026-08-06T00:00:00",
+        "cross_layer_adjustments": [],
+        "schema_version": "2.0"
+      }
+    },
+    "input_bundle": null,
+    "evidence_signal_ids": ["sig_macro_001", "sig_macro_002"],
+    "snapshot_id": 1001,
+    "warnings": [],
+    "metadata": {
+      "scorer_type": "macro",
+      "entity_id": "macro:global",
+      "date_bucket": "2026-08-05"
+    }
+  },
+  "industries": [
+    {
+      "score": {
+        "breakdown": {
+          "scorer_type": "industry",
+          "entity_type": "industry",
+          "entity_id": "industry:TW:semiconductor",
+          "score": 75.0,
+          "confidence": 0.9,
+          "dimensions": [],
+          "overall_evidence": [],
+          "timestamp": "2026-08-05T00:00:00",
+          "config_hash": "industry_config_hash_001",
+          "valid_until": "2026-08-06T00:00:00",
+          "cross_layer_adjustments": [],
+          "schema_version": "2.0"
+        }
+      },
+      "input_bundle": null,
+      "evidence_signal_ids": ["sig_industry_001", "sig_industry_002"],
+      "snapshot_id": 2001,
+      "warnings": [],
+      "metadata": {
+        "scorer_type": "industry",
+        "entity_id": "industry:TW:semiconductor",
+        "date_bucket": "2026-08-05"
+      }
+    },
+    {
+      "score": {
+        "breakdown": {
+          "scorer_type": "industry",
+          "entity_type": "industry",
+          "entity_id": "industry:TW:finance",
+          "score": 40.0,
+          "confidence": 0.6,
+          "dimensions": [],
+          "overall_evidence": [],
+          "timestamp": "2026-08-05T00:00:00",
+          "config_hash": "industry_config_hash_002",
+          "valid_until": "2026-08-06T00:00:00",
+          "cross_layer_adjustments": [],
+          "schema_version": "2.0"
+        }
+      },
+      "input_bundle": null,
+      "evidence_signal_ids": ["sig_industry_003"],
+      "snapshot_id": 2002,
+      "warnings": [],
+      "metadata": {
+        "scorer_type": "industry",
+        "entity_id": "industry:TW:finance",
+        "date_bucket": "2026-08-05"
+      }
+    }
+  ],
+  "companies": [
+    {
+      "score": {
+        "breakdown": {
+          "scorer_type": "company",
+          "entity_type": "company",
+          "entity_id": "company:TW:2330",
+          "score": 80.0,
+          "confidence": 0.9,
+          "dimensions": [],
+          "overall_evidence": [],
+          "timestamp": "2026-08-05T00:00:00",
+          "config_hash": "company_config_hash_001",
+          "valid_until": "2026-08-06T00:00:00",
+          "cross_layer_adjustments": [],
+          "schema_version": "2.0"
+        }
+      },
+      "input_bundle": null,
+      "evidence_signal_ids": ["sig_company_001", "sig_company_002"],
+      "snapshot_id": 3001,
+      "warnings": [],
+      "metadata": {
+        "scorer_type": "company",
+        "entity_id": "company:TW:2330",
+        "date_bucket": "2026-08-05"
+      }
+    },
+    {
+      "score": {
+        "breakdown": {
+          "scorer_type": "company",
+          "entity_type": "company",
+          "entity_id": "company:TW:2317",
+          "score": 60.0,
+          "confidence": 0.5,
+          "dimensions": [],
+          "overall_evidence": [],
+          "timestamp": "2026-08-05T00:00:00",
+          "config_hash": "company_config_hash_002",
+          "valid_until": "2026-08-06T00:00:00",
+          "cross_layer_adjustments": [],
+          "schema_version": "2.0"
+        }
+      },
+      "input_bundle": null,
+      "evidence_signal_ids": ["sig_company_003"],
+      "snapshot_id": 3002,
+      "warnings": [],
+      "metadata": {
+        "scorer_type": "company",
+        "entity_id": "company:TW:2317",
+        "date_bucket": "2026-08-05"
+      }
+    },
+    {
+      "score": {
+        "breakdown": {
+          "scorer_type": "company",
+          "entity_type": "company",
+          "entity_id": "company:TW:2454",
+          "score": 10.0,
+          "confidence": 1.0,
+          "dimensions": [],
+          "overall_evidence": [],
+          "timestamp": "2026-08-05T00:00:00",
+          "config_hash": "company_config_hash_003",
+          "valid_until": "2026-08-06T00:00:00",
+          "cross_layer_adjustments": [],
+          "schema_version": "2.0"
+        }
+      },
+      "input_bundle": null,
+      "evidence_signal_ids": ["sig_company_004"],
+      "snapshot_id": 3003,
+      "warnings": [],
+      "metadata": {
+        "scorer_type": "company",
+        "entity_id": "company:TW:2454",
+        "date_bucket": "2026-08-05"
+      }
+    }
+  ],
+  "warnings": []
+}
