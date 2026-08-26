@@ -1,0 +1,21 @@
+{
+  "name": "macro_daily",
+  "display_name": "總體經濟晨報",
+  "schedule": "30 8 * * 1-6",
+  "timezone": "Asia/Taipei",
+  "version": "1.0.0",
+  "entrypoint": "reports.plugins.macro_daily_plugin:MacroDailyReport",
+  "timeout_seconds": 120,
+  "retry_policy": {
+    "max_attempts": 1,
+    "backoff_seconds": 0
+  },
+  "publisher": {
+    "type": "stdout"
+  },
+  "archive": {
+    "enabled": false,
+    "log_dir": "/home/ubuntu/macro-report/logs"
+  },
+  "_phase2b_note": "Phase 2B Step 3 framework-side manifest. Sibling of macro_daily.yaml (Phase 2A draft, not loaded by production). PyYAML is not installed in macro-venv, so the framework uses JSON for loadable manifests. The existing .yaml is the human-readable contract draft and is not touched."
+}

@@ -1431,9 +1431,104 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
     actually write to ``--db-path``. The path is guarded against
     ``macro_history.db`` (same as init-db / ingest-signals).
 
+    When ``--seed-from-history`` is set, the function seeds the
+    target ``--db-path`` signal_log from ``macro_history.db`` before
+    running the pipeline.
+
     Output: a one-line summary by default, JSON with ``--json`` or
     ``--output``.
     """
+    # --- Seed from history (optional) --------------------------------
+    seed_from_history = bool(getattr(args, "seed_from_history", False))
+    if seed_from_history:
+        db_path = getattr(args, "db_path", None)
+        if not db_path:
+            print(
+                "--seed-from-history requires --db-path",
+                file=sys.stderr,
+            )
+            return 2
+        if os.path.basename(db_path).lower() == FORBIDDEN_DB_NAME.lower():
+            print(
+                f"--seed-from-history: target db_path {db_path!r} is "
+                f"reserved (macro_history.db).",
+                file=sys.stderr,
+            )
+            return 2
+        source_db = getattr(args, "source_db", None) or "macro_history.db"
+        if not os.path.exists(source_db):
+            print(
+                f"--seed-from-history: source DB not found: {source_db}",
+                file=sys.stderr,
+            )
+            return 2
+        industry_config = getattr(args, "industry_config", None)
+        company_codes = list(getattr(args, "company", []) or [])
+        industry_ids = list(getattr(args, "industry", []) or [])
+        requested_date = getattr(args, "date", None)
+        try:
+            from phase3.bridge.seed_signals import seed_from_macro_history
+            seed_result = seed_from_macro_history(
+                source_db=source_db,
+                target_db=db_path,
+                company_codes=company_codes or None,
+                industry_ids=industry_ids or None,
+                industry_config_path=industry_config,
+                auto_resolve_dates=True,
+                requested_date=requested_date,
+            )
+            print(
+                f"=== seed-from-history -> {db_path} ===\n"
+                f"  macro:         {seed_result['macro']}\n"
+                f"  company:       {seed_result['company']}\n"
+                f"  institutional:  {seed_result['institutional']}\n"
+                f"  industry:      {seed_result['industry']}\n"
+                f"  total:         {seed_result['total']}\n"
+                f"  resolved_dates: {seed_result.get('resolved_dates', {})}",
+                file=sys.stderr,
+            )
+
+            # Freshness check (governance section 5.2, T-1)
+            if getattr(args, "freshness_check", False):
+                from phase3.freshness import (
+                    classify_freshness,
+                    freshness_warnings,
+                    load_holidays,
+                )
+                holidays_fh = load_holidays()
+                resolved_fh = seed_result.get("resolved_dates", {})
+                rd_fh = requested_date or datetime.now(timezone.utc).date().isoformat()
+                cls: dict[str, str] = {}
+                st_fh, _ = classify_freshness(
+                    resolved_fh.get("macro_date"), rd_fh, "macro_daily", holidays_fh)
+                cls["macro_daily"] = st_fh.value
+                st_fh, _ = classify_freshness(
+                    resolved_fh.get("company_date"), rd_fh, "stock_monthly", holidays_fh)
+                cls["stock_monthly"] = st_fh.value
+                st_fh, _ = classify_freshness(
+                    resolved_fh.get("institutional_date"), rd_fh,
+                    "institutional_daily", holidays_fh)
+                cls["institutional_daily"] = st_fh.value
+                st_fh, _ = classify_freshness(
+                    resolved_fh.get("institutional_date"), rd_fh,
+                    "industry_derived", holidays_fh)
+                cls["industry_derived"] = st_fh.value
+                warnings_fh = freshness_warnings(cls)
+                if warnings_fh:
+                    for w_fh in warnings_fh:
+                        print(w_fh, file=sys.stderr)
+                else:
+                    print(
+                        "freshness-check: all data classes FRESH",
+                        file=sys.stderr,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"--seed-from-history failed: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+
     try:
         kwargs = _resolve_pipeline_kwargs(args)
     except ValueError as exc:
@@ -1625,7 +1720,111 @@ def cmd_pipeline_export(args: argparse.Namespace) -> int:
     :func:`cmd_pipeline_report` so an operator can produce a
     report in a single subprocess. Same default-safe contract as
     ``pipeline-run`` (dry-run unless ``--persist``).
+
+    When ``--seed-from-history`` is set, the function seeds the
+    target ``--db-path`` signal_log from ``macro_history.db`` before
+    running the pipeline. The source DB is read-only; the target DB
+    must not be ``macro_history.db`` (path-guard enforced).
     """
+    # --- Seed from history (optional) --------------------------------
+    seed_from_history = bool(getattr(args, "seed_from_history", False))
+    if seed_from_history:
+        db_path = getattr(args, "db_path", None)
+        if not db_path:
+            print(
+                "--seed-from-history requires --db-path (the target "
+                "intelligence DB to seed)",
+                file=sys.stderr,
+            )
+            return 2
+        # Refuse if target is macro_history.db
+        if os.path.basename(db_path).lower() == FORBIDDEN_DB_NAME.lower():
+            print(
+                f"--seed-from-history: target db_path {db_path!r} is "
+                f"reserved (macro_history.db). Use a separate "
+                f"intelligence DB path.",
+                file=sys.stderr,
+            )
+            return 2
+        source_db = getattr(args, "source_db", None) or "macro_history.db"
+        # Verify source exists
+        if not os.path.exists(source_db):
+            print(
+                f"--seed-from-history: source DB not found: "
+                f"{source_db}",
+                file=sys.stderr,
+            )
+            return 2
+        industry_config = getattr(args, "industry_config", None)
+        # Parse company codes from --company args
+        company_codes = list(getattr(args, "company", []) or [])
+        # Parse industry ids from --industry args
+        industry_ids = list(getattr(args, "industry", []) or [])
+        # Auto-resolve dates from --date
+        requested_date = getattr(args, "date", None)
+        try:
+            from phase3.bridge.seed_signals import seed_from_macro_history
+            seed_result = seed_from_macro_history(
+                source_db=source_db,
+                target_db=db_path,
+                company_codes=company_codes or None,
+                industry_ids=industry_ids or None,
+                industry_config_path=industry_config,
+                auto_resolve_dates=True,
+                requested_date=requested_date,
+            )
+            print(
+                f"=== seed-from-history -> {db_path} ===\n"
+                f"  macro:         {seed_result['macro']}\n"
+                f"  company:       {seed_result['company']}\n"
+                f"  institutional:  {seed_result['institutional']}\n"
+                f"  industry:      {seed_result['industry']}\n"
+                f"  total:         {seed_result['total']}\n"
+                f"  resolved_dates: {seed_result.get('resolved_dates', {})}",
+                file=sys.stderr,
+            )
+
+            # Freshness check (governance section 5.2, T-1)
+            if getattr(args, "freshness_check", False):
+                from phase3.freshness import (
+                    classify_freshness,
+                    freshness_warnings,
+                    load_holidays,
+                )
+                holidays_fh = load_holidays()
+                resolved_fh = seed_result.get("resolved_dates", {})
+                rd_fh = requested_date or datetime.now(timezone.utc).date().isoformat()
+                cls: dict[str, str] = {}
+                st_fh, _ = classify_freshness(
+                    resolved_fh.get("macro_date"), rd_fh, "macro_daily", holidays_fh)
+                cls["macro_daily"] = st_fh.value
+                st_fh, _ = classify_freshness(
+                    resolved_fh.get("company_date"), rd_fh, "stock_monthly", holidays_fh)
+                cls["stock_monthly"] = st_fh.value
+                st_fh, _ = classify_freshness(
+                    resolved_fh.get("institutional_date"), rd_fh,
+                    "institutional_daily", holidays_fh)
+                cls["institutional_daily"] = st_fh.value
+                st_fh, _ = classify_freshness(
+                    resolved_fh.get("institutional_date"), rd_fh,
+                    "industry_derived", holidays_fh)
+                cls["industry_derived"] = st_fh.value
+                warnings_fh = freshness_warnings(cls)
+                if warnings_fh:
+                    for w_fh in warnings_fh:
+                        print(w_fh, file=sys.stderr)
+                else:
+                    print(
+                        "freshness-check: all data classes FRESH",
+                        file=sys.stderr,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"--seed-from-history failed: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+
     try:
         kwargs = _resolve_pipeline_kwargs(args)
     except ValueError as exc:
@@ -2379,6 +2578,28 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true",
         help="Emit JSON on stdout (default: human-readable).",
     )
+    p13.add_argument(
+        "--seed-from-history", action="store_true",
+        help="Seed the signal_log from macro_history.db before running "
+             "the pipeline. Uses resolve_as_of_dates to pick the "
+             "latest-available date for each table.",
+    )
+    p13.add_argument(
+        "--freshness-check", action="store_true",
+        help="Emit freshness/staleness warnings for each data class "
+             "after seeding from history. Requires --seed-from-history.",
+    )
+    p13.add_argument(
+        "--source-db", default=None,
+        help="Path to the source macro_history.db (used with "
+             "--seed-from-history). Default: macro_history.db in "
+             "the current directory.",
+    )
+    p13.add_argument(
+        "--industry-config", default=None,
+        help="Path to industry_config.json (used with --seed-from-history). "
+             "Default: industry_config.json in the repo root.",
+    )
     p13.set_defaults(func=cmd_pipeline_run)
 
     p14 = sub.add_parser(
@@ -2524,8 +2745,36 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Omit evidence_handle[*].evidence_summary from the JSON.",
     )
     p17.add_argument(
+        "--freshness-check", action="store_true",
+        help="Emit freshness/staleness warnings for each data class "
+             "after seeding from history. Checks macro_daily (trading-day "
+             "age), stock_monthly (calendar-day age), institutional_daily, "
+             "and industry-derived data against governance thresholds. "
+             "Requires --seed-from-history.",
+    )
+    p17.add_argument(
         "--json", action="store_true",
         help="Emit the export envelope JSON on stdout (default: human-readable).",
+    )
+    p17.add_argument(
+        "--seed-from-history", action="store_true",
+        help="Seed the signal_log from macro_history.db before running "
+             "the pipeline. Uses resolve_as_of_dates to pick the "
+             "latest-available date for each table. Requires "
+             "--db-path (the target intelligence DB). The source "
+             "macro_history.db is read-only.",
+    )
+    p17.add_argument(
+        "--source-db", default=None,
+        help="Path to the source macro_history.db (used with "
+             "--seed-from-history). Default: macro_history.db in "
+             "the current directory.",
+    )
+    p17.add_argument(
+        "--industry-config", default=None,
+        help="Path to industry_config.json (used with --seed-from-history "
+             "for industry capital_flow aggregation). Default: "
+             "industry_config.json in the repo root.",
     )
     p17.set_defaults(func=cmd_pipeline_export)
 
@@ -2908,6 +3157,60 @@ def _build_parser() -> argparse.ArgumentParser:
              "human-readable).",
     )
     p23.set_defaults(func=cmd_portfolio_shadow_run)
+
+    # FIE T-2: Historical Backfill Tooling (additive).
+    p24 = sub.add_parser(
+        "backfill",
+        help="FIE T-2: historical backfill tooling. "
+             "Detect gaps, plan backfill (dry-run), and execute "
+             "against a TEMP/test DB only. NEVER writes to "
+             "production macro_history.db.",
+    )
+    p24.add_argument(
+        "--source", required=True,
+        choices=("macro_daily", "stock_monthly",
+                 "institutional_daily", "industry_derived"),
+        help="Source class to backfill.",
+    )
+    p24.add_argument(
+        "--source-db", default="/home/ubuntu/macro-report/macro_history.db",
+        help="Source database path for gap detection (read-only). "
+             "Default: production macro_history.db (read-only).",
+    )
+    p24.add_argument(
+        "--target-db", required=True,
+        help="Target database path for writes. MUST be a temp/test "
+             "DB — never the production macro_history.db.",
+    )
+    p24.add_argument(
+        "--start", required=True,
+        help="Backfill interval start date (YYYY-MM-DD).",
+    )
+    p24.add_argument(
+        "--end", required=True,
+        help="Backfill interval end date (YYYY-MM-DD).",
+    )
+    p24.add_argument(
+        "--dry-run", action="store_true", default=True,
+        help="Plan only — report what WOULD be inserted/updated/skipped "
+             "without mutating the target DB. (default: true)",
+    )
+    p24.add_argument(
+        "--execute", action="store_true", default=False,
+        help="Execute the backfill (write to target DB). "
+             "Requires --rows-file to supply pre-fetched data.",
+    )
+    p24.add_argument(
+        "--rows-file", default=None,
+        help="JSON file containing pre-fetched rows for --execute mode. "
+             "Format: [{\"date\": \"...\", ...}, ...]. The caller is "
+             "responsible for fetching data using existing fetchers.",
+    )
+    p24.add_argument(
+        "--json", action="store_true",
+        help="Emit the result as JSON on stdout.",
+    )
+    p24.set_defaults(func=cmd_backfill)
 
     return p
 
@@ -3345,6 +3648,130 @@ def cmd_portfolio_report(args: argparse.Namespace) -> int:
         print(f"Sections: {len(report.sections)}")
         print(f"Summary keys: {list(report.summary.keys())}")
 
+    return 0
+
+
+# ---------- FIE T-2: Historical Backfill Tooling ---------- #
+
+
+def cmd_backfill(args: argparse.Namespace) -> int:
+    """FIE T-2: historical backfill tooling.
+
+    Detects gaps, creates a dry-run plan, and optionally executes
+    backfill against a TEMP/test database. NEVER writes to production
+    macro_history.db.
+    """
+    import json as _json
+    from phase3.backfill import (
+        SUPPORTED_SOURCES,
+        BLOCKED_SOURCES,
+        assert_not_production,
+        create_temp_copy,
+        detect_gaps,
+        execute_backfill,
+        is_production_db,
+        plan_backfill,
+    )
+    from phase3.freshness import load_holidays
+
+    source = args.source
+    source_db = args.source_db
+    target_db = args.target_db
+    start = args.start
+    end = args.end
+    execute = args.execute and not args.dry_run
+
+    # Hard production guard on target DB
+    try:
+        assert_not_production(target_db)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
+    # If source-db is production, it's fine — we only read from it.
+    # But if target == source-db and that's production, we already caught it.
+
+    # Load holidays for gap detection
+    repo_root = Path(__file__).resolve().parent.parent
+    holidays = load_holidays(str(repo_root / "config" / "holidays.json"))
+
+    if execute:
+        # --execute mode: write pre-fetched rows to target DB
+        if not args.rows_file:
+            print("Error: --execute requires --rows-file", file=sys.stderr)
+            return 2
+
+        rows_path = Path(args.rows_file)
+        if not rows_path.is_file():
+            print(f"Error: rows file not found: {args.rows_file}", file=sys.stderr)
+            return 2
+
+        with open(rows_path) as f:
+            rows_data = _json.load(f)
+        if not isinstance(rows_data, list):
+            print("Error: rows file must contain a JSON array", file=sys.stderr)
+            return 2
+
+        result = execute_backfill(
+            source_db=source_db,
+            target_db=target_db,
+            source_class=source,
+            start_date=start,
+            end_date=end,
+            rows=rows_data,
+            dry_run=False,
+            holidays=holidays,
+        )
+        output = result.to_dict()
+    else:
+        # Dry-run plan mode (default)
+        plan = plan_backfill(
+            source_db=source_db,
+            target_db=target_db,
+            source_class=source,
+            start_date=start,
+            end_date=end,
+            holidays=holidays,
+        )
+        output = plan.to_dict()
+
+    if args.json:
+        print(_json.dumps(output, indent=2, default=str))
+    else:
+        # Human-readable
+        if "blocked" in output:
+            print(f"Source: {output.get('source')}")
+            print(f"Interval: {output.get('start_date')} .. {output.get('end_date')}")
+            print(f"Target: {output.get('target_db')}")
+            gaps = output.get("gaps", {})
+            print(f"Expected: {gaps.get('expected_count', 0)}")
+            print(f"Existing: {gaps.get('existing_count', 0)}")
+            print(f"Missing: {gaps.get('missing_count', 0)}")
+            print(f"Would insert: {output.get('would_insert', 0)}")
+            print(f"Would update: {output.get('would_update', 0)}")
+            print(f"Would skip: {output.get('would_skip', 0)}")
+            if output.get("blocked"):
+                print(f"BLOCKED: {output.get('block_reason')}")
+            if output.get("validation_errors"):
+                print(f"Errors: {output['validation_errors']}")
+            if output.get("validation_warnings"):
+                print(f"Warnings: {output['validation_warnings']}")
+        else:
+            print(f"Source: {output.get('source')}")
+            print(f"Interval: {output.get('start_date')} .. {output.get('end_date')}")
+            print(f"Target: {output.get('target_db')}")
+            print(f"Rows inserted: {output.get('rows_inserted', 0)}")
+            print(f"Rows updated: {output.get('rows_updated', 0)}")
+            print(f"Rows skipped: {output.get('rows_skipped', 0)}")
+            print(f"Dry run: {output.get('dry_run', True)}")
+            if output.get("validation_errors"):
+                print(f"Errors: {output['validation_errors']}")
+            if output.get("execution_errors"):
+                print(f"Execution errors: {output['execution_errors']}")
+
+    # Return non-zero if there are validation errors
+    if output.get("validation_errors"):
+        return 1
     return 0
 
 

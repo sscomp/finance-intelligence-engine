@@ -50,10 +50,61 @@ mkdir -p -- "${ARTIFACT_DIR}" || {
     exit 4
 }
 
+# --- MVR 2026-08-10: derive --company and --industry from config files ---
+# Read taiwan50_config.json constituents → --company <code> per stock
+# Read industry_config.json top-level keys → --industry <id> per industry
+# Both config files are at the repo root. Fallback: empty args (macro-only).
+TW50_CONFIG="/home/ubuntu/macro-report/taiwan50_config.json"
+INDUSTRY_CONFIG="/home/ubuntu/macro-report/industry_config.json"
+
+if [ -f "${TW50_CONFIG}" ]; then
+    COMPANY_ARGS=$(python3 -c "
+import json
+with open('${TW50_CONFIG}') as f:
+    data = json.load(f)
+args = []
+for c in data['constituents']:
+    args.append('--company')
+    args.append(c['code'])
+print(' '.join(args))
+") || COMPANY_ARGS=""
+else
+    COMPANY_ARGS=""
+fi
+
+if [ -f "${INDUSTRY_CONFIG}" ]; then
+    INDUSTRY_ARGS=$(python3 -c "
+import json
+with open('${INDUSTRY_CONFIG}') as f:
+    data = json.load(f)
+args = []
+for k in data:
+    args.append('--industry')
+    args.append(k)
+print(' '.join(args))
+") || INDUSTRY_ARGS=""
+else
+    INDUSTRY_ARGS=""
+fi
+
+# --- FIE 2026-08-10: real-score bridge wiring ---
+# Seed the signal_log from macro_history.db so pipeline-export produces
+# real scores (not 0.0 defaults).  Uses a per-run temp intelligence DB so
+# macro_history.db stays read-only.  --persist is required because the
+# seed step writes signals into the target DB before scoring.
+SEED_DB="/tmp/macro-report-intelligence/${ARTIFACT_DATE}-intelligence.db"
+mkdir -p -- "$(dirname -- "${SEED_DB}")" || {
+    echo "run.sh: failed to mkdir for seed DB" >&2
+    exit 4
+}
+SEED_ARGS="--seed-from-history --db-path ${SEED_DB} --persist --source-db /home/ubuntu/macro-report/macro_history.db --industry-config /home/ubuntu/macro-report/industry_config.json"
+
 PYTHONPATH=/home/ubuntu/macro-report python3 -m phase3.cli pipeline-export \
     --date "${ARTIFACT_DATE}" \
     --run-label "${ARTIFACT_DATE}" \
-    --output-dir "${ARTIFACT_DIR}" 2>&1
+    --output-dir "${ARTIFACT_DIR}" \
+    ${SEED_ARGS} \
+    ${COMPANY_ARGS} ${INDUSTRY_ARGS} 2>&1
 PIPELINE_RC=$?
 if [ "$PIPELINE_RC" -ne 0 ]; then
     echo "run.sh: phase3 pipeline-export failed with exit code ${PIPELINE_RC}" >&2

@@ -148,6 +148,13 @@ M4_S1_BASELINE = {
 # test_portfolio_safety_guards.py is MODIFIED by M6 (additive M6 guards).
 # cli.py is MODIFIED by M6 (additive portfolio-report subcommand).
 # M8 UPDATE: cli.py is MODIFIED by M8 (additive portfolio-shadow-run subcommand).
+# FIE UPDATE 2026-08-10: cli.py is MODIFIED by real-score bridge wiring
+# (additive --seed-from-history, --source-db, --industry-config args on
+# pipeline-run and pipeline-export subcommands). SHA updated from
+# c2772e61... to a67a99bd... (additive, 0 deletions).
+# FIE UPDATE 2026-08-26: cli.py is MODIFIED by freshness guard wiring
+# (additive --freshness-check flag on pipeline-run/pipeline-export).
+# SHA updated from a67a99bd... to 5cb48bfc... (additive, 0 deletions).
 M4_S2_BASELINE = {
     "decision.py": "2bbcb209dd189ca1e76213b9fcea3015661fad13c333c1011c968a727d22679f",
     "init.py": "bf19b5ea0fc01f574c374cefe48dd582da2d067ceb4db51f95e0da5a312278ff",
@@ -159,7 +166,7 @@ M4_S2_BASELINE = {
 PHASE3_BASELINE = {
     "phase3/__init__.py": "3020382849864e92f78ae38b2c9cbd0e48419e3120e76786f905d43a5eafaeaa",
     "phase3/api.py": "539d58838ff86088d7e71178fed3127065ead83c58786d8f62952d06a3cf50fe",
-    "phase3/cli.py": "c2772e61a6c414f7bfa9557c83c2def27f57ad79f043ecf2af1c9393357509e1",
+    "phase3/cli.py": "5cb48bfc2e72c29b7e3ee0829a440f2aa196f4c7fd18ac002f3fbe4254a125fb",
     "phase3/pipeline/scoring_pipeline.py": "5b778e00c99cec04c7d90965f291d70acada9507d5a99fb938f94fa03fb4dd59",
     "phase3/pipeline/intelligence_pipeline.py": "025af0e538572fc056a73a9dc8ef2686f7518fd95723525693726f1da6fe5570",
     "phase3/datamodel/scores.py": "cc934edd423b1cea8a51cd0554547546a5bc2a34bac169d0ba154332599a090c",

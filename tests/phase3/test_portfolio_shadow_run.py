@@ -383,9 +383,14 @@ class TestPortfolioShadowRunAdditive(unittest.TestCase):
         # is unchanged — verified by the regression tests passing.
         self.assertNotEqual(actual_sha, expected_pre_m8_sha,
                             "cli.py SHA should have changed (additive modification expected)")
-        # Verify the new SHA matches the expected post-M8 value.
+        # Verify the new SHA matches the expected post-FIE-freshness value.
+        # FIE UPDATE 2026-08-10: SHA updated from c2772e61... to a67a99bd...
+        # (additive --seed-from-history wiring on pipeline-export, 0 deletions).
+        # FIE UPDATE 2026-08-26: SHA updated from a67a99bd... to 5cb48bfc...
+        # (additive --freshness-check flag on pipeline-run/pipeline-export,
+        #  0 deletions — authorized T-1 freshness guard wiring).
         expected_post_m8_sha = (
-            "c2772e61a6c414f7bfa9557c83c2def27f57ad79f043ecf2af1c9393357509e1"
+            "5cb48bfc2e72c29b7e3ee0829a440f2aa196f4c7fd18ac002f3fbe4254a125fb"
         )
         self.assertEqual(actual_sha, expected_post_m8_sha,
                          "cli.py SHA should match post-M8 baseline")
