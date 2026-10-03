@@ -135,7 +135,17 @@ def _spec_from(value: str, source: str) -> DatabaseSpec:
     if lowered.startswith("sqlite://") or lowered.startswith("sqlite:"):
         # Accept sqlite:// URLs by stripping the scheme prefix for the
         # path (sqlite:///abs/path -> abs/path; sqlite:relative -> relative).
-        path = re.sub(r"^sqlite:(?:///)?", "", candidate, count=1, flags=re.I)
+        # (Phase 6.7B-R1 defect FIE-R1-001 repair: the former regex
+        # consumed one slash too many and silently rewrote the
+        # documented absolute form — "sqlite:///abs/db" resolved to
+        # "abs/db"-without-leading-slash, i.e. a CWD-relative path.
+        # Scheme stripping must never invent a different path; the
+        # production DSN gate (ADR-017) classifies by absolute-ness,
+        # so a silent leading-slash mutation is a fail-open hazard.)
+        if lowered.startswith("sqlite://"):
+            path = candidate[len("sqlite://"):]
+        else:
+            path = candidate[len("sqlite:"):]
         return DatabaseSpec(
             backend=BACKEND_SQLITE, dsn=path, source=source, original=value
         )

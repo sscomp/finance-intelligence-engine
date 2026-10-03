@@ -118,33 +118,91 @@ class TestPrecedence(unittest.TestCase):
         finally:
             _restore(saved)
 
-    def test_invalid_auth_mode_falls_back_to_none(self) -> None:
-        saved = _env(**{FIE_AUTH_MODE: "basic"})
-        try:
-            self.assertEqual(load_transport_config().auth_mode, "none")
-        finally:
-            _restore(saved)
+    def test_invalid_auth_mode_refuses(self) -> None:
+        # Phase 6.7B / ADR-017 (HP-00): an invalid auth mode used to
+        # silently fall back to `none`, disabling authentication; it
+        # now refuses deterministically — in every profile.
+        from phase3.service.runtime_config import ConfigurationError
 
-    def test_invalid_log_level_falls_back_to_info(self) -> None:
+        for bad in ("basic", "oidc", "NONE-CERTIFIED", ""):
+            with self.subTest(bad=bad):
+                saved = _env(**{FIE_AUTH_MODE: bad})
+                try:
+                    with self.assertRaises(ConfigurationError) as cm:
+                        load_transport_config()
+                    self.assertEqual(cm.exception.code, "UNKNOWN_AUTH_MODE")
+                finally:
+                    _restore(saved)
+
+    def test_invalid_log_level_refuses(self) -> None:
+        # ADR-017: invalid explicit values never silently become INFO.
+        from phase3.service.runtime_config import ConfigurationError
+
         saved = _env(**{FIE_LOG_LEVEL: "verbose"})
         try:
-            self.assertEqual(load_transport_config().log_level, "INFO")
+            with self.assertRaises(ConfigurationError) as cm:
+                load_transport_config()
+            self.assertEqual(cm.exception.code, "INVALID_LOG_LEVEL")
         finally:
             _restore(saved)
 
-    def test_invalid_port_falls_back_to_default(self) -> None:
-        saved = _env(**{FIE_HTTP_PORT: "not-a-port"})
+    def test_invalid_port_refuses(self) -> None:
+        # ADR-017: an invalid port never silently becomes 8787.
+        from phase3.service.runtime_config import ConfigurationError
+
+        for bad in ("not-a-port", "-1", "99999", ""):
+            with self.subTest(bad=bad):
+                saved = _env(**{FIE_HTTP_PORT: bad})
+                try:
+                    with self.assertRaises(ConfigurationError) as cm:
+                        load_transport_config()
+                    self.assertEqual(cm.exception.code, "INVALID_HTTP_PORT")
+                finally:
+                    _restore(saved)
+
+    def test_zero_port_is_documented_ephemeral(self) -> None:
+        # `0` = deliberate ephemeral bind (tests/clean-room probes);
+        # pinned here permanently (see ADR-017 §4.6).
+        saved = _env(**{FIE_HTTP_PORT: "0"})
         try:
-            self.assertEqual(load_transport_config().port, 8787)
+            self.assertEqual(load_transport_config().port, 0)
         finally:
             _restore(saved)
 
-    def test_non_positive_timeout_falls_back(self) -> None:
-        saved = _env(**{FIE_REQUEST_TIMEOUT: "-3"})
-        try:
-            self.assertEqual(load_transport_config().request_timeout, 60.0)
-        finally:
-            _restore(saved)
+    def test_timeout_invalid_values_refuse(self) -> None:
+        # ADR-017 (HP-08): one timeout vocabulary — non-numeric, zero,
+        # negative and non-finite all refuse; no split-brain fallbacks.
+        from phase3.service.runtime_config import ConfigurationError
+
+        for bad in ("abc", "0", "-3", "-0.5", "inf", "nan"):
+            with self.subTest(bad=bad):
+                saved = _env(**{FIE_REQUEST_TIMEOUT: bad})
+                try:
+                    with self.assertRaises(ConfigurationError) as cm:
+                        load_transport_config()
+                    self.assertEqual(cm.exception.code, "INVALID_REQUEST_TIMEOUT")
+                finally:
+                    _restore(saved)
+
+    def test_invalid_explicit_arguments_refuse_too(self) -> None:
+        # The explicit-argument surface obeys the same vocabulary; no
+        # value class silently falls back to the safe default.
+        from phase3.service.runtime_config import ConfigurationError
+
+        cases = [
+            {"auth_mode": "basic"},
+            {"log_level": "verbose"},
+            {"port": -5},
+            {"port": 70000},
+            {"request_timeout": 0.0},
+            {"request_timeout": -3.0},
+            {"request_timeout": float("nan")},
+            {"sqlite_access_mode": "not-a-mode"},
+        ]
+        for kwargs in cases:
+            with self.subTest(**kwargs):
+                with self.assertRaises(ConfigurationError):
+                    load_transport_config(**kwargs)
 
 
 class TestLogSafety(unittest.TestCase):

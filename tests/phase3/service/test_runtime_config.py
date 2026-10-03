@@ -68,8 +68,38 @@ class TestPrecedenceAndValidation(unittest.TestCase):
         cfg = load_runtime_config()
         self.assertEqual(cfg.service_env, "staging")
         self.assertEqual(cfg.log_format, "structured")  # invalid → safe default
-        os.environ[FIE_SERVICE_ENV] = "not-a-profile"
+
+    def test_invalid_service_env_refuses(self) -> None:
+        # Phase 6.7B / ADR-017: an explicitly supplied invalid profile
+        # never silently becomes `local` — it refuses deterministically.
+        from phase3.service.runtime_config import ConfigurationError
+
+        for bad in ("prodution", "foo", "prod", "PRODUCTION-x"):
+            with self.subTest(bad=bad):
+                os.environ[FIE_SERVICE_ENV] = bad
+                try:
+                    with self.assertRaises(ConfigurationError) as cm:
+                        load_runtime_config()
+                    self.assertEqual(cm.exception.code, "UNKNOWN_SERVICE_ENV")
+                finally:
+                    os.environ.pop(FIE_SERVICE_ENV, None)
+
+    def test_absent_service_env_keeps_local_default(self) -> None:
+        # Local compatibility boundary: absence still means `local`.
+        os.environ.pop(FIE_SERVICE_ENV, None)
         self.assertEqual(load_runtime_config().service_env, "local")
+
+    def test_explicit_service_env_argument_beats_env_and_validates(self) -> None:
+        from phase3.service.runtime_config import ConfigurationError
+
+        os.environ[FIE_SERVICE_ENV] = "test"
+        try:
+            cfg = load_runtime_config(service_env="production")
+            self.assertEqual(cfg.service_env, "production")
+            with self.assertRaises(ConfigurationError):
+                load_runtime_config(service_env="typo")
+        finally:
+            os.environ.pop(FIE_SERVICE_ENV, None)
 
 
 class TestSecretSafety(unittest.TestCase):

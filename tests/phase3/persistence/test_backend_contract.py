@@ -302,6 +302,35 @@ class ContractMixin:
 class SQLiteContractTests(ContractMixin, unittest.TestCase):
     """Contract on the SQLite backend (stdlib, always runs)."""
 
+    def test_sqlite_scheme_normalization_forms(self) -> None:
+        # Phase 6.7B-R1 defect FIE-R1-001: scheme stripping must never
+        # invent a different path. Pin the documented forms
+        # (sqlite:///abs/path -> abs/path; sqlite:relative -> relative)
+        # — the former regex silently rewrote the ABSOLUTE form into a
+        # CWD-relative path.
+        import os as _os
+
+        cases = [
+            ("sqlite:///abs/db", "/abs/db"),
+            ("sqlite:/abs/db", "/abs/db"),
+            ("SQLITE:///abs/db", "/abs/db"),  # case-insensitive scheme
+            ("sqlite:relative/db", "relative/db"),
+            ("/abs/plain", "/abs/plain"),
+        ]
+        for value, expected in cases:
+            with self.subTest(value=value):
+                saved = _os.environ.get("FIE_DATABASE_URL")
+                _os.environ["FIE_DATABASE_URL"] = value
+                try:
+                    spec = resolve_spec()
+                    self.assertEqual(spec.backend, "sqlite")
+                    self.assertEqual(spec.dsn, expected)
+                finally:
+                    if saved is None:
+                        _os.environ.pop("FIE_DATABASE_URL", None)
+                    else:
+                        _os.environ["FIE_DATABASE_URL"] = saved
+
     def setUp(self) -> None:
         from phase3.persistence.sqlite import SQLiteStore
 

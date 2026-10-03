@@ -94,6 +94,31 @@ SQLite / PostgreSQL（僅持久層 seams；無 SQL 在傳輸層）
 | `FIE_REQUEST_TIMEOUT` | `60` | 每連線逾時（秒） |
 | `FIE_DATABASE_URL` | 可攜 SQLite 預設 | 持久層目標（Phase 6.3 契約） |
 | `FIE_SQLITE_ACCESS_MODE` | `writable` | SQLite 部署存取模式（6.6R4/ADR-013）：`writable`（生產者/批次歷史行為）、`readonly`（`mode=ro` 讀取；WAL 工件需可寫 sidecar 空間）、`immutable_snapshot`（宣告的唯讀容器部署：僅主 `.db` 工件、讀者存活期間工件不得變動） |
+| `FIE_SERVICE_ENV` | `local` | 執行設定檔（Phase 6.7B/ADR-017）：`local|test|staging|production`；**缺值** = `local`；**明確非法值（含 `prodution` 拼字錯誤）決定論拒絕啟動，絕不靜默變成 `local`** |
+
+### 4.1 Fail-closed 語意（Phase 6.7B/ADR-017）
+
+「缺值」與「明確供給之非法值」分離：缺值 = 上述安全預設（本機/
+測試相容性邊界，有行為不變測試）；明確供給的非法值（參數或環境、
+任何設定檔）一律以穩定類別決定論拒絕，**永不靜默回落預設**：
+非法 `FIE_AUTH_MODE`（`UNKNOWN_AUTH_MODE`）、非法/空白
+`FIE_SQLITE_ACCESS_MODE`（`UNKNOWN_ACCESS_MODE`）、非數值/負數/
+超範圍 `FIE_HTTP_PORT`（`INVALID_HTTP_PORT`；`0` = 已釘住的暫時埠）、
+非法 `FIE_LOG_LEVEL`（`INVALID_LOG_LEVEL`）、非可解析/`0`/負數/
+非有限 `FIE_REQUEST_TIMEOUT`（`INVALID_REQUEST_TIMEOUT`）。
+
+staging/production 另於**決議期（先於 bind）**強制：
+`FIE_AUTH_MODE=none` 禁止（`AUTH_MODE_FORBIDDEN_IN_PRODUCTION`）、
+token 模式必須有 `FIE_AUTH_TOKEN`（`AUTH_CREDENTIAL_MISSING`）、
+`FIE_DATABASE_URL` 必須明確供給（`DATABASE_URL_MISSING`——
+可攜 CWD 相對 SQLite 預設不被接受；SQLite DSN 必須為**絕對路徑**，
+否則 `DATABASE_URL_INVALID`，此 DSN 形狀閘位於組合根
+`run_server`）。主控台進入點收到任何拒絕：stderr 輸出單行消毒
+JSON（`{"error": {"code": ..., "message": ...}}`）並以非零值結束；
+診斷**永不**回顯設定值（token/DSN/路徑/注入標記皆扣留——
+`value withheld`）；無 fallback 服務、無降級未認證模式、無部分啟動。
+DSN **可達性**驗證與 schema 就緒閘屬 R3；連線失敗維持
+`/readyz` 503 領域路徑（6.6R1 消毒）。
 
 ## 5. 健康與就緒 (§10)
 

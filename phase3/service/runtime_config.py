@@ -12,7 +12,11 @@ FIE_DATA_DIR                filesystem data root (only where FS data is explicit
                             supported, e.g. macro_history layer)     repo root (paths.py)
 FIE_ARTIFACT_DIR            report artifact output                   <root>/metadata/reports/artifacts
 FIE_SERVICE_ENV             runtime profile: "local"|"test"|"staging"|"production"
-                            (cosmetic/diagnostic only in 6.5; safe default = "local")
+                            (Phase 6.7B/ADR-017: unsafe in staging/production —
+                            see :mod:`phase3.transport.config`; absent →
+                            "local"; an explicitly INVALID value raises
+                            ConfigurationError — it never silently becomes
+                            "local")
 FIE_LOG_FORMAT              "structured"|"plain" log lines           "structured"
 =========== ============================ ============================
 
@@ -39,6 +43,7 @@ from phase3.paths import (
 from phase3.persistence.backend import sanitize_db_url
 
 __all__ = [
+    "ConfigurationError",
     "ServiceRuntimeConfig",
     "load_runtime_config",
     "FIE_SERVICE_ENV",
@@ -61,6 +66,33 @@ RUNTIME_ENV_VARS = (
 
 _VALID_PROFILES = ("local", "test", "staging", "production")
 _VALID_LOG_FORMATS = ("structured", "plain")
+
+
+class ConfigurationError(Exception):
+    """Deterministic configuration refusal (Phase 6.7B / ADR-017).
+
+    Raised when an explicitly supplied configuration value is invalid
+    or a required production-like configuration is missing. Fail-closed
+    semantics: the caller must refuse startup — there is no silent
+    fallback, degraded mode or partial service.
+
+    Attributes
+    ----------
+    code:
+        Stable machine-testable refusal category (e.g.
+        ``"UNKNOWN_SERVICE_ENV"``). Values are configuration
+        categories, never message fragments that could carry secrets.
+    message:
+        Sanitized single-line diagnostic. Configuration values are
+        deliberately withheld — the message names the environment
+        variable and the reason only, so no token, DSN, password or
+        injected marker can leak through it.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
 
 _URL_RE = re.compile(r"\S*://\S+")
 _PATH_RE = re.compile(r"(?:[\w@.-]*/)?[\w@-]*(?:/(?:[\w./@-]+))+", re.ASCII)
@@ -98,14 +130,34 @@ class ServiceRuntimeConfig:
         }
 
 
-def load_runtime_config(explicit_db: str | None = None) -> ServiceRuntimeConfig:
-    """Resolve the runtime contract (precedence: arg > env > safe default)."""
+def load_runtime_config(
+    explicit_db: str | None = None, *, service_env: str | None = None
+) -> ServiceRuntimeConfig:
+    """Resolve the runtime contract (precedence: arg > env > safe default).
+
+    ``service_env`` (Phase 6.7B) is an explicit-argument override with
+    the same precedence as every other explicit argument; both the
+    argument and the ``FIE_SERVICE_ENV`` environment variable are
+    validated against the profile vocabulary, and an explicitly
+    supplied invalid value raises :class:`ConfigurationError` — it
+    never silently becomes ``local`` (ADR-017). An *absent* value
+    keeps the accepted ``local`` development default.
+    """
     from phase3.persistence.backend import resolve_spec
 
     spec = resolve_spec(explicit_db)
-    service_env = os.environ.get(FIE_SERVICE_ENV, "local").strip().lower()
-    if service_env not in _VALID_PROFILES:
-        service_env = "local"
+    if service_env is not None:
+        profile = service_env.strip().lower()
+    else:
+        profile = os.environ.get(FIE_SERVICE_ENV, "").strip().lower()
+        if not profile:
+            profile = "local"
+    if profile not in _VALID_PROFILES:
+        raise ConfigurationError(
+            "UNKNOWN_SERVICE_ENV",
+            "FIE_SERVICE_ENV has an invalid value; startup refused "
+            "(value withheld)",
+        )
     log_format = os.environ.get(FIE_LOG_FORMAT, "structured").strip().lower()
     if log_format not in _VALID_LOG_FORMATS:
         log_format = "structured"
@@ -116,6 +168,6 @@ def load_runtime_config(explicit_db: str | None = None) -> ServiceRuntimeConfig:
         data_dir=str(data_dir()),
         config_dir=os.environ.get("FIE_CONFIG_DIR", str(data_dir())),
         artifact_dir=str(artifact_dir()),
-        service_env=service_env,
+        service_env=profile,
         log_format=log_format,
     )

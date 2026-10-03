@@ -532,6 +532,34 @@ def make_http_server(
     )
 
 
+def _validate_production_dsn(config: TransportConfig) -> None:
+    """Refuse CWD-relative SQLite DSNs under staging/production (HP-04).
+
+    Composition-root gate (ADR-017 §4.4): this is the one transport
+    module permitted to resolve a full spec
+    (:func:`phase3.persistence.backend.resolve_spec` — see the Phase
+    6.7A frozen import-surface audit). Runs BEFORE anything is opened
+    or bound, so an invalid production DSN can never produce a
+    partially-configured listening service.
+    """
+    from pathlib import Path
+
+    from phase3.persistence.backend import resolve_spec
+    from phase3.service.runtime_config import ConfigurationError
+    from phase3.transport.config import PRODUCTION_LIKE_PROFILES
+
+    if config.service_env not in PRODUCTION_LIKE_PROFILES:
+        return
+    spec = resolve_spec(config.db_spec)
+    if spec.backend == "sqlite" and not Path(spec.dsn).is_absolute():
+        raise ConfigurationError(
+            "DATABASE_URL_INVALID",
+            "FIE_DATABASE_URL invalid under staging/production: a SQLite "
+            "path must be absolute (no CWD-relative DSN), or a postgres:// "
+            "DSN must be used; value withheld",
+        )
+
+
 def run_server(
     config: TransportConfig | None = None,
     *,
@@ -541,8 +569,13 @@ def run_server(
 
     Returns the (already serving) server object so embedders/tests can
     ``shutdown()`` deterministically.
+
+    Raises :class:`~phase3.service.runtime_config.ConfigurationError`
+    for fail-closed production-like DSN validation — before the
+    runtime or the socket exist (ADR-017).
     """
     config = config or load_transport_config(db_spec)
+    _validate_production_dsn(config)
     runtime = FIEReferenceRuntime.open(
         config.db_spec,
         access_mode=getattr(config, "sqlite_access_mode", None),
@@ -569,14 +602,34 @@ def run_server(
 def main() -> int:
     """Console entry point (``fie-http-server``) — repository-declared."""
     import signal
+    import sys
 
-    config = load_transport_config()
+    from phase3.service.runtime_config import ConfigurationError
+
+    try:
+        config = load_transport_config()
+    except ConfigurationError as exc:
+        # Fail-closed startup refusal (Phase 6.7B / ADR-017): nothing
+        # binds, no partial service, no fallback mode. The diagnostic
+        # is a single sanitized line: a stable refusal category plus a
+        # message that names only the offending variable — the value
+        # itself is withheld, so no token/DSN/path/marker can leak.
+        print(
+            json.dumps(
+                {"error": {"code": exc.code, "message": exc.message}},
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     logging.basicConfig(
         level=getattr(logging, config.log_level),
         format="%(message)s",
     )
     if config.auth_mode == "token" and not config.auth_token:
         # fail-closed: refuse to start token auth without a token
+        # (outside production-like profiles, where the configuration
+        # contract refuses earlier — ADR-017)
         print(
             json.dumps(
                 {"error": "FIE_AUTH_MODE=token requires FIE_AUTH_TOKEN"},
@@ -584,7 +637,20 @@ def main() -> int:
             )
         )
         return 2
-    server = run_server(config)
+    try:
+        server = run_server(config)
+    except ConfigurationError as exc:
+        # the composition-root DSN-shape gate (ADR-017 §4.4) refuses
+        # before anything opens or binds — same sanitized refusal
+        # contract; never a raw traceback, never a partial service
+        print(
+            json.dumps(
+                {"error": {"code": exc.code, "message": exc.message}},
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     stop = threading.Event()
 
     def _terminate(*_a: object) -> None:

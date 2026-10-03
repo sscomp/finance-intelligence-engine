@@ -24,7 +24,7 @@ Phase 6.3 已有 `FIE_DATABASE_URL` 環境變數與 `resolve_spec()` 的 explici
 | `FIE_DATA_DIR` | 檔案系統資料根（僅 macro_history layer 等明確支援 FS 的層） | `phase3.paths` 可攜預設 |
 | `FIE_CONFIG_DIR` | 設定覆蓋根 | 跟隨 `FIE_DATA_DIR` |
 | `FIE_ARTIFACT_DIR` | 報告 artifact 輸出 | `phase3.paths` 可攜預設 |
-| `FIE_SERVICE_ENV` | `local`/`test`/`staging`/`production`（6.5 僅診斷用途） | `local` |
+| `FIE_SERVICE_ENV` | `local`/`test`/`staging`/`production`（6.5 僅診斷用途；6.7B/ADR-017 起 staging/production 為 fail-closed 設定檔，明確非法值決定論拒絕） | `local` |
 | `FIE_LOG_FORMAT` | `structured`/`plain` | `structured` |
 
 優先序（documented + tested）：**explicit argument > environment > 可攜安全預設** — 與 `resolve_spec()` 相同形狀。

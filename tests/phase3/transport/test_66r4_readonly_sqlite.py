@@ -391,16 +391,27 @@ class TestAccessModeConfigPlumbing(unittest.TestCase):
         self.assertIn("sqlite_access_mode", config.to_dict())
         self.assertEqual(config.to_dict()["sqlite_access_mode"], "immutable_snapshot")
 
-    def test_invalid_env_falls_back_to_writable(self):
+    def test_invalid_env_refuses_not_falls_back(self):
+        # Phase 6.7B / ADR-017 §4.5: the config layer no longer
+        # silently falls back to `writable` on an invalid explicit
+        # value — it refuses with the same vocabulary the store layer
+        # enforces (the two-layer disagreement is eliminated; the
+        # store's own ValueError path is unchanged).
+        from phase3.service.runtime_config import ConfigurationError
         from phase3.transport.config import (
             load_transport_config,
             FIE_SQLITE_ACCESS_MODE,
         )
-        from phase3.persistence.sqlite import ACCESS_WRITABLE
 
         os.environ[FIE_SQLITE_ACCESS_MODE] = "not-a-mode"
-        config = load_transport_config()
-        self.assertEqual(config.sqlite_access_mode, ACCESS_WRITABLE)
+        with self.assertRaises(ConfigurationError) as cm:
+            load_transport_config()
+        self.assertEqual(cm.exception.code, "UNKNOWN_ACCESS_MODE")
+        # the store contract itself is untouched
+        from phase3.persistence.sqlite import ACCESS_WRITABLE, SQLiteStore
+
+        with self.assertRaises(ValueError):
+            SQLiteStore(":memory:", access_mode="not-a-mode")
 
     def test_env_readonly_plumbs_to_config(self):
         from phase3.transport.config import (
