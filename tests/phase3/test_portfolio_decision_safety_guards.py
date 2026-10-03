@@ -168,10 +168,19 @@ M4_S2_BASELINE = {
 # Known phase3 top-level + pipeline + datamodel baseline SHAs (M4-S1 must
 # not modify any file outside phase3.portfolio.*).
 # M4-S3 UPDATE: cli.py is MODIFIED by M4-S3 (additive portfolio-run subcommand).
+# FIE Phase 6.3 UPDATE 2026-10-03: api.py and cli.py are MODIFIED by the
+# persistence backend dispatch (FIE_DATABASE_URL + postgres:// DSN routing
+# through phase3.persistence.backend, graph store close hygiene;
+# dispatch-only, 0 scoring-sequence edits — scoring_pipeline.py,
+# intelligence_pipeline.py and datamodel/scores.py SHAs are unchanged).
+# api.py SHA updated from 539d5883... to acb4f679...; cli.py SHA updated
+# from 3078349f... to dfa7cd71... (disposable PostgreSQL parity backend
+# wiring per the Phase 6.3 work order PART C; see
+# docs/architecture/phase6-3/persistence-access-map.md).
 PHASE3_BASELINE = {
     "phase3/__init__.py": "3020382849864e92f78ae38b2c9cbd0e48419e3120e76786f905d43a5eafaeaa",
-    "phase3/api.py": "539d58838ff86088d7e71178fed3127065ead83c58786d8f62952d06a3cf50fe",
-    "phase3/cli.py": "3078349f88f5c29304a86a48c9cc9ef07f126e6254bb87e20e35ab02871c7924",
+    "phase3/api.py": "acb4f679549aff69d171012d2906f3e9cb573ffead4b1e8d99e1704736ffb1d7",
+    "phase3/cli.py": "dfa7cd71e4f5ce8dd1c96680b2c9f4007bacfd35c93260ccf30d7f70404865fa",
     "phase3/pipeline/scoring_pipeline.py": "b325b97eaae25be515b5a5aada35e28e530fa574836c714ba488108893a15e5a",
     "phase3/pipeline/intelligence_pipeline.py": "025af0e538572fc056a73a9dc8ef2686f7518fd95723525693726f1da6fe5570",
     "phase3/datamodel/scores.py": "cc934edd423b1cea8a51cd0554547546a5bc2a34bac169d0ba154332599a090c",

@@ -392,8 +392,12 @@ class TestPortfolioShadowRunAdditive(unittest.TestCase):
         # FIE Phase 6.1 UPDATE 2026-10-03: SHA updated from 5cb48bfc...
         # to 3078349f88f5... (portability: example paths generalized in
         # the cli.py docstring, 0 deletions — Phase 6.1 Workstream C).
+        # FIE Phase 6.3 UPDATE 2026-10-03: SHA updated from 3078349f...
+        # to dfa7cd71... (persistence backend dispatch: FIE_DATABASE_URL +
+        # postgres:// DSN routing, graph store close hygiene — dispatch
+        # only, cmd_shadow_run behavior unchanged; regression tests pass).
         expected_post_m8_sha = (
-            "3078349f88f5c29304a86a48c9cc9ef07f126e6254bb87e20e35ab02871c7924"
+            "dfa7cd71e4f5ce8dd1c96680b2c9f4007bacfd35c93260ccf30d7f70404865fa"
         )
         self.assertEqual(actual_sha, expected_post_m8_sha,
                          "cli.py SHA should match post-M8 baseline")
