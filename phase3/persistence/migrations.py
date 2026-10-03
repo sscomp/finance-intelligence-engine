@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from phase3.persistence.sqlite import SQLiteStore, TransactionError
+from phase3.persistence.timeutil import utc_now_iso
 
 
 # ---------------------------------------------------------------------------
@@ -214,17 +215,24 @@ class MigrationManager:
             # schema behind.
             try:
                 with self._store.transaction():
-                    self._store.connection.executescript(mig.sql)
-                    # Upsert the registry row. We use INSERT OR REPLACE
-                    # so a previous failed attempt (error != NULL) gets
-                    # overwritten on success.
+                    self._store.executescript(mig.sql)
+                    # Upsert the registry row so a previous failed
+                    # attempt (error != NULL) is overwritten on
+                    # success. INSERT ... ON CONFLICT ... DO UPDATE is
+                    # portable across both backends (INSERT OR REPLACE
+                    # is SQLite-only dialect) — Phase 6.3.
                     self._store.execute(
                         """
-                        INSERT OR REPLACE INTO schema_migrations
+                        INSERT INTO schema_migrations
                             (version, name, checksum, applied_at, error)
-                        VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), NULL)
+                        VALUES (%s, %s, %s, %s, NULL)
+                        ON CONFLICT(version) DO UPDATE SET
+                            name       = excluded.name,
+                            checksum   = excluded.checksum,
+                            applied_at = excluded.applied_at,
+                            error      = NULL
                         """,
-                        (mig.version, mig.name, mig.checksum),
+                        (mig.version, mig.name, mig.checksum, utc_now_iso()),
                     )
             except (sqlite3.Error, TransactionError) as exc:
                 # Record the failure so a future apply() can retry.
@@ -244,7 +252,7 @@ class MigrationManager:
     def _fetch_row(self, version: int) -> sqlite3.Row | None:
         cur = self._store.execute(
             "SELECT version, name, checksum, applied_at, error "
-            "FROM schema_migrations WHERE version = ?",
+            "FROM schema_migrations WHERE version = %s",
             (version,),
         )
         return cur.fetchone()
@@ -259,11 +267,16 @@ class MigrationManager:
             with self._store.transaction():
                 self._store.execute(
                     """
-                    INSERT OR REPLACE INTO schema_migrations
+                    INSERT INTO schema_migrations
                         (version, name, checksum, applied_at, error)
-                    VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT(version) DO UPDATE SET
+                        name       = excluded.name,
+                        checksum   = excluded.checksum,
+                        applied_at = excluded.applied_at,
+                        error      = excluded.error
                     """,
-                    (mig.version, mig.name, mig.checksum, error_repr),
+                    (mig.version, mig.name, mig.checksum, utc_now_iso(), error_repr),
                 )
         except sqlite3.Error:
             # If we cannot even write the failure, the registry is

@@ -31,7 +31,7 @@ def purge_signals_before(
     cutoff_iso = _iso(cutoff)
     with store.transaction():
         cur = store.execute(
-            "DELETE FROM signal_log WHERE ingested_at < ?", (cutoff_iso,)
+            "DELETE FROM signal_log WHERE ingested_at < %s", (cutoff_iso,)
         )
         return int(cur.rowcount or 0)
 
@@ -41,7 +41,7 @@ def purge_signals_by_id(store: SQLiteStore, ids: Iterable[str]) -> int:
     id_list = list(ids)
     if not id_list:
         return 0
-    placeholders = ",".join("?" for _ in id_list)
+    placeholders = ",".join("%s" for _ in id_list)
     with store.transaction():
         cur = store.execute(
             f"DELETE FROM signal_log WHERE signal_id IN ({placeholders})",
@@ -73,7 +73,7 @@ def purge_graph_edges_for_node(store: SQLiteStore, node_id: str) -> int:
     """
     with store.transaction():
         cur = store.execute(
-            "DELETE FROM graph_edges WHERE from_node_id = ? OR to_node_id = ?",
+            "DELETE FROM graph_edges WHERE from_node_id = %s OR to_node_id = %s",
             (node_id, node_id),
         )
         return int(cur.rowcount or 0)
@@ -87,11 +87,11 @@ def purge_graph_node(store: SQLiteStore, node_id: str) -> tuple[int, int]:
     """
     with store.transaction():
         edge_cur = store.execute(
-            "DELETE FROM graph_edges WHERE from_node_id = ? OR to_node_id = ?",
+            "DELETE FROM graph_edges WHERE from_node_id = %s OR to_node_id = %s",
             (node_id, node_id),
         )
         node_cur = store.execute(
-            "DELETE FROM graph_nodes WHERE node_id = ?", (node_id,)
+            "DELETE FROM graph_nodes WHERE node_id = %s", (node_id,)
         )
         return (int(edge_cur.rowcount or 0), int(node_cur.rowcount or 0))
 
@@ -104,7 +104,7 @@ def purge_ingestion_errors_before(
     cutoff_iso = _iso(cutoff)
     with store.transaction():
         cur = store.execute(
-            "DELETE FROM ingestion_errors WHERE occurred_at < ?", (cutoff_iso,)
+            "DELETE FROM ingestion_errors WHERE occurred_at < %s", (cutoff_iso,)
         )
         return int(cur.rowcount or 0)
 

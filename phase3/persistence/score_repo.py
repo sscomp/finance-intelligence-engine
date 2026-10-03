@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any
 
 from phase3.persistence.sqlite import SQLiteStore, TransactionError
+from phase3.persistence.timeutil import utc_now_iso
 
 
 class ScoreSnapshotMutationError(RuntimeError):
@@ -75,34 +76,38 @@ class ScoreRepository:
         """Insert a new snapshot row. Returns the assigned ``snapshot_id``.
 
         ``snapshot_id`` on the input record is ignored — the DB
-        assigns it.
+        assigns it (AUTOINCREMENT on SQLite / IDENTITY on PostgreSQL;
+        fetched portably via ``RETURNING``). ``computed_at`` defaults
+        to the application-layer UTC stamp when the record omits it,
+        replacing the old SQLite ``strftime`` default so the statement
+        is dialect-neutral.
         """
         sql = """
         INSERT INTO score_snapshot (
             scorer, entity_type, entity_id, score,
             breakdown_json, inputs_json, notes, schema_version, computed_at
         ) VALUES (
-            :scorer, :entity_type, :entity_id, :score,
-            :breakdown_json, :inputs_json, :notes, :schema_version,
-            COALESCE(:computed_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            %s, %s, %s, %s,
+            %s, %s, %s, %s, %s
         )
+        RETURNING snapshot_id
         """
-        params = {
-            "scorer": record.scorer,
-            "entity_type": record.entity_type,
-            "entity_id": record.entity_id,
-            "score": record.score,
-            "breakdown_json": json.dumps(record.breakdown, sort_keys=True),
-            "inputs_json": json.dumps(record.inputs, sort_keys=True),
-            "notes": record.notes,
-            "schema_version": record.schema_version,
-            "computed_at": record.computed_at,
-        }
+        params = (
+            record.scorer,
+            record.entity_type,
+            record.entity_id,
+            record.score,
+            json.dumps(record.breakdown, sort_keys=True),
+            json.dumps(record.inputs, sort_keys=True),
+            record.notes,
+            record.schema_version,
+            record.computed_at if record.computed_at is not None else utc_now_iso(),
+        )
         with self._store.transaction():
             cur = self._store.execute(sql, params)
-            last_id = cur.lastrowid
-            assert last_id is not None  # always set for INSERT on INTEGER PK
-            return int(last_id)
+            row = cur.fetchone()
+            assert row is not None  # INSERT ... RETURNING always yields one row
+            return int(row["snapshot_id"])
 
     # ----- forbidden mutations --------------------------------------------
 
@@ -136,7 +141,7 @@ class ScoreRepository:
         cur = self._store.execute(
             """
             SELECT * FROM score_snapshot
-            WHERE scorer = ? AND entity_type = ? AND entity_id = ?
+            WHERE scorer = %s AND entity_type = %s AND entity_id = %s
             ORDER BY computed_at DESC, snapshot_id DESC
             LIMIT 1
             """,
@@ -156,16 +161,16 @@ class ScoreRepository:
         clauses: list[str] = []
         params: list[Any] = []
         if scorer is not None:
-            clauses.append("scorer = ?")
+            clauses.append("scorer = %s")
             params.append(scorer)
         if entity_type is not None:
-            clauses.append("entity_type = ?")
+            clauses.append("entity_type = %s")
             params.append(entity_type)
         if entity_id is not None:
-            clauses.append("entity_id = ?")
+            clauses.append("entity_id = %s")
             params.append(entity_id)
         if since is not None:
-            clauses.append("computed_at >= ?")
+            clauses.append("computed_at >= %s")
             params.append(_iso(since))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = f"""
@@ -187,6 +192,24 @@ class ScoreRepository:
 # ---------------------------------------------------------------------------
 
 
+def _db_error_classes() -> tuple[type[BaseException], ...]:
+    """Exception classes the backends raise for rejected statements.
+
+    SQLite raises ``sqlite3.IntegrityError`` (trigger ``RAISE(ABORT)``)
+    plus our :class:`TransactionError`; PostgreSQL raises driver
+    errors from the append-only trigger. Built lazily so SQLite-only
+    installs never import psycopg.
+    """
+    classes: list[type[BaseException]] = [sqlite3.IntegrityError, TransactionError]
+    try:
+        import psycopg
+    except ImportError:  # pragma: no cover - exercised in PG tests
+        pass
+    else:
+        classes.append(psycopg.Error)
+    return tuple(classes)
+
+
 def attempt_raw_update(
     store: SQLiteStore,
     snapshot_id: int,
@@ -203,13 +226,14 @@ def attempt_raw_update(
     try:
         with store.transaction():
             store.execute(
-                "UPDATE score_snapshot SET score = ? WHERE snapshot_id = ?",
+                "UPDATE score_snapshot SET score = %s WHERE snapshot_id = %s",
                 (new_score, snapshot_id),
             )
-    except (sqlite3.IntegrityError, TransactionError) as exc:
-        # sqlite3.IntegrityError("score_snapshot is append-only: UPDATE
-        # rejected") is what the trigger raises. Wrap so the
-        # boundary is consistent.
+    except _db_error_classes() as exc:
+        # SQLite: sqlite3.IntegrityError("score_snapshot is append-only:
+        # UPDATE rejected") from the trigger. PostgreSQL: the mirrored
+        # plpgsql RAISE EXCEPTION. Wrapping keeps the boundary
+        # consistent across backends.
         raise ScoreSnapshotMutationError(str(exc)) from exc
 
 
@@ -217,10 +241,10 @@ def attempt_raw_delete(store: SQLiteStore, snapshot_id: int) -> None:
     try:
         with store.transaction():
             store.execute(
-                "DELETE FROM score_snapshot WHERE snapshot_id = ?",
+                "DELETE FROM score_snapshot WHERE snapshot_id = %s",
                 (snapshot_id,),
             )
-    except (sqlite3.IntegrityError, TransactionError) as exc:
+    except _db_error_classes() as exc:
         raise ScoreSnapshotMutationError(str(exc)) from exc
 
 

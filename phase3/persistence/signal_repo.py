@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any, Iterable
 
 from phase3.persistence.sqlite import SQLiteStore
+from phase3.persistence.timeutil import utc_now_iso
 
 
 # ---------------------------------------------------------------------------
@@ -111,18 +112,22 @@ class SignalRepository:
 
         Returns True if a new row was created, False if an existing
         row was updated.
+
+        ``ingested_at`` is stamped here in the application layer (same
+        format the SQLite DDL default produced), so the statement is
+        dialect-neutral and runs unchanged on SQLite and PostgreSQL.
         """
         sql = """
         INSERT INTO signal_log (
             signal_id, entity_type, entity_id, signal_type, value, unit,
             direction, timestamp, date_bucket, source_id, source_type,
             ref, fetched_at, fetch_id, schema_version,
-            metadata_json, raw_payload
+            metadata_json, raw_payload, ingested_at
         ) VALUES (
-            :signal_id, :entity_type, :entity_id, :signal_type, :value, :unit,
-            :direction, :timestamp, :date_bucket, :source_id, :source_type,
-            :ref, :fetched_at, :fetch_id, :schema_version,
-            :metadata_json, :raw_payload
+            %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s,
+            %s, %s, %s
         )
         ON CONFLICT(signal_id) DO UPDATE SET
             entity_type    = excluded.entity_type,
@@ -141,30 +146,31 @@ class SignalRepository:
             schema_version = excluded.schema_version,
             metadata_json  = excluded.metadata_json,
             raw_payload    = excluded.raw_payload,
-            ingested_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            ingested_at    = excluded.ingested_at
         """
-        params = {
-            "signal_id": record.signal_id,
-            "entity_type": record.entity_type,
-            "entity_id": record.entity_id,
-            "signal_type": record.signal_type,
-            "value": record.value,
-            "unit": record.unit,
-            "direction": record.direction,
-            "timestamp": _to_iso(record.timestamp) or "",
-            "date_bucket": record.date_bucket,
-            "source_id": record.source_id,
-            "source_type": record.source_type,
-            "ref": record.ref,
-            "fetched_at": _to_iso(record.fetched_at),
-            "fetch_id": record.fetch_id,
-            "schema_version": record.schema_version,
-            "metadata_json": json.dumps(record.metadata or {}, sort_keys=True),
-            "raw_payload": json.dumps(record.raw_payload or {}, sort_keys=True),
-        }
+        params = (
+            record.signal_id,
+            record.entity_type,
+            record.entity_id,
+            record.signal_type,
+            record.value,
+            record.unit,
+            record.direction,
+            _to_iso(record.timestamp) or "",
+            record.date_bucket,
+            record.source_id,
+            record.source_type,
+            record.ref,
+            _to_iso(record.fetched_at),
+            record.fetch_id,
+            record.schema_version,
+            json.dumps(record.metadata or {}, sort_keys=True),
+            json.dumps(record.raw_payload or {}, sort_keys=True),
+            utc_now_iso(),
+        )
         with self._store.transaction():
             cur = self._store.execute(
-                "SELECT 1 FROM signal_log WHERE signal_id = ?", (record.signal_id,)
+                "SELECT 1 FROM signal_log WHERE signal_id = %s", (record.signal_id,)
             )
             existed = cur.fetchone() is not None
             self._store.execute(sql, params)
@@ -182,7 +188,7 @@ class SignalRepository:
 
     def get(self, signal_id: str) -> SignalRecord | None:
         cur = self._store.execute(
-            "SELECT * FROM signal_log WHERE signal_id = ?", (signal_id,)
+            "SELECT * FROM signal_log WHERE signal_id = %s", (signal_id,)
         )
         row = cur.fetchone()
         return _row_to_record(row) if row is not None else None
@@ -203,22 +209,22 @@ class SignalRepository:
         clauses: list[str] = []
         params: list[Any] = []
         if entity_type is not None:
-            clauses.append("entity_type = ?")
+            clauses.append("entity_type = %s")
             params.append(entity_type)
         if entity_id is not None:
-            clauses.append("entity_id = ?")
+            clauses.append("entity_id = %s")
             params.append(entity_id)
         if signal_type is not None:
-            clauses.append("signal_type = ?")
+            clauses.append("signal_type = %s")
             params.append(signal_type)
         if source_type is not None:
-            clauses.append("source_type = ?")
+            clauses.append("source_type = %s")
             params.append(source_type)
         if date_bucket is not None:
-            clauses.append("date_bucket = ?")
+            clauses.append("date_bucket = %s")
             params.append(date_bucket)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        sql = f"SELECT * FROM signal_log {where} ORDER BY timestamp DESC LIMIT ?"
+        sql = f"SELECT * FROM signal_log {where} ORDER BY timestamp DESC LIMIT %s"
         params.append(int(limit))
         rows = self._store.execute(sql, tuple(params)).fetchall()
         return [_row_to_record(r) for r in rows]

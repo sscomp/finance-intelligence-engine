@@ -121,6 +121,11 @@ def _apply_pragma(conn: sqlite3.Connection, pragmas: dict[str, Any] | None = Non
 class SQLiteStore:
     """Lightweight SQLite connection wrapper for Phase 3B.
 
+    Phase 6.3: instances of this class satisfy the
+    :class:`~phase3.persistence.contracts.DatabaseStore` protocol, so
+    repositories written against the contract run unchanged on both
+    this store and :class:`~phase3.persistence.postgres.PostgresStore`.
+
     Parameters
     ----------
     db_path:
@@ -131,7 +136,22 @@ class SQLiteStore:
         Optional PRAGMA overrides. Keys not in this dict fall back to
         the module-level default. Pass an empty dict to keep the
         default profile unchanged.
+
+    Dialect notes (Phase 6.3)
+    -------------------------
+    * SQL crossing this seam uses ``%s`` placeholders. :meth:`execute`
+      and :meth:`executemany` translate ``%s`` → ``?`` just before the
+      driver call. ``%s`` is a reserved token: a literal ``%`` (e.g.
+      in a ``LIKE`` pattern) must never appear in SQL passed through
+      this seam.
+    * Callers may still pass legacy ``?``-parametrised SQL — it
+      contains no ``%s`` and passes through untouched.
+    * Timestamps are application-supplied
+      (:func:`~phase3.persistence.timeutil.utc_now_iso`); no runtime
+      SQL in the Phase 3B seam relies on ``strftime`` anymore.
     """
+
+    backend: str = "sqlite"
 
     def __init__(
         self,
@@ -179,17 +199,65 @@ class SQLiteStore:
         row = cur.fetchone()
         return row[0] if row is not None else None
 
+    def describe(self) -> dict[str, Any]:
+        """Cheap diagnostics for logs/health checks (never raises)."""
+        try:
+            return {
+                "backend": "sqlite",
+                "path": self._resolved_path,
+                "journal_mode": str(self.pragma("journal_mode")),
+            }
+        except sqlite3.Error:  # pragma: no cover - diagnostics only
+            return {"backend": "sqlite", "path": self._resolved_path}
+
     # ----- query / mutate --------------------------------------------------
 
     def execute(self, sql: str, params: tuple | dict | list | None = None) -> sqlite3.Cursor:
-        """Run a single statement. Caller manages transactions."""
+        """Run a single statement. Caller manages transactions.
+
+        ``%s`` placeholders are translated to the sqlite driver's ``?``
+        positional form. Named-parameter SQL (dict params) passes
+        through unchanged.
+        """
         if params is None:
             return self._conn.execute(sql)
-        return self._conn.execute(sql, params)
+        if isinstance(params, dict):
+            return self._conn.execute(sql, params)
+        return self._conn.execute(sql.replace("%s", "?"), params)
 
     def executemany(self, sql: str, seq: list[tuple] | list[dict]) -> sqlite3.Cursor:
-        """Run a parameterised batch. Caller manages transactions."""
-        return self._conn.executemany(sql, seq)
+        """Run a parameterised batch. Caller manages transactions.
+
+        Positional sequences get the same ``%s`` → ``?`` translation
+        as :meth:`execute`.
+        """
+        if seq and isinstance(seq[0], dict):
+            return self._conn.executemany(sql, seq)  # type: ignore[arg-type]
+        translated = sql.replace("%s", "?")
+        return self._conn.executemany(
+            translated, seq  # type: ignore[arg-type]
+        )
+
+    def executescript(self, sql: str) -> sqlite3.Cursor | None:
+        """Run a multi-statement script (no parameters). DDL path.
+
+        ``executescript`` implicitly COMMITs any open transaction,
+        then runs the script in autocommit mode — the
+        :meth:`transaction` context manager is aware of this quirk
+        (it checks ``in_transaction`` before COMMIT), so DDL
+        migrations work both inside and outside a managed
+        transaction.
+        """
+        return self._conn.executescript(sql)
+
+    def set_query_only(self) -> None:
+        """Flip the connection to read-only (``PRAGMA query_only = 1``).
+
+        Hard guarantee for read-only CLI paths: even a buggy future
+        write is rejected by SQLite itself instead of silently
+        mutating the database. Idempotent.
+        """
+        self._conn.execute("PRAGMA query_only = 1")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

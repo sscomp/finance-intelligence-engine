@@ -13,14 +13,26 @@ Both node and edge UPSERTs are keyed on their primary id, with the
 ``graph_edges`` table also carrying a unique constraint on
 ``(edge_type, from_node_id, to_node_id)`` so a duplicate logical
 edge is silently folded into one row.
+
+Dialect notes (Phase 6.3)
+-------------------------
+SQL here uses ``%s`` placeholders and positional params only, so the
+repo runs identically on :class:`SQLiteStore` and
+:class:`PostgresStore`. All ``created_at`` stamps come from
+:func:`phase3.persistence.timeutil.utc_now_iso` (or the caller's
+explicit value) — no ``strftime`` in the statement text. Note both
+backends only let ``ON CONFLICT`` target the primary key, so the
+historical dual-clause edge UPSERT (dead SQL) is replaced by an
+explicit check-then-insert sequence that folds on either key.
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 from phase3.persistence.sqlite import SQLiteStore
+from phase3.persistence.timeutil import utc_now_iso
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +63,11 @@ class EdgeRow:
     schema_version: str = "3.0"
 
 
+def _created_at(value: str | None) -> str:
+    """Normalize a caller-supplied ``created_at`` (''/None → now)."""
+    return value if value else utc_now_iso()
+
+
 # ---------------------------------------------------------------------------
 # Repository
 # ---------------------------------------------------------------------------
@@ -68,9 +85,8 @@ class GraphRepository:
             node_id, node_type, label, created_at,
             metadata_json, tags_json, schema_version
         ) VALUES (
-            :node_id, :node_type, :label,
-            COALESCE(:created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-            :metadata_json, :tags_json, :schema_version
+            %s, %s, %s, %s,
+            %s, %s, %s
         )
         ON CONFLICT(node_id) DO UPDATE SET
             node_type      = excluded.node_type,
@@ -79,19 +95,20 @@ class GraphRepository:
             tags_json      = excluded.tags_json,
             schema_version = excluded.schema_version
         """
-        params = {
-            "node_id": node.node_id,
-            "node_type": node.node_type,
-            "label": node.label,
-            "created_at": node.created_at,
-            "metadata_json": json.dumps(node.metadata, sort_keys=True),
-            "tags_json": json.dumps(list(node.tags), sort_keys=True),
-            "schema_version": node.schema_version,
-        }
+        params = (
+            node.node_id,
+            node.node_type,
+            node.label,
+            _created_at(node.created_at),
+            json.dumps(node.metadata, sort_keys=True),
+            json.dumps(list(node.tags), sort_keys=True),
+            node.schema_version,
+        )
         with self._store.transaction():
             existed = (
                 self._store.execute(
-                    "SELECT 1 FROM graph_nodes WHERE node_id = ?", (node.node_id,)
+                    "SELECT 1 FROM graph_nodes WHERE node_id = %s",
+                    (node.node_id,),
                 ).fetchone()
                 is not None
             )
@@ -99,88 +116,73 @@ class GraphRepository:
         return not existed
 
     def upsert_edge(self, edge: EdgeRow) -> bool:
-        sql = """
-        INSERT INTO graph_edges (
-            edge_id, edge_type, from_node_id, to_node_id, weight,
-            metadata_json, created_at, schema_version
-        ) VALUES (
-            :edge_id, :edge_type, :from_node_id, :to_node_id, :weight,
-            :metadata_json,
-            COALESCE(:created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-            :schema_version
+        params = (
+            edge.edge_id,
+            edge.edge_type,
+            edge.from_node_id,
+            edge.to_node_id,
+            edge.weight,
+            json.dumps(edge.metadata, sort_keys=True),
+            _created_at(edge.created_at),
+            edge.schema_version,
         )
-        ON CONFLICT(edge_id) DO UPDATE SET
-            edge_type      = excluded.edge_type,
-            from_node_id   = excluded.from_node_id,
-            to_node_id     = excluded.to_node_id,
-            weight         = excluded.weight,
-            metadata_json  = excluded.metadata_json,
-            schema_version = excluded.schema_version
-        ON CONFLICT(edge_type, from_node_id, to_node_id) DO UPDATE SET
-            weight         = excluded.weight,
-            metadata_json  = excluded.metadata_json,
-            schema_version = excluded.schema_version
-        """
-        # Note: SQLite's UPSERT only fires the FIRST ON CONFLICT clause
-        # that matches. The edge_id conflict is the primary path; the
-        # secondary (edge_type, from, to) match is rare but possible
-        # when callers reuse a different edge_id for the same logical
-        # edge. The above statement handles both by chaining two
-        # ON CONFLICT clauses — but ON CONFLICT can only target the
-        # primary key in a single statement. So we handle the
-        # secondary conflict by collapsing to a manual UPDATE in the
-        # rare case the primary key does not collide but the
-        # (type, from, to) triple does.
-        params = {
-            "edge_id": edge.edge_id,
-            "edge_type": edge.edge_type,
-            "from_node_id": edge.from_node_id,
-            "to_node_id": edge.to_node_id,
-            "weight": edge.weight,
-            "metadata_json": json.dumps(edge.metadata, sort_keys=True),
-            "created_at": edge.created_at,
-            "schema_version": edge.schema_version,
-        }
         with self._store.transaction():
             existing_by_id = self._store.execute(
-                "SELECT edge_id FROM graph_edges WHERE edge_id = ?",
+                "SELECT edge_id FROM graph_edges WHERE edge_id = %s",
                 (edge.edge_id,),
             ).fetchone()
             if existing_by_id is not None:
                 self._store.execute(
                     """
                     UPDATE graph_edges SET
-                        edge_type = :edge_type,
-                        from_node_id = :from_node_id,
-                        to_node_id = :to_node_id,
-                        weight = :weight,
-                        metadata_json = :metadata_json,
-                        schema_version = :schema_version
-                    WHERE edge_id = :edge_id
+                        edge_type = %s,
+                        from_node_id = %s,
+                        to_node_id = %s,
+                        weight = %s,
+                        metadata_json = %s,
+                        schema_version = %s
+                    WHERE edge_id = %s
                     """,
-                    params,
+                    (
+                        edge.edge_type,
+                        edge.from_node_id,
+                        edge.to_node_id,
+                        edge.weight,
+                        json.dumps(edge.metadata, sort_keys=True),
+                        edge.schema_version,
+                        edge.edge_id,
+                    ),
                 )
                 return False
             existing_by_triple = self._store.execute(
                 """
                 SELECT edge_id FROM graph_edges
-                WHERE edge_type = ? AND from_node_id = ? AND to_node_id = ?
+                WHERE edge_type = %s AND from_node_id = %s AND to_node_id = %s
                 """,
                 (edge.edge_type, edge.from_node_id, edge.to_node_id),
             ).fetchone()
             if existing_by_triple is not None:
-                # Fold into the existing row.
+                # Fold into the existing row: keep the existing edge_id
+                # (it is content-derived from the triple) and update
+                # only the mutable columns.
                 self._store.execute(
                     """
                     UPDATE graph_edges SET
-                        weight = :weight,
-                        metadata_json = :metadata_json,
-                        schema_version = :schema_version
-                    WHERE edge_type = :edge_type
-                      AND from_node_id = :from_node_id
-                      AND to_node_id = :to_node_id
+                        weight = %s,
+                        metadata_json = %s,
+                        schema_version = %s
+                    WHERE edge_type = %s
+                      AND from_node_id = %s
+                      AND to_node_id = %s
                     """,
-                    params,
+                    (
+                        edge.weight,
+                        json.dumps(edge.metadata, sort_keys=True),
+                        edge.schema_version,
+                        edge.edge_type,
+                        edge.from_node_id,
+                        edge.to_node_id,
+                    ),
                 )
                 return False
             # Fresh insert.
@@ -190,10 +192,8 @@ class GraphRepository:
                     edge_id, edge_type, from_node_id, to_node_id, weight,
                     metadata_json, created_at, schema_version
                 ) VALUES (
-                    :edge_id, :edge_type, :from_node_id, :to_node_id, :weight,
-                    :metadata_json,
-                    COALESCE(:created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                    :schema_version
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s
                 )
                 """,
                 params,
@@ -204,13 +204,13 @@ class GraphRepository:
 
     def get_node(self, node_id: str) -> NodeRow | None:
         row = self._store.execute(
-            "SELECT * FROM graph_nodes WHERE node_id = ?", (node_id,)
+            "SELECT * FROM graph_nodes WHERE node_id = %s", (node_id,)
         ).fetchone()
         return _node_row(row) if row is not None else None
 
     def get_edge(self, edge_id: str) -> EdgeRow | None:
         row = self._store.execute(
-            "SELECT * FROM graph_edges WHERE edge_id = ?", (edge_id,)
+            "SELECT * FROM graph_edges WHERE edge_id = %s", (edge_id,)
         ).fetchone()
         return _edge_row(row) if row is not None else None
 
@@ -221,13 +221,13 @@ class GraphRepository:
     ) -> list[NodeRow]:
         if node_type is None:
             rows = self._store.execute(
-                "SELECT * FROM graph_nodes ORDER BY node_id LIMIT ?",
+                "SELECT * FROM graph_nodes ORDER BY node_id LIMIT %s",
                 (int(limit),),
             ).fetchall()
         else:
             rows = self._store.execute(
-                "SELECT * FROM graph_nodes WHERE node_type = ? "
-                "ORDER BY node_id LIMIT ?",
+                "SELECT * FROM graph_nodes WHERE node_type = %s "
+                "ORDER BY node_id LIMIT %s",
                 (node_type, int(limit)),
             ).fetchall()
         return [_node_row(r) for r in rows]
@@ -242,19 +242,76 @@ class GraphRepository:
         clauses: list[str] = []
         params: list[Any] = []
         if edge_type is not None:
-            clauses.append("edge_type = ?")
+            clauses.append("edge_type = %s")
             params.append(edge_type)
         if from_node_id is not None:
-            clauses.append("from_node_id = ?")
+            clauses.append("from_node_id = %s")
             params.append(from_node_id)
         if to_node_id is not None:
-            clauses.append("to_node_id = ?")
+            clauses.append("to_node_id = %s")
             params.append(to_node_id)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        sql = f"SELECT * FROM graph_edges {where} ORDER BY edge_id LIMIT ?"
+        sql = f"SELECT * FROM graph_edges {where} ORDER BY edge_id LIMIT %s"
         params.append(int(limit))
         rows = self._store.execute(sql, tuple(params)).fetchall()
         return [_edge_row(r) for r in rows]
+
+    def fetch_edges_by_nodes(
+        self,
+        node_ids: Sequence[str],
+        *,
+        direction: str = "both",
+        edge_types: Sequence[str] | None = None,
+    ) -> list[EdgeRow]:
+        """Batched edge fetch for BFS frontiers.
+
+        Returns every edge with ``from_node_id`` or ``to_node_id`` in
+        ``node_ids``, ordered by ``edge_id`` (identical ordering to a
+        per-node ``list_edges`` union). This is the seam the
+        :mod:`phase3.graph.optimization` batched lookups use instead
+        of digging at the raw driver connection.
+        """
+        if not node_ids:
+            return []
+        node_ph = ",".join("%s" for _ in node_ids)
+
+        def _fetch(col: str) -> list[Any]:
+            params: list[Any] = list(node_ids)
+            if edge_types is not None:
+                type_ph = ",".join("%s" for _ in edge_types)
+                sql = (
+                    f"SELECT * FROM graph_edges "
+                    f"WHERE {col} IN ({node_ph}) "
+                    f"AND edge_type IN ({type_ph}) "
+                    f"ORDER BY edge_id"
+                )
+                params.extend(edge_types)
+            else:
+                sql = (
+                    f"SELECT * FROM graph_edges "
+                    f"WHERE {col} IN ({node_ph}) "
+                    f"ORDER BY edge_id"
+                )
+            return self._store.execute(sql, tuple(params)).fetchall()
+
+        results: list[Any] = []
+        if direction in ("from", "both"):
+            results.extend(_fetch("from_node_id"))
+        if direction in ("to", "both"):
+            results.extend(_fetch("to_node_id"))
+        return [_edge_row(r) for r in results]
+
+    def fetch_nodes_by_ids(self, node_ids: Sequence[str]) -> list[NodeRow]:
+        """Batched node fetch; missing ids are simply absent."""
+        if not node_ids:
+            return []
+        placeholders = ",".join("%s" for _ in node_ids)
+        rows = self._store.execute(
+            f"SELECT * FROM graph_nodes WHERE node_id IN ({placeholders}) "
+            "ORDER BY node_id",
+            tuple(node_ids),
+        ).fetchall()
+        return [_node_row(r) for r in rows]
 
     def node_count(self) -> int:
         cur = self._store.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()
