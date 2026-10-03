@@ -401,7 +401,7 @@ The implementation report §G Risk #4 correctly notes that NaN is rejected via P
 
 ## Q. Telegram Attempt
 
-Per AEE-MINI Telegram rule (2026-07-13) + 鼎鼎 format preference (2026-07-13), Telegram short-version notification attempted via `hermes send` targeting 鼎鼎 (chat_id 5132341473) post-write.
+Per AEE-MINI Telegram rule (2026-07-13) + 鼎鼎 format preference (2026-07-13), Telegram short-version notification attempted via `hermes send` targeting 鼎鼎 (chat_id <TELEGRAM_CHAT_ID_REDACTED>) post-write.
 
 **Send result:**
 
@@ -409,7 +409,7 @@ Per AEE-MINI Telegram rule (2026-07-13) + 鼎鼎 format preference (2026-07-13),
 {
   "success": true,
   "platform": "telegram",
-  "chat_id": "5132341473",
+  "chat_id": "<TELEGRAM_CHAT_ID_REDACTED>",
   "message_id": "10688",
   "mirrored": true
 }

@@ -70,6 +70,10 @@ def make_test_jobs():
     Fixture values (Phase 6.1 Workstream F): the deliver/chat and workdir
     values are placeholders — the production chat IDs and operator home
     directory are personal data and must not live in tracked test code.
+    The deliver target uses the reserved, non-identifier-shaped marker
+    "synthetic-chat-id-001" (any string works: the mutation tests only
+    exercise change detection, never the literal value; 6.7A-R1 PII
+    remediation replaced a real-ID-shaped value with this marker).
     """
     return {
         "updated_at": "2026-08-18T22:00:00+08:00",
@@ -84,7 +88,7 @@ def make_test_jobs():
                 "prompt": "Generate morning brief",
                 "model": "gpt-4",
                 "provider": "openai",
-                "deliver": "telegram:1000000001",
+                "deliver": "telegram:synthetic-chat-id-001",
                 "workdir": "/srv/app",
                 "created_at": "2026-05-27T01:23:38+08:00",
                 # Volatile fields

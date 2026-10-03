@@ -74,7 +74,7 @@ Phase 1 報告（`OPTIMIZATION_REPORT.md`，2026-07-07）已把現況盤點清�
 │                              │                                               │
 │                              ▼                                               │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │ Telegram (鼎鼎 5132341473) — stdout 原文轉發                            │  │
+│  │ Telegram (鼎鼎 <TELEGRAM_CHAT_ID_REDACTED>) — stdout 原文轉發                            │  │
 │  └────────────────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -342,7 +342,7 @@ retry_policy:
   backoff_seconds: 60
 publisher:
   type: telegram
-  chat_id: 5132341473
+  chat_id: <TELEGRAM_CHAT_ID_REDACTED>
 archive:
   sqlite_table: macro_daily
   log_dir: /home/ubuntu/macro-report/logs

@@ -66,7 +66,7 @@ All five implementation summaries were written on 2026-07-08 in a single working
 └────────────────────────────────────────────────────────────┘
             │ stdout → cron agent → Telegram
             ▼
-       Telegram (鼎鼎 5132341473)
+       Telegram (鼎鼎 <TELEGRAM_CHAT_ID_REDACTED>)
 ```
 
 Four scripts, four cron jobs, no abstraction. Adding a 5th report meant copy-pasting four files.

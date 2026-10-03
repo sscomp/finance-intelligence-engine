@@ -238,7 +238,7 @@ The regression readiness gate (G-P5-2: "4-tier suite green; 0 modifications outs
 
 ## L. Telegram Attempt
 
-Per AEE-MINI Telegram rule (2026-07-13) + 鼎鼎 format preference (2026-07-13), Telegram short-version notification attempted via `hermes send` targeting 鼎鼎 (chat_id 5132341473) post-write.
+Per AEE-MINI Telegram rule (2026-07-13) + 鼎鼎 format preference (2026-07-13), Telegram short-version notification attempted via `hermes send` targeting 鼎鼎 (chat_id <TELEGRAM_CHAT_ID_REDACTED>) post-write.
 
 **Send result:** (attempted post-write; result recorded in §N receipt)
 

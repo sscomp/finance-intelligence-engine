@@ -40,7 +40,7 @@ The 7-day live shadow run is operational and the daily cron tick (09:00 TPE) is 
 | Job ID | Name | Schedule (TPE) | Last Status | Deliver | Mode |
 |---|---|---|---|---|---|
 | `381d62ce7f5e` | morning-brief-dreaming | `0 22 * * *` (06:00 TPE) | ok | local | agent |
-| `4d8197ba6dab` | morning-brief-delivery | `0 8 * * *` (08:00 TPE) | ok | telegram:5132341473 | agent |
+| `4d8197ba6dab` | morning-brief-delivery | `0 8 * * *` (08:00 TPE) | ok | telegram:<TELEGRAM_CHAT_ID_REDACTED> | agent |
 | `ed214c19c4ac` | 總體經濟晨報 (daily) | `30 8 * * 1-6` (08:30 Mon-Sat) | ok | telegram | agent |
 | `60d92c57b826` | 產業趨勢週報 (weekly) | `0 8 * * 1` (08:00 Mon) | ok | telegram | agent |
 | `5eaa5fa9a50d` | 公司研究月報 (monthly) | `0 8 12 * *` (08:00 on 12th) | ok | telegram | agent |
@@ -214,7 +214,7 @@ cb6f43bdc903c5391e9256edb44772bfd660b7f5a10a8efa479e9b248b76e311  /home/ubuntu/m
 ## 11. Telegram Notification
 
 **Status:** SENT (success=true)
-**Target:** telegram:5132341473 (鼎鼎)
+**Target:** telegram:<TELEGRAM_CHAT_ID_REDACTED> (鼎鼎)
 **Message ID:** 7360
 **Mirrored:** true
 **Timestamp:** 2026-07-16T12:46Z (20:46 CST)

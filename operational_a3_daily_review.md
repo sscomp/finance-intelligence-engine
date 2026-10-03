@@ -364,7 +364,7 @@ c216ea24a6a7e8c6f4b1afa3e8bf000695b91a0baa00967a4259320746e177d4  operational_a3
 ## 16. Telegram Notification
 
 **Status:** SENT (success=true)
-**Target:** telegram:5132341473 (鼎鼎)
+**Target:** telegram:<TELEGRAM_CHAT_ID_REDACTED> (鼎鼎)
 **Message ID:** 10209
 **Mirrored:** true
 **Timestamp:** 2026-08-01T14:03Z (22:03 CST)

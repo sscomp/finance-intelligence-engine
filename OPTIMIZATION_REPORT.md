@@ -32,7 +32,7 @@
 | af64556bc8e9 | 季度成分股更新提醒 | `0 9 1 1,4,7,10 *`（1/4/7/10 號 09:00）| ok 2026-07-01 09:10 | telegram | （無）|
 
 觀察點：
-- 三支都是 `deliver="telegram"`（自動 telegram toolset），但 prompt 沒有用 telegram tool 而是要求「將輸出原樣送出」→ 隱含走默認 channel 5132341473，**沒有指定 chat_id**，相當依賴當下 context（cronjob 預設回 origin）。
+- 三支都是 `deliver="telegram"`（自動 telegram toolset），但 prompt 沒有用 telegram tool 而是要求「將輸出原樣送出」→ 隱含走默認 channel <TELEGRAM_CHAT_ID_REDACTED>，**沒有指定 chat_id**，相當依賴當下 context（cronjob 預設回 origin）。
 - 04d8197ba6dab 晨報是另一個獨立 cron（`morning-brief-delivery`），8:00 派送 weather+行程+夢境建議。**總體經濟晨報 8:30 會撞在一起**，鼎鼎會在 30 分鐘內收到兩份長文。
 - 月報只到 12 號，6/12 沒跑、跳到 7/12（7/1 才跑 manual 觸發）。**檢查後發現月報上次 last_run_at 是 2026-06-22 00:56**，6/12 似乎漏跑 — 雖屬 ok 但實質沒在預定時間觸發，**schedule 合約沒有被嚴格保證**。
 

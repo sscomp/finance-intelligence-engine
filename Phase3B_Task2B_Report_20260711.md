@@ -183,15 +183,15 @@ For a linear chain (1 node per BFS layer), the SQL reduction is exactly 2× (one
 {
   "success": true,
   "platform": "telegram",
-  "chat_id": "5132341473",
+  "chat_id": "<TELEGRAM_CHAT_ID_REDACTED>",
   "message_id": "6837",
   "mirrored": true
 }
 ```
 
 - **Sent: YES**
-- **Method:** `hermes send --to telegram:5132341473 --subject "Phase3B Task2B done" --file /tmp/tg_phase4_task2b.txt --json`
-- **Recipient:** 鼎鼎 (chat_id 5132341473)
+- **Method:** `hermes send --to telegram:<TELEGRAM_CHAT_ID_REDACTED> --subject "Phase3B Task2B done" --file /tmp/tg_phase4_task2b.txt --json`
+- **Recipient:** 鼎鼎 (chat_id <TELEGRAM_CHAT_ID_REDACTED>)
 - **Message ID:** **6837** (Telegram-side id, verifiable via `getMessage` API)
 - **UTC:** 2026-07-11 07:08 UTC
 - **Asia/Taipei:** 2026-07-11 15:08

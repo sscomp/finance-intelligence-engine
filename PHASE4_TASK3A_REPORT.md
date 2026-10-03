@@ -148,8 +148,8 @@ Total: **5 files, ~200 net added lines** (mostly rationale comments + EXCLUDED_F
 
 ## 11. Telegram Notification
 - Status: **PENDING** (report file written; sending via `hermes send` next)
-- Recipient: 鼎鼎 (Telegram 5132341473)
-- Method: `hermes send --to telegram:5132341473 --subject "Phase 4 Task 3A — Sentinel Cleanup" --file /home/ubuntu/macro-report/PHASE4_TASK3A_REPORT.md --json`
+- Recipient: 鼎鼎 (Telegram <TELEGRAM_CHAT_ID_REDACTED>)
+- Method: `hermes send --to telegram:<TELEGRAM_CHAT_ID_REDACTED> --subject "Phase 4 Task 3A — Sentinel Cleanup" --file /home/ubuntu/macro-report/PHASE4_TASK3A_REPORT.md --json`
 - Message ID: TBD
 - UTC/Taipei: TBD
 - If not sent: exact reason in next step

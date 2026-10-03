@@ -318,7 +318,7 @@ sha256sum /home/ubuntu/macro-report/evidence_inventory.md
 
 ## 11. Telegram Notification
 
-Attempted via `hermes send --to telegram:5132341473 --subject "FIE-P4-OPS-A3 Evidence Inventory" --file /home/ubuntu/macro-report/evidence_inventory.md --json`.
+Attempted via `hermes send --to telegram:<TELEGRAM_CHAT_ID_REDACTED> --subject "FIE-P4-OPS-A3 Evidence Inventory" --file /home/ubuntu/macro-report/evidence_inventory.md --json`.
 
 Result: **SUCCESS**
 
@@ -326,13 +326,13 @@ Result: **SUCCESS**
 {
   "success": true,
   "platform": "telegram",
-  "chat_id": "5132341473",
+  "chat_id": "<TELEGRAM_CHAT_ID_REDACTED>",
   "message_id": "10217",
   "mirrored": true
 }
 ```
 
-message_id=10217, delivered to 鼎鼎 (5132341473), mirrored=true.
+message_id=10217, delivered to 鼎鼎 (<TELEGRAM_CHAT_ID_REDACTED>), mirrored=true.
 
 ---
 

@@ -133,4 +133,4 @@ nothing to commit, working tree clean
 
 ## 17. Telegram Notification
 
-**YES.** Sent via `hermes send --to telegram:5132341473 --subject "..." --json` with the full 17-section report body. Captured message_id is in the parent session log.
+**YES.** Sent via `hermes send --to telegram:<TELEGRAM_CHAT_ID_REDACTED> --subject "..." --json` with the full 17-section report body. Captured message_id is in the parent session log.
