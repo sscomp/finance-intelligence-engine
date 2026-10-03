@@ -24,8 +24,9 @@ Documented, narrow exclusions (kept in repo, reviewable):
   IDs are per-message receipts, not account identifiers);
 * email-shaped text inside URIs (``scheme://…user:pass@host`` is
   credential material governed by secret policy, not a contact email);
-* synthetic/example contact domains (``example.invalid/`` etc.) and
-  no-reply addresses.
+* synthetic/example contact domains (RFC-2606 reserved ``example.*``
+  domains *including their subdomains*, the ``.invalid``/``.test``
+  pseudo-TLDs) and no-reply addresses.
 
 The detector's own unit tests assemble synthetic prohibited values at
 runtime from separated string fragments so this tracked source stays
@@ -85,9 +86,15 @@ _API_KEYISH = re.compile(
     r"ant-|sk-[A-Za-z0-9]{20,}"
     r"|xox[bpas]-[A-Za-z0-9-]{10,})\b")
 _EMAIL = re.compile(r"\b([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)\b")
+# RFC-2606 reserved example domains (including subdomains such as
+# corp.example.com), the .invalid/.test pseudo-TLDs, and no-reply forms
+# are not personal contacts. The subdomain form matters: this gate
+# self-scans its own tracked source once committed, so any
+# reserved-domain address appearing in its tests must be rule-exempt.
 _SYNTHETIC_EMAIL_DOMAIN = re.compile(
-    r"(?i)(@example\.(com|invalid|org|net|test)"
-    r"|@(synthetic|placeholder|test)[-.]"
+    r"(?i)(@(?:[a-z0-9-]+\.)?example\.(com|invalid|org|net|test)"
+    r"|@[a-z0-9.-]+\.(?:invalid|test)"
+    r"|@(?:synthetic|placeholder|test)[-.]"
     r"|noreply@|no-reply@|users\.noreply\.github\.com$)")
 
 
@@ -222,7 +229,11 @@ class TestPIIGateDetector(unittest.TestCase):
     def test_synthetic_email_domains_are_not_flagged(self) -> None:
         for line in ("maintainer@example.invalid",
                      "ops@example.com",
-                     "noreply@example.org"):
+                     "noreply@example.org",
+                     # RFC-2606 reserved-domain subdomains are also exempt;
+                     # these literals make the gate's own self-scan verify it
+                     "someone@corp.example.com",
+                     "team@sub.example.test"):
             with self.subTest(line=line):
                 self.assertEqual(
                     [f for f in self._scan_one(line) if f[0] == "personal_email"], [])
@@ -251,8 +262,11 @@ class TestRepoCleanOfOI07A(unittest.TestCase):
                           + json.dumps(findings, ensure_ascii=False, indent=1))
 
     def test_failure_output_redacts_values(self) -> None:
+        # Fragment-assembled address: it stays invisible to this file's own
+        # tracked-source scan regardless of any future domain-rule change.
+        address = "someone@" + "corp." + "example.com"
         snippet = _redact_snippet(
-            f'"chat_id": "{SYNTH_CHAT}", "mail": "someone@corp.example.com"')
+            f'"chat_id": "{SYNTH_CHAT}", "mail": ' + f'"{address}"')
         self.assertNotIn(SYNTH_CHAT, snippet)
         self.assertNotIn("someone@corp", snippet)
         self.assertIn("chat_id", snippet)
