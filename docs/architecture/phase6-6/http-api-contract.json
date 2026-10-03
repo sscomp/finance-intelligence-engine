@@ -1,0 +1,173 @@
+{
+  "$comment": "Phase 6.6 machine-readable HTTP API contract (§5). The JSON body of every /v1 operation is the Phase 6.5 dispatch envelope verbatim; HTTP status is the deterministic transport mapping in phase3.transport.errors and is never a replacement for the domain error code. Documented [DECISION]: the transport error codes UNAUTHENTICATED/FORBIDDEN live in the transport taxonomy; all domain codes stay in the Phase 6.5 service taxonomy.",
+  "openapi": "3.1.0",
+  "info": {
+    "title": "FIE reference read-only intelligence runtime",
+    "version": "6.5",
+    "description": "Thin HTTP transport over the frozen Phase 6.5 IntelligenceService boundary. Read-only interactive plane (§3.5): only GET/HEAD are served.",
+    "schema_version": "6.5"
+  },
+  "servers": [{"url": "http://127.0.0.1:8787", "description": "reference defaults; operator-configured in real deployments"}],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "liveness",
+        "summary": "Process liveness — no persistence access (§10)",
+        "responses": {
+          "200": {
+            "description": "process alive",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LivenessEnvelope"}}}
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "readiness",
+        "summary": "Readiness — service initialised and persistence reachable (§10); maps to fie.health/get_health. No live Yahoo/TWSE/RSS fetch is required or performed.",
+        "responses": {
+          "200": {"description": "ready", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
+          "503": {"description": "DEGRADED/DATA_UNAVAILABLE/DEPENDENCY_UNAVAILABLE — persistence unreachable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}}
+        }
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "fie.health → get_health",
+        "responses": {"200": {"description": "service + persistence status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}}}
+      }
+    },
+    "/v1/intelligence/latest": {
+      "get": {
+        "operationId": "getLatestIntelligence",
+        "summary": "fie.latest_intelligence → get_latest_intelligence",
+        "parameters": [
+          {"name": "kind", "in": "query", "required": false, "schema": {"type": "string", "enum": ["company", "industry", "macro"]}},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 200}}
+        ],
+        "responses": {
+          "200": {"description": "scored intelligence items with envelope freshness slot", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
+          "400": {"description": "invalid query parameters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
+        }
+      }
+    },
+    "/v1/intelligence/entity/{kind}/{entity_id}": {
+      "get": {
+        "operationId": "getEntityIntelligence",
+        "summary": "fie.entity_intelligence → get_entity_intelligence",
+        "parameters": [
+          {"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["company", "industry", "macro"]}},
+          {"name": "entity_id", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "as_of", "in": "query", "required": false, "schema": {"type": "string", "format": "date"}}
+        ],
+        "responses": {
+          "200": {"description": "entity intelligence envelope", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
+          "400": {"description": "INVALID_REQUEST (unknown kind, malformed as_of)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}},
+          "404": {"description": "NOT_FOUND", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
+        }
+      }
+    },
+    "/v1/evidence/{ref}": {
+      "get": {
+        "operationId": "getEvidence",
+        "summary": "fie.evidence → get_evidence",
+        "parameters": [
+          {"name": "ref", "in": "path", "required": true, "schema": {"type": "string"}, "description": "graph node ref, URL-encoded (e.g. entity%3Acompany%3A2330)"},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 200}}
+        ],
+        "responses": {
+          "200": {"description": "evidence node + related edges", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
+          "400": {"description": "INVALID_REQUEST", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}},
+          "404": {"description": "NOT_FOUND", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
+        }
+      }
+    },
+    "/v1/freshness/{kind}/{entity_id}": {
+      "get": {
+        "operationId": "getFreshness",
+        "summary": "fie.freshness → get_freshness (unchanged freshness governance, §8)",
+        "parameters": [
+          {"name": "kind", "in": "path", "required": true, "schema": {"type": "string", "enum": ["company", "industry", "macro"]}},
+          {"name": "entity_id", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "as_of", "in": "query", "required": false, "schema": {"type": "string", "format": "date"}}
+        ],
+        "responses": {
+          "200": {"description": "freshness envelope — every lifecycle state (FRESH/DEGRADED/STALE/UNAVAILABLE) is served honestly with HTTP 200 (§8)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
+          "400": {"description": "INVALID_REQUEST", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {"type": "http", "scheme": "bearer", "description": "FIE_AUTH_MODE=token with FIE_AUTH_TOKEN (env-only, §6). Mode none = anonymous dev/test."}
+    },
+    "schemas": {
+      "LivenessEnvelope": {
+        "type": "object",
+        "required": ["schema_version", "kind", "request_id", "status"],
+        "properties": {
+          "schema_version": {"const": "6.5"},
+          "kind": {"const": "healthz"},
+          "request_id": {"type": "string"},
+          "status": {"const": "alive"}
+        }
+      },
+      "Envelope": {
+        "type": "object",
+        "required": ["schema_version", "kind", "request_id", "principal_id", "status", "payload", "evidence_refs", "warnings"],
+        "properties": {
+          "schema_version": {"const": "6.5"},
+          "kind": {"type": "string", "description": "the operation name"},
+          "request_id": {"type": "string", "description": "sanitised X-Request-Id or generated hex"},
+          "principal_id": {"type": "string", "description": "opaque principal label"},
+          "status": {"const": "ok"},
+          "freshness": {"type": "object", "description": "first-class metadata slot: {state, as_of, checked_at?, source_date?, age?}"},
+          "payload": {"type": "object"},
+          "evidence_refs": {"type": "array", "items": {"type": "string"}},
+          "warnings": {"type": "array", "items": {"type": "string"}}
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": ["schema_version", "kind", "request_id", "principal_id", "status", "error", "payload"],
+        "properties": {
+          "schema_version": {"const": "6.5"},
+          "kind": {"type": "string"},
+          "request_id": {"type": "string"},
+          "principal_id": {"type": "string"},
+          "status": {"const": "error"},
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": {"type": "string", "enum": ["INVALID_REQUEST", "UNAUTHENTICATED", "FORBIDDEN", "NOT_FOUND", "STALE_DATA", "DATA_UNAVAILABLE", "DEPENDENCY_UNAVAILABLE", "INTERNAL_ERROR"]},
+              "message": {"type": "string", "description": "sanitised — never contains stack traces, SQL, DSNs, paths, internal representations or secrets (§7)"},
+              "details": {"type": "object"}
+            }
+          },
+          "payload": {"const": null}
+        }
+      }
+    }
+  },
+  "x-http-status-mapping": {
+    "description": "phase3.transport.errors.HTTP_STATUS_BY_CODE (§7); DEGRADED is a freshness state and is served with HTTP 200 + metadata",
+    "INVALID_REQUEST": 400,
+    "UNAUTHENTICATED": 401,
+    "FORBIDDEN": 403,
+    "NOT_FOUND": 404,
+    "STALE_DATA": 409,
+    "DATA_UNAVAILABLE": 503,
+    "DEPENDENCY_UNAVAILABLE": 503,
+    "INTERNAL_ERROR": 500
+  },
+  "x-transport-invariants": [
+    "thin transport only: parsing/auth/request-ids/dispatch/error-mapping/serialization/telemetry (§3.1)",
+    "ChatGPT (any remote consumer) never accesses persistence directly (§3.2)",
+    "read-only: POST/PUT/PATCH/DELETE → 405 with Allow: GET, HEAD (§3.5)",
+    "no hidden live data fetch inside HTTP requests (§8)",
+    "never log or serialise Authorization values, tokens, payloads, or DSNs with credentials (§11)"
+  ]
+}

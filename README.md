@@ -480,6 +480,41 @@ opaque principal 傳播、讀取路徑純度（永不寫入、永不觸發攝入
 批次/互動分離、執行時設定優先序與機密消毒、可攜性審計（無開發機
 絕對路徑）、structured 請求日誌（§15）。
 
+### 參考 HTTP 執行時（Phase 6.6）
+
+Phase 6.6 在凍結的 Phase 6.5 服務邊界上交付「最薄」HTTP 傳輸層
+（`phase3.transport`，僅標準庫；[ADR-011](docs/adr/adr-011-reference-transport.md)）：
+
+```bash
+# 安裝（任何 CWD 皆可啟動；§12 封裝紀律）
+python -m pip install -e .
+fie-http-server                       # 或 python -m phase3.transport.http
+
+# 設定（§9：參數 > 環境 > 安全預設）
+# FIE_HTTP_HOST=127.0.0.1  FIE_HTTP_PORT=8787  FIE_AUTH_MODE=none|token
+# FIE_AUTH_TOKEN=（token 模式；僅環境、永不入源碼/日誌）
+# FIE_LOG_LEVEL=INFO  FIE_REQUEST_TIMEOUT=60  FIE_DATABASE_URL=<Phase 6.3 契約>
+FIE_DATABASE_URL=sqlite:///tmp/fie66-smoke.db fie-http-server &
+curl -s http://127.0.0.1:8787/healthz   # {"status":"alive"}——不觸及持久層
+curl -s http://127.0.0.1:8787/readyz | head -c 200
+```
+
+路由（全部唯讀 GET；非 GET → 405；機器可讀契約見
+[docs/architecture/phase6-6/http-api-contract.json](docs/architecture/phase6-6/http-api-contract.json)）：`/healthz`、
+`/readyz`、`/v1/health`、`/v1/intelligence/latest`、
+`/v1/intelligence/entity/{kind}/{entity_id}`、`/v1/evidence/{ref}`、
+`/v1/freshness/{kind}/{entity_id}`。回應體為 Phase 6.5 dispatch
+信封原樣；HTTP 狀態碼是確定性的錯誤映射（§7）。
+
+容器參考構建（§13；非 root、明確埠、無內嵌憑證/生產資料——
+**不**部署到生產）與 PostgreSQL 一次性叢集閘門（§15/§16）詳見
+[docs/architecture/phase6-6/reference-runtime.md](docs/architecture/phase6-6/reference-runtime.md)。
+
+```bash
+# Phase 6.6 傳輸契約測試（SQLite 閘門 + 認證 + 設定 + 可攜性稽核 + PG 同構）
+PYTHONPATH=. python -m unittest discover -s tests/phase3/transport -t .
+```
+
 ### 測試哲學
 
 - **確定性優先**：所有測試必須為確定性（deterministic），不依賴網路或時間
@@ -528,6 +563,8 @@ PHASE3B_ENABLED=1 python -m phase3.cli pipeline-run --date 2026-07-08 \
 - [歷史資料治理](docs/architecture/historical-data-governance.md)
 - [Phase 6.5 ChatGPT Tool Contract](docs/architecture/phase6-5/chatgpt-tool-contract.md)
 - [Phase 6.5 Service Planes](docs/architecture/phase6-5/service-boundary-planes.md)
+- [Phase 6.6 Reference Runtime](docs/architecture/phase6-6/reference-runtime.md)
+- [Phase 6.6 HTTP API Contract（machine-readable）](docs/architecture/phase6-6/http-api-contract.json)
 
 ### 架構決策紀錄（ADR）
 
@@ -541,6 +578,8 @@ PHASE3B_ENABLED=1 python -m phase3.cli pipeline-run --date 2026-07-08 \
 - [ADR-008: Multi-User Data Boundary（Phase 6.5）](docs/adr/adr-008-multi-user-data-boundary.md)
 - [ADR-009: Cloud-Safe Runtime Configuration（Phase 6.5）](docs/adr/adr-009-runtime-configuration.md)
 - [ADR-010: Transport Decision（Phase 6.5）](docs/adr/adr-010-transport-decision.md)
+- [ADR-011: Reference Transport & Thread-Affine Executor（Phase 6.6）](docs/adr/adr-011-reference-transport.md)
+- [ADR-012: Auth Boundary（Phase 6.6）](docs/adr/adr-012-auth-boundary.md)
 
 ### Phase 3 設計文件
 
