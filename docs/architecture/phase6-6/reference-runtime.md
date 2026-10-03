@@ -133,6 +133,8 @@ curl -s http://127.0.0.1:8787/readyz | head -c 300
 
 ## 9. 容器（§13，參考構建）
 
+### 9.1 一般構建（標準公開 CA 信任 — Mode A）
+
 ```bash
 docker build -t fie-reference-runtime:local .
 docker run --rm -p 127.0.0.1:8787:8787 \
@@ -145,12 +147,45 @@ curl -s http://127.0.0.1:8787/healthz
 * 非 root（uid/gid 10001）、明確埠 8787、HEALTHCHECK 接
   `/healthz`、無內嵌憑證/生產資料/主機特定掛載；基礎映像摘要
   由部署端在部署時釘選（見 Dockerfile 註記）。
-* [OPEN] 本主機的 docker socket 為 root:docker 660 而作業階段
-  使用者不在 `docker` 群組且無免密 sudo——**動態 build/run 冒煙
-  未在本工作階段執行**；靜態不變量由測試
-  （`TestDockerfileStaticAudit`）保證。具備權限後可執行上述命令
-  完成冒煙（記錄於報告 §13）。
-* 本工單**不**部署到生產（§24）。
+* 本工單**不**部署到生產（§24）。動態容器冒煙（build/run/
+  health/teardown）已於 Phase 6.6R closure gate 關閉。
+
+### 9.2 Container CA 信任契約（Phase 6.6R3 — 雙模式、加法性）
+
+TLS 驗證**永不關閉**。Docker build 階段跑在隔離容器裡，**不**繼承
+建構主機的信任儲存或代理 CA 設定（host trust ≠ build-stage
+trust）；且 pip 以其自帶的 certifi bundle 為預設信任，不讀發行版
+系統 bundle。因此：
+
+* **Mode A（預設；標準公開信任）**：不供應任何 CA 輸入時，pip 以
+  自帶公開 CA bundle 直接驗證 PyPI（任何 TLS 驗證旁路 flag 一律
+  不使用，靜態稽核有測試）；映像不帶任何自訂 CA 工件。
+* **Mode B（選配；環境授權的額外 CA）**：當構建環境的出站 HTTPS
+  會經過授權的私有/企業 CA 攔截時，由環境在構建時注入**一枚**
+  額外 PEM CA 憑證（BuildKit secret；憑證由執行環境提供、非倉庫
+  內容、須為 PEM 且為授權之信任錨）：
+
+  ```bash
+  DOCKER_BUILDKIT=1 docker build \
+    --secret id=authorized_extra_ca,src=/authorized/path/ca.pem \
+    -t fie-reference-runtime:local .
+  ```
+
+  該 CA 會經 `update-ca-certificates` **加入**系統信任束
+  （`/etc/ssl/certs/ca-certificates.crt`——加法而非取代，標準公開
+  CA 仍然受信），pip 以 `--cert` 指向該**增補後**的系統 bundle
+  完成本次的套件安裝驗證；未供應 secret 時此分支完全跳過，
+  一般構建不受影響。secret 機制使構建輸入不進 build context、
+  環境變數與映像 metadata；映像僅在 Mode B 時刻意攜帶增補的
+  信任材料（公開憑證，永不私鑰）。**建置快取注意**：BuildKit
+  刻意不將 secret 內容納入 layer cache key（安全設計）——與先前
+  Mode A 構建共用快取的 Mode B 構建會重用**未注入**的層；因此
+  Mode B 構建一律以 `--no-cache` 執行（A3 動態驗證已實測此行為）。
+
+* 無任何憑證/私鑰入 Git；測試之合成 CA 於執行期即時生成、用畢
+  即刪（`tests/phase3/transport/test_ca_trust_audit.py`：靜態
+  trust 契約稽核 + 合成 TLS fixture——未經注入遭預設驗證拒絕、
+  經增補束接受且公開 CA 保留）。
 
 ## 10. 乾淨房重現 (§21)
 
