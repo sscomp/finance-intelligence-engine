@@ -176,7 +176,7 @@ class ScoreRepository:
         sql = f"""
         SELECT * FROM score_snapshot {where}
         ORDER BY computed_at DESC, snapshot_id DESC
-        LIMIT ?
+        LIMIT %s
         """
         params.append(int(limit))
         rows = self._store.execute(sql, tuple(params)).fetchall()
