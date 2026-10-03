@@ -14,14 +14,22 @@
 
 set -u  # fail on unset vars; do NOT set -e — we propagate each step's exit code explicitly
 
-source /home/ubuntu/macro-venv/bin/activate
-cd /home/ubuntu/macro-report || {
-    echo "run.sh: failed to cd to /home/ubuntu/macro-report" >&2
+# Phase 6.1 portability: locate the repository from this script's own path and
+# honor environment overrides — no user-specific home directory, no fixed venv:
+#   FIE_PROJECT_ROOT — project root override (default: this script's directory)
+#   FIE_PYTHON       — interpreter override (default: the ACTIVE environment's python3;
+#                      `python3 -m venv .venv && . .venv/bin/activate` first, or export
+#                      FIE_PYTHON=/path/to/venv/bin/python)
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECT_ROOT="${FIE_PROJECT_ROOT:-$REPO_ROOT}"
+PYTHON_BIN="${FIE_PYTHON:-python3}"
+cd -- "${PROJECT_ROOT}" || {
+    echo "run.sh: failed to cd to ${PROJECT_ROOT}" >&2
     exit 5
 }
 
 # Step 1: existing morning-brief generation. Failure must fail the script.
-python3 /home/ubuntu/macro-report/macro_daily.py 2>&1
+"${PYTHON_BIN}" "${PROJECT_ROOT}/macro_daily.py" 2>&1
 MACRO_RC=$?
 if [ "$MACRO_RC" -ne 0 ]; then
     echo "run.sh: macro_daily.py failed with exit code ${MACRO_RC}" >&2
@@ -33,7 +41,7 @@ fi
 #   report naming convention <run_label>.intelligence_report.{json,md}
 #   (phase3/pipeline/reporting.py:65). No DB writes, no scheduling.
 ARTIFACT_DATE="${ARTIFACT_DATE:-$(TZ=Asia/Taipei date +%F)}"
-ARTIFACT_DIR="/home/ubuntu/macro-report/metadata/reports/artifacts"
+ARTIFACT_DIR="${FIE_ARTIFACT_DIR:-${PROJECT_ROOT}/metadata/reports/artifacts}"
 
 # Defense-in-depth: refuse if the artifact dir basename is the reserved
 # production DB name. Mirrors the case-insensitive macro_history.db refusal
@@ -53,12 +61,13 @@ mkdir -p -- "${ARTIFACT_DIR}" || {
 # --- MVR 2026-08-10: derive --company and --industry from config files ---
 # Read taiwan50_config.json constituents → --company <code> per stock
 # Read industry_config.json top-level keys → --industry <id> per industry
-# Both config files are at the repo root. Fallback: empty args (macro-only).
-TW50_CONFIG="/home/ubuntu/macro-report/taiwan50_config.json"
-INDUSTRY_CONFIG="/home/ubuntu/macro-report/industry_config.json"
+# Both config files are at the repo root (FIE_CONFIG_DIR overridable).
+# Fallback: empty args (macro-only).
+TW50_CONFIG="${FIE_CONFIG_DIR:-${PROJECT_ROOT}}/taiwan50_config.json"
+INDUSTRY_CONFIG="${FIE_CONFIG_DIR:-${PROJECT_ROOT}}/industry_config.json"
 
 if [ -f "${TW50_CONFIG}" ]; then
-    COMPANY_ARGS=$(python3 -c "
+    COMPANY_ARGS=$("${PYTHON_BIN}" -c "
 import json
 with open('${TW50_CONFIG}') as f:
     data = json.load(f)
@@ -73,7 +82,7 @@ else
 fi
 
 if [ -f "${INDUSTRY_CONFIG}" ]; then
-    INDUSTRY_ARGS=$(python3 -c "
+    INDUSTRY_ARGS=$("${PYTHON_BIN}" -c "
 import json
 with open('${INDUSTRY_CONFIG}') as f:
     data = json.load(f)
@@ -92,18 +101,23 @@ fi
 # real scores (not 0.0 defaults).  Uses a per-run temp intelligence DB so
 # macro_history.db stays read-only.  --persist is required because the
 # seed step writes signals into the target DB before scoring.
-SEED_DB="/tmp/macro-report-intelligence/${ARTIFACT_DATE}-intelligence.db"
+SEED_DB="${TMPDIR:-/tmp}/macro-report-intelligence/${ARTIFACT_DATE}-intelligence.db"
 mkdir -p -- "$(dirname -- "${SEED_DB}")" || {
     echo "run.sh: failed to mkdir for seed DB" >&2
     exit 4
 }
-SEED_ARGS="--seed-from-history --db-path ${SEED_DB} --persist --source-db /home/ubuntu/macro-report/macro_history.db --industry-config /home/ubuntu/macro-report/industry_config.json"
+# --freshness-check (Workstream H): classification is warnings-only (stderr/JSON
+# warnings; no exit-code change) so a stale/unreachable source is VISIBLE in the
+# artifact and operator output instead of silently looking fresh.
+SEED_ARGS=(--seed-from-history --db-path "${SEED_DB}" --persist --freshness-check
+    --source-db "${FIE_DB_PATH:-${PROJECT_ROOT}/macro_history.db}"
+    --industry-config "${FIE_CONFIG_DIR:-${PROJECT_ROOT}}/industry_config.json")
 
-PYTHONPATH=/home/ubuntu/macro-report python3 -m phase3.cli pipeline-export \
+PYTHONPATH="${PROJECT_ROOT}" "${PYTHON_BIN}" -m phase3.cli pipeline-export \
     --date "${ARTIFACT_DATE}" \
     --run-label "${ARTIFACT_DATE}" \
     --output-dir "${ARTIFACT_DIR}" \
-    ${SEED_ARGS} \
+    "${SEED_ARGS[@]}" \
     ${COMPANY_ARGS} ${INDUSTRY_ARGS} 2>&1
 PIPELINE_RC=$?
 if [ "$PIPELINE_RC" -ne 0 ]; then

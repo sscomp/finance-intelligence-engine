@@ -30,8 +30,8 @@ scheduler:
 # 觸發後行為（特殊：純 ping，目前無 .py）
 entrypoint:
   script: null                       # 沒有獨立 .py
-  workdir: /home/ubuntu/macro-report
-  venv: /home/ubuntu/macro-venv
+  workdir: ${FIE_PROJECT_ROOT}      # portable: repo root (env-overridable)
+  venv: ${FIE_PYTHON:-python3}          # portable: active environment (no fixed venv)
   python_module: null
   python_function: null
   note: |

@@ -29,8 +29,8 @@ scheduler:
 # 觸發後行為
 entrypoint:
   script: run_weekly.sh
-  workdir: /home/ubuntu/macro-report
-  venv: /home/ubuntu/macro-venv
+  workdir: ${FIE_PROJECT_ROOT}      # portable: repo root (env-overridable)
+  venv: ${FIE_PYTHON:-python3}          # portable: active environment (no fixed venv)
   python_module: industry_weekly
   python_function: main
 

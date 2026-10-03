@@ -31,8 +31,8 @@ scheduler:
 # 觸發後行為（對應現有 run.sh）
 entrypoint:
   script: run.sh
-  workdir: /home/ubuntu/macro-report
-  venv: /home/ubuntu/macro-venv
+  workdir: ${FIE_PROJECT_ROOT}      # portable: repo root (env-overridable)
+  venv: ${FIE_PYTHON:-python3}          # portable: active environment (no fixed venv)
   python_module: macro_daily
   python_function: main
 
@@ -100,7 +100,7 @@ archive:
 
 # 寫入 SQLite（既有 macro_history.db.macro_daily 表，schema 凍結）
 sqlite:
-  database: /home/ubuntu/macro-report/macro_history.db
+  database: ${FIE_DB_PATH:-${FIE_DATA_DIR}}/macro_history.db
   table: macro_daily
   schema_version: 1
   primary_key: date

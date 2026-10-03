@@ -29,8 +29,8 @@ scheduler:
 # 觸發後行為
 entrypoint:
   script: run_monthly.sh
-  workdir: /home/ubuntu/macro-report
-  venv: /home/ubuntu/macro-venv
+  workdir: ${FIE_PROJECT_ROOT}      # portable: repo root (env-overridable)
+  venv: ${FIE_PYTHON:-python3}          # portable: active environment (no fixed venv)
   python_module: company_monthly
   python_function: main
 
@@ -92,7 +92,7 @@ archive:
 
 # 寫入 SQLite
 sqlite:
-  database: /home/ubuntu/macro-report/macro_history.db
+  database: ${FIE_DB_PATH:-${FIE_DATA_DIR}}/macro_history.db
   tables:
     - table: stock_monthly
       primary_key: [date, code]
