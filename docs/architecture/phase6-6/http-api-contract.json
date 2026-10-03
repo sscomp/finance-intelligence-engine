@@ -1,10 +1,11 @@
 {
-  "$comment": "Phase 6.6 machine-readable HTTP API contract (§5). The JSON body of every /v1 operation is the Phase 6.5 dispatch envelope verbatim; HTTP status is the deterministic transport mapping in phase3.transport.errors and is never a replacement for the domain error code. Documented [DECISION]: the transport error codes UNAUTHENTICATED/FORBIDDEN live in the transport taxonomy; all domain codes stay in the Phase 6.5 service taxonomy.",
+  "$comment": "Phase 6.6 machine-readable HTTP API contract — canonical source (ADR-016). The JSON body of every operation is a JSON envelope in one of two classes: (1) dispatch envelopes produced by the Phase 6.5 boundary verbatim, kind=<operation name>, principal_id=<authenticated principal>, with freshness (possibly null), payload, evidence_refs and warnings on success or status=error + error + payload=null on dispatch errors; (2) transport-produced error envelopes — auth failures (401), method rejections (405), unknown routes (400) and the transport catch-all (500) — with kind=\"transport\", principal_id=\"\" and the same error taxonomy. HTTP status is the deterministic transport mapping in phase3.transport.errors and is never a replacement for the domain error code. This contract is validated against live runtime behaviour by tests/phase3/transport/test_67a_contract_reconciliation.py (drift fails there).",
   "openapi": "3.1.0",
   "info": {
     "title": "FIE reference read-only intelligence runtime",
     "version": "6.5",
-    "description": "Thin HTTP transport over the frozen Phase 6.5 IntelligenceService boundary. Read-only interactive plane (§3.5): only GET/HEAD are served.",
+    "x-revision": "phase-6.7a-contract-reconciliation-1 (reconciled to executable runtime behaviour; see ADR-016 and tests/phase3/transport/test_67a_contract_reconciliation.py)",
+    "description": "Thin HTTP transport over the frozen Phase 6.5 IntelligenceService boundary. Read-only interactive plane (§3.5): only GET is served (HEAD mirrors GET with an empty body).",
     "schema_version": "6.5"
   },
   "servers": [{"url": "http://127.0.0.1:8787", "description": "reference defaults; operator-configured in real deployments"}],
@@ -17,7 +18,10 @@
           "200": {
             "description": "process alive",
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LivenessEnvelope"}}}
-          }
+          },
+          "401": {"$ref": "#/components/responses/Error401"},
+          "405": {"$ref": "#/components/responses/Error405"},
+          "500": {"$ref": "#/components/responses/Error500"}
         }
       }
     },
@@ -27,7 +31,10 @@
         "summary": "Readiness — service initialised and persistence reachable (§10); maps to fie.health/get_health. No live Yahoo/TWSE/RSS fetch is required or performed.",
         "responses": {
           "200": {"description": "ready", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
-          "503": {"description": "DEGRADED/DATA_UNAVAILABLE/DEPENDENCY_UNAVAILABLE — persistence unreachable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}}
+          "401": {"$ref": "#/components/responses/Error401"},
+          "405": {"$ref": "#/components/responses/Error405"},
+          "500": {"$ref": "#/components/responses/Error500"},
+          "503": {"description": "dispatch error envelope (kind=health): DEGRADED/DATA_UNAVAILABLE/DEPENDENCY_UNAVAILABLE — persistence unreachable; sanitised message", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
         }
       }
     },
@@ -35,7 +42,13 @@
       "get": {
         "operationId": "getHealth",
         "summary": "fie.health → get_health",
-        "responses": {"200": {"description": "service + persistence status", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}}}
+        "responses": {
+          "200": {"description": "service + persistence status (envelope freshness slot is null on health)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
+          "401": {"$ref": "#/components/responses/Error401"},
+          "405": {"$ref": "#/components/responses/Error405"},
+          "500": {"$ref": "#/components/responses/Error500"},
+          "503": {"description": "dispatch error envelope (kind=health): DEPENDENCY_UNAVAILABLE — persistence unreachable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
+        }
       }
     },
     "/v1/intelligence/latest": {
@@ -47,8 +60,11 @@
           {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 200}}
         ],
         "responses": {
-          "200": {"description": "scored intelligence items with envelope freshness slot", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
-          "400": {"description": "invalid query parameters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
+          "200": {"description": "scored intelligence items — the envelope payload is an ARRAY of items, each item carrying its own freshness; the envelope-level freshness slot is metadata for a SINGLE-item result and is otherwise null", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
+          "400": {"description": "INVALID_REQUEST (invalid query parameters)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}},
+          "401": {"$ref": "#/components/responses/Error401"},
+          "405": {"$ref": "#/components/responses/Error405"},
+          "500": {"description": "transport catch-all INTERNAL_ERROR (transport envelope kind=transport) or dispatch INTERNAL_ERROR (kind=latest_intelligence) on persistence failure", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
         }
       }
     },
@@ -62,9 +78,11 @@
           {"name": "as_of", "in": "query", "required": false, "schema": {"type": "string", "format": "date"}}
         ],
         "responses": {
-          "200": {"description": "entity intelligence envelope", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
-          "400": {"description": "INVALID_REQUEST (unknown kind, malformed as_of)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}},
-          "404": {"description": "NOT_FOUND", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
+          "200": {"description": "entity intelligence envelope — NOTE: an unknown entity_id is NOT an error; the bounded honesty semantics (§8) serve 200 with freshness.state=UNAVAILABLE and an availability warning (NOT_FOUND is raised by the evidence endpoint, not this one)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
+          "400": {"description": "INVALID_REQUEST (unknown kind)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}},
+          "401": {"$ref": "#/components/responses/Error401"},
+          "405": {"$ref": "#/components/responses/Error405"},
+          "500": {"description": "transport catch-all or dispatch INTERNAL_ERROR on persistence failure", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
         }
       }
     },
@@ -77,9 +95,12 @@
           {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 200}}
         ],
         "responses": {
-          "200": {"description": "evidence node + related edges", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
+          "200": {"description": "evidence node + related edges (exact node ref lookup — Phase 6.5 semantics unchanged)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
           "400": {"description": "INVALID_REQUEST", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}},
-          "404": {"description": "NOT_FOUND", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
+          "404": {"description": "NOT_FOUND", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}},
+          "401": {"$ref": "#/components/responses/Error401"},
+          "405": {"$ref": "#/components/responses/Error405"},
+          "500": {"description": "transport catch-all or dispatch INTERNAL_ERROR on persistence failure", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
         }
       }
     },
@@ -93,15 +114,33 @@
           {"name": "as_of", "in": "query", "required": false, "schema": {"type": "string", "format": "date"}}
         ],
         "responses": {
-          "200": {"description": "freshness envelope — every lifecycle state (FRESH/DEGRADED/STALE/UNAVAILABLE) is served honestly with HTTP 200 (§8)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
-          "400": {"description": "INVALID_REQUEST", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
+          "200": {"description": "freshness envelope — every lifecycle state (FRESH/DEGRADED/STALE/UNAVAILABLE) is served honestly with HTTP 200 (§8); the envelope freshness slot mirrors the payload", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
+          "400": {"description": "INVALID_REQUEST", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}},
+          "401": {"$ref": "#/components/responses/Error401"},
+          "405": {"$ref": "#/components/responses/Error405"},
+          "500": {"description": "transport catch-all or dispatch INTERNAL_ERROR on persistence failure", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}},
+          "503": {"description": "dispatch error envelope (kind=freshness): DEPENDENCY_UNAVAILABLE — signal observations unreadable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
         }
       }
     }
   },
   "components": {
     "securitySchemes": {
-      "bearerAuth": {"type": "http", "scheme": "bearer", "description": "FIE_AUTH_MODE=token with FIE_AUTH_TOKEN (env-only, §6). Mode none = anonymous dev/test."}
+      "bearerAuth": {"type": "http", "scheme": "bearer", "description": "FIE_AUTH_MODE=token with FIE_AUTH_TOKEN (env-only, §6). Mode none = anonymous dev/test. In token mode the auth gate runs on EVERY path (including /healthz and /readyz, before routing); missing/invalid credentials → 401 below."}
+    },
+    "responses": {
+      "Error401": {
+        "description": "UNAUTHENTICATED (transport-produced: kind=transport, principal_id=\"\") — token mode with missing/invalid bearer credentials; request-ID echoed in header and body",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}
+      },
+      "Error405": {
+        "description": "INVALID_REQUEST (transport-produced: kind=transport, principal_id=\"\") — unsupported method; the interactive plane is read-only; Allow: GET, HEAD; request-ID echoed in header and body",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}
+      },
+      "Error500": {
+        "description": "INTERNAL_ERROR catch-all (transport-produced: kind=transport, principal_id=\"\", sanitised generic message) — structurally reachable on every path via the transport catch-all; request-ID echoed in header and body",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}
+      }
     },
     "schemas": {
       "LivenessEnvelope": {
@@ -114,18 +153,47 @@
           "status": {"const": "alive"}
         }
       },
+      "EvidenceRef": {
+        "type": "object",
+        "description": "Stable db-agnostic evidence reference (phase3.service.contracts.EvidenceReference.to_dict): ref is the domain node id (entity:company:2330, signal:macro:global, …); kind carries the node type; edge_type/direction describe graph-traversal provenance and are \"\" when not applicable.",
+        "required": ["ref", "kind", "edge_type", "direction"],
+        "properties": {
+          "ref": {"type": "string"},
+          "kind": {"type": "string"},
+          "edge_type": {"type": "string"},
+          "direction": {"type": "string"}
+        }
+      },
+      "FreshnessMetadata": {
+        "type": "object",
+        "description": "Phase 6.5 service freshness statement (ADR-002 governance mapping unchanged): FRESH=current known data, DEGRADED=inside warning window, STALE=past hard expiry, UNAVAILABLE=no observation. Stale data is never silently presented as fresh.",
+        "required": ["state", "as_of"],
+        "properties": {
+          "state": {"type": "string", "enum": ["FRESH", "DEGRADED", "STALE", "UNAVAILABLE"]},
+          "as_of": {"type": "string"},
+          "checked_at": {"type": "string"},
+          "source_date": {"type": ["string", "null"]},
+          "age": {"type": ["integer", "null"]}
+        }
+      },
       "Envelope": {
         "type": "object",
         "required": ["schema_version", "kind", "request_id", "principal_id", "status", "payload", "evidence_refs", "warnings"],
         "properties": {
           "schema_version": {"const": "6.5"},
-          "kind": {"type": "string", "description": "the operation name"},
-          "request_id": {"type": "string", "description": "sanitised X-Request-Id or generated hex"},
+          "kind": {"type": "string", "description": "the operation name (dispatch-produced: health, latest_intelligence, entity_intelligence, evidence, freshness)"},
+          "request_id": {"type": "string", "description": "sanitised X-Request-Id or generated hex; echoed in the X-Request-Id response header on success AND error paths"},
           "principal_id": {"type": "string", "description": "opaque principal label"},
           "status": {"const": "ok"},
-          "freshness": {"type": "object", "description": "first-class metadata slot: {state, as_of, checked_at?, source_date?, age?}"},
-          "payload": {"type": "object"},
-          "evidence_refs": {"type": "array", "items": {"type": "string"}},
+          "freshness": {
+            "description": "first-class metadata slot: a FreshnessMetadata object for single-result reads, or null when the operation has no single freshness statement (health, multi-item latest, evidence)",
+            "oneOf": [
+              {"$ref": "#/components/schemas/FreshnessMetadata"},
+              {"type": "null"}
+            ]
+          },
+          "payload": {"type": ["object", "array"], "description": "domain data — object for single-result operations; ARRAY of items for latest_intelligence (each item carries its own freshness/evidence_refs/warnings)"},
+          "evidence_refs": {"type": "array", "items": {"$ref": "#/components/schemas/EvidenceRef"}},
           "warnings": {"type": "array", "items": {"type": "string"}}
         }
       },
@@ -134,9 +202,9 @@
         "required": ["schema_version", "kind", "request_id", "principal_id", "status", "error", "payload"],
         "properties": {
           "schema_version": {"const": "6.5"},
-          "kind": {"type": "string"},
-          "request_id": {"type": "string"},
-          "principal_id": {"type": "string"},
+          "kind": {"type": "string", "description": "the operation name for dispatch-produced errors (e.g. latest_intelligence, readiness health/freshness), or the literal \"transport\" for transport-produced errors (401 auth failure, 405 method rejection, 400 unknown route, 500 catch-all)"},
+          "request_id": {"type": "string", "description": "sanitised or generated; echoed in X-Request-Id on every error path including transport-class errors and the catch-all 500 (never \"unassigned\")"},
+          "principal_id": {"type": "string", "description": "opaque principal label for dispatch-produced errors; empty string \"\" for transport-produced errors"},
           "status": {"const": "error"},
           "error": {
             "type": "object",
@@ -152,6 +220,23 @@
       }
     }
   },
+  "x-envelope-classes": {
+    "description": "Every response body is one JSON envelope from exactly one of these classes (ADR-016):",
+    "dispatch": "produced by the Phase 6.5 boundary verbatim — kind=<operation name>, principal_id=<authenticated principal>; success = Envelope, dispatch error = ErrorEnvelope",
+    "transport": "produced by the transport for auth failures (401), method rejection (405), unknown route (400) and the catch-all failure (500) — kind=\"transport\", principal_id=\"\", ErrorEnvelope shape"
+  },
+  "x-method-behavior": {
+    "head": "HEAD mirrors GET on every declared path: same status and headers (Content-Type, X-Request-Id, Content-Length), empty body per HTTP semantics — implemented as do_HEAD → do_GET with body suppression; declared here instead of per-path head operations (single source, mechanically verified by the reconciliation tests)",
+    "non-get": "POST/PUT/PATCH/DELETE → 405 with Allow: GET, HEAD (read-only interactive plane, §3.5)"
+  },
+  "x-response-content-type": {
+    "value": "application/json; charset=utf-8",
+    "description": "every response body — success and error alike — is JSON with this Content-Type (6.6R1 DEFECT-B contract)"
+  },
+  "x-auth-gate": {
+    "description": "FIE_AUTH_MODE=token: bearer authentication runs at the transport edge BEFORE routing — therefore 401 is reachable on every path including /healthz and /readyz; production deployments typically terminate auth at a gateway and permit the platform probes",
+    "canonical-401-behavior": "401 UNAUTHENTICATED, kind=transport, principal_id=\"\", X-Request-Id echoed in header and body (never revealed credential detail)"
+  },
   "x-http-status-mapping": {
     "description": "phase3.transport.errors.HTTP_STATUS_BY_CODE (§7); DEGRADED is a freshness state and is served with HTTP 200 + metadata",
     "INVALID_REQUEST": 400,
@@ -166,8 +251,9 @@
   "x-transport-invariants": [
     "thin transport only: parsing/auth/request-ids/dispatch/error-mapping/serialization/telemetry (§3.1)",
     "ChatGPT (any remote consumer) never accesses persistence directly (§3.2)",
-    "read-only: POST/PUT/PATCH/DELETE → 405 with Allow: GET, HEAD (§3.5)",
+    "read-only: POST/PUT/PATCH/DELETE → 405 with Allow: GET, HEAD (§3.5); HEAD mirrors GET with an empty body",
     "no hidden live data fetch inside HTTP requests (§8)",
-    "never log or serialise Authorization values, tokens, payloads, or DSNs with credentials (§11)"
+    "never log or serialise Authorization values, tokens, payloads, or DSNs with credentials (§11)",
+    "canonical source of truth (ADR-016): runtime semantics govern, this file is the machine-readable declaration, and drift is detected by tests/phase3/transport/test_67a_contract_reconciliation.py"
   ]
 }

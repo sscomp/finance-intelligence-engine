@@ -12,8 +12,9 @@ scoring, no SQL, no repository traversal, no ingestion, no scheduler,
 no freshness computation (that stays in :mod:`phase3.service.freshness`
 over the unchanged governance policy).
 
-Read-only (§3.5): only GET is served; the wrapped service itself is
-opened with query-only guarantees. Batch (ingestion/scoring) remains
+Read-only (§3.5): only GET is served (HEAD mirrors GET with an empty
+body — Phase 6.7A contract reconciliation); the wrapped service itself
+is opened with query-only guarantees. Batch (ingestion/scoring) remains
 a separate execution plane (:mod:`phase3.service.batch`) that this
 runtime never invokes.
 
@@ -32,11 +33,24 @@ GET /v1/freshness/{kind}/{entity_id}
                             fie.freshness         -> get_freshness
 =========================== ==========================================
 
-The JSON body is the Phase 6.5 dispatch envelope verbatim
-(``schema_version``, ``status``, ``payload``, ``freshness``,
-``evidence_refs``, ``warnings``, ``error``); HTTP status is the
-deterministic mapping in :mod:`phase3.transport.errors` — never a
-replacement for the domain error code.
+Every response body is a JSON envelope with two classes (Phase 6.7A
+contract reconciliation — the canonical machine contract,
+``docs/architecture/phase6-6/http-api-contract.json``, declares both):
+
+* **dispatch envelopes** (produced by the Phase 6.5 boundary/adapter,
+  verbatim) — ``kind`` is the operation name and ``principal_id`` is
+  the authenticated principal; successes carry ``freshness`` (possibly
+  ``null``), ``payload``, ``evidence_refs`` and ``warnings``; dispatch
+  errors carry ``status: "error"`` + ``error`` + ``payload: null``;
+
+* **transport-produced error envelopes** — auth failures, 405
+  rejections, unknown routes and the catch-all 500 set
+  ``kind = "transport"`` and ``principal_id = ""``; their ``error``
+  block uses the same stable taxonomy and mapping.
+
+HTTP status is the deterministic mapping in
+:mod:`phase3.transport.errors` — never a replacement for the domain
+error code.
 """
 from __future__ import annotations
 
@@ -266,7 +280,7 @@ class _TransportHandler(BaseHTTPRequestHandler):
                     "status": "error",
                     "error": {
                         "code": "INVALID_REQUEST",
-                        "message": "only GET is supported; "
+                        "message": "only GET or HEAD is supported; "
                         "the interactive plane is read-only",
                     },
                     "payload": None,

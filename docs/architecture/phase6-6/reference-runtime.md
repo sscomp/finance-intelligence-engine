@@ -41,14 +41,34 @@ SQLite / PostgreSQL（僅持久層 seams；無 SQL 在傳輸層）
 | `/v1/evidence/{ref}?limit=` | `fie.evidence` | `get_evidence` |
 | `/v1/freshness/{kind}/{entity_id}?as_of=` | `fie.freshness` | `get_freshness` |
 
-* 回應體是 Phase 6.5 dispatch 信封**原樣**；`schema_version` 為
-  `"6.5"`；`X-Request-Id` 回應頭與信封 `request_id` 一致（可由
-  客戶端提供、經清洗；非法字元與連續 `.` 移除）。
-* 非 GET 方法一律 `405`（`Allow: GET, HEAD`；互動平面唯讀 §3.5）。
+* 回應體（已實作並驗證 / implemented and verified）一律是 JSON 信封，
+  有兩類（Phase 6.7A 調和、ADR-016；`kind`/`principal_id` 不同）：
+  * **dispatch 信封**：由 Phase 6.5 邊界**原樣**產生——`kind` =
+    操作名，`principal_id` = 已認證主體；成功含 `freshness`（單結果
+    讀取為 FreshnessMetadata 物件；**health、多項 latest、evidence
+    為 `null`**）、`payload`（單結果操作為物件、`latest_intelligence`
+    為**陣列**，項目各自攜帶 freshness）、`evidence_refs`、
+    `warnings`；dispatch 錯誤為 `status: "error"` + `error` +
+    `payload: null`。
+  * **transport 錯誤信封**：認證失敗（401）、方法拒絕（405）、未知
+    路由（400）、catch-all（500）以 `kind = "transport"`、
+    `principal_id = ""` 產出，error 走同一穩定分類與映射。
+  `schema_version` 為 `"6.5"`；`X-Request-Id` 回應頭與信封
+  `request_id` 一致（含全部錯誤路徑；可由客戶端提供、經清洗；
+  非法字元與連續 `.` 移除）。
+* `HEAD` **已實作並驗證**：映射 GET（相同狀態/頭，空回應體）；
+  非 GET 的 POST/PUT/PATCH/DELETE 一律 `405`
+  （`Allow: GET, HEAD`；互動平面唯讀 §3.5；405 訊息
+  「only GET or HEAD is supported…」）。
+* token 模式的認證閘**先於路由**執行：所有路徑（含 `/healthz`、
+  `/readyz`）在 token 模式下可回 `401`。
 * HTTP 狀態映射（§7）：INVALID_REQUEST→400、UNAUTHENTICATED→401、
   FORBIDDEN→403、NOT_FOUND→404、STALE_DATA→409、
   DATA_UNAVAILABLE/DEPENDENCY_UNAVAILABLE→503、INTERNAL_ERROR→500。
   DEGRADED 是 freshness 狀態，以 HTTP 200 + 元資料誠實呈現。
+  每條路徑的完整可重現狀態集由機器契約宣告，並由
+  `tests/phase3/transport/test_67a_contract_reconciliation.py`
+  機械鎖住（漂移即失敗；ADR-016）——人寫文件不再重述逐路徑狀態。
 
 ## 3. 認證 (§6)
 
