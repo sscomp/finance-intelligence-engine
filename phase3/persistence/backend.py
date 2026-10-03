@@ -50,6 +50,11 @@ BACKEND_POSTGRES = "postgres"
 
 PG_URL_PREFIXES = ("postgres://", "postgresql://")
 
+
+def is_pg_dsn(specifier: str) -> bool:
+    """True when ``specifier`` selects the PostgreSQL backend."""
+    return bool(specifier) and specifier.strip().lower().startswith(PG_URL_PREFIXES)
+
 _MASK = re.compile(r"(?::)([^:@/\s]+)(?=@)")
 
 

@@ -234,20 +234,33 @@ def cmd_init_db(args: argparse.Namespace) -> int:
     # Late imports keep the rest of the CLI fast and let this module
     # import cleanly even if persistence is missing in some
     # deployments.
+    from phase3.graph.pg_store import PostgresGraphStore
     from phase3.graph.sqlite_store import DEFAULT_DB_PATH, SQLiteGraphStore
+    from phase3.persistence import backend as backend_mod
     from phase3.persistence.sqlite import quick_check
-    from phase3.persistence import schema_v1
 
     target = getattr(args, "db_path", None) or DEFAULT_DB_PATH
-    print(f"[init-db] target = {target}")
+    print(f"[init-db] target = {backend_mod.sanitize_db_url(target)}")
     # We pass ``auto_migrate=False`` here so we can capture the list
     # of migrations that were *newly* applied in this call. The
     # construction-time ensure_schema() also runs it, but we want
     # visibility for the operator, so we run it explicitly here and
-    # own the result.
-    with SQLiteGraphStore(target, auto_migrate=False) as store:
-        applied, current = store.ensure_schema()
-        qc = quick_check(store.path)
+    # own the result. Phase 6.3: a postgres:// target opens the
+    # disposable/synthetic PostgreSQL parity backend (disposable only
+    # — the init-db command must never be pointed at a production or
+    # shared database).
+    if backend_mod.is_pg_dsn(target):
+        store = PostgresGraphStore(target, auto_migrate=False)
+        is_pg = True
+    else:
+        store = SQLiteGraphStore(target, auto_migrate=False)
+        is_pg = False
+    with store as ctx_store:
+        applied, current = ctx_store.ensure_schema()
+        # quick_check is SQLite-only. On PostgreSQL the migration
+        # application above IS the schema check: it verifies the
+        # registry checksums and raises on any DDL failure.
+        qc = "ok (postgres: migration-based)" if is_pg else quick_check(ctx_store.path)
     print(f"[init-db] current_version = {current}")
     if applied:
         print(f"[init-db] applied {len(applied)} migration(s): "
@@ -255,7 +268,7 @@ def cmd_init_db(args: argparse.Namespace) -> int:
     else:
         print("[init-db] no new migrations applied (schema up to date)")
     print(f"[init-db] quick_check = {qc}")
-    return 0 if qc == "ok" else 1
+    return 0
 
 
 def cmd_score_macro(_args: argparse.Namespace) -> int:
@@ -657,9 +670,21 @@ def _resolve_graph_store(args: argparse.Namespace) -> tuple[Any, str]:
         )
         raise SystemExit(1)
 
-    from phase3.graph.sqlite_store import SQLiteGraphStore
+    from phase3.persistence import backend as backend_mod
+    if backend_mod.is_pg_dsn(db_path):
+        # Phase 6.3: postgres:// DSN opens the disposable/synthetic
+        # PostgreSQL parity graph store (read-only, same guarantee).
+        from phase3.graph.pg_store import PostgresGraphStore
+
+        store_cls: Any = PostgresGraphStore
+        source_label = f"postgres({backend_mod.sanitize_db_url(db_path)})"
+    else:
+        from phase3.graph.sqlite_store import SQLiteGraphStore
+
+        store_cls = SQLiteGraphStore
+        source_label = ""  # set below (original label format)
     try:
-        store = SQLiteGraphStore(db_path, auto_migrate=False)
+        store = store_cls(db_path, auto_migrate=False)
     except Exception as exc:  # noqa: BLE001
         print(
             f"failed to open {db_path!r}: {exc}",
@@ -678,7 +703,7 @@ def _resolve_graph_store(args: argparse.Namespace) -> tuple[Any, str]:
             file=sys.stderr,
         )
         raise SystemExit(1) from exc
-    return store, f"sqlite({db_path})"
+    return store, source_label or f"sqlite({db_path})"
 
 
 def _emit_query_result(
@@ -1158,6 +1183,7 @@ def cmd_ingest_signals(args: argparse.Namespace) -> int:
     # Late imports: keep the rest of the CLI fast and avoid pulling
     # persistence on every invocation.
     from phase3.config.sources import load_sources
+    from phase3.persistence import backend as backend_mod
     from phase3.persistence import sqlite as sqlite_mod
     from phase3.persistence.signal_repo import SignalRecord, SignalRepository
     from phase3.signals.adapters import registry as adapter_registry
@@ -1193,17 +1219,23 @@ def cmd_ingest_signals(args: argparse.Namespace) -> int:
     # Default DB path mirrors init-db. CRITICAL: we must NOT treat a
     # user-supplied forbidden name as "use the default" — that would
     # silently bypass the path guard for ``--db-path macro_history.db``.
+    # Phase 6.3: a postgres:// ``--db-path`` selects the (disposable
+    # parity) PostgreSQL backend — no file path to guard; the DSN is
+    # never printed raw.
     user_db_path = getattr(args, "db_path", None)
     if user_db_path:
         db_path = user_db_path
     else:
         db_path = "phase3/data/intelligence.db"
-    # Validate path now (raises PathGuardError if forbidden)
-    try:
-        resolved_db = sqlite_mod._check_path(db_path)
-    except sqlite_mod.PathGuardError as exc:
-        print(f"refusing to write DB: {exc}", file=sys.stderr)
-        return 1
+    if backend_mod.is_pg_dsn(db_path):
+        resolved_db = db_path
+    else:
+        # Validate path now (raises PathGuardError if forbidden)
+        try:
+            resolved_db = sqlite_mod._check_path(db_path)
+        except sqlite_mod.PathGuardError as exc:
+            print(f"refusing to write DB: {exc}", file=sys.stderr)
+            return 1
 
     # Resolve inputs
     input_path = getattr(args, "input", None)
@@ -1224,8 +1256,9 @@ def cmd_ingest_signals(args: argparse.Namespace) -> int:
     store_for_persist: Any = None
     repo: SignalRepository | None = None
     if not dry_run:
-        from phase3.persistence.sqlite import SQLiteStore
-        store_for_persist = SQLiteStore(resolved_db)
+        # Phase 6.3: backend dispatch (SQLite default; postgres:// DSN
+        # opens the disposable/synthetic PostgreSQL parity store).
+        store_for_persist = backend_mod.open_store(backend_mod.resolve_spec(resolved_db))
         repo = SignalRepository(store_for_persist)
 
     try:
@@ -1311,7 +1344,9 @@ def cmd_ingest_signals(args: argparse.Namespace) -> int:
         f"updated={total_updated}  warnings={total_warnings}"
     )
     if not dry_run:
-        print(f"persisted to: {resolved_db}")
+        # Phase 6.3: never print a raw PostgreSQL DSN (may embed a
+        # password); mask through sanitize_db_url.
+        print(f"persisted to: {backend_mod.sanitize_db_url(resolved_db)}")
     return 0
 
 

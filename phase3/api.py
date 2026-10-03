@@ -253,6 +253,15 @@ def _build_graph_store(
     # path guard the rest of the API uses so the call-site code
     # path is uniform. If the guard fails we let the typed
     # PipelineAPIError bubble up.
+    from phase3.persistence.backend import is_pg_dsn
+
+    if is_pg_dsn(db_path):
+        # Phase 6.3: PostgreSQL parity backend (disposable/synthetic).
+        # Path guard does not apply — the specifier is a DSN, not a file.
+        # DSN is masked before it can reach logs/exceptions.
+        from phase3.graph.pg_store import PostgresGraphStore
+
+        return PostgresGraphStore(db_path, auto_migrate=auto_migrate)
     try:
         resolved = _check_path(db_path)
     except _PathGuardError as exc:
@@ -261,13 +270,6 @@ def _build_graph_store(
             message=str(exc),
             error_class="PathGuardError",
         ) from exc
-    if resolved.strip().lower().startswith(
-        ("postgres://", "postgresql://")
-    ):
-        # Phase 6.3: PostgreSQL parity backend (disposable/synthetic).
-        from phase3.graph.pg_store import PostgresGraphStore
-
-        return PostgresGraphStore(resolved, auto_migrate=auto_migrate)
     return _SQLiteGraphStore(resolved, auto_migrate=auto_migrate)
 
 
@@ -566,11 +568,19 @@ def run_pipeline(
             error_class=type(exc).__name__,
         ) from exc
     finally:
-        if store is not None:
-            try:
-                store.close()
-            except Exception:  # noqa: BLE001
-                pass
+        # Two connections back the persist path when ``db_path`` is a
+        # persistence specifier: the score/signal store and the graph
+        # store built by ``_build_default_components`` (Phase 6.3:
+        # on PostgreSQL a leaked second connection would hold a
+        # server backend open per run). Close both; in-memory graph
+        # stores have no ``close()`` and are skipped.
+        graph_store = getattr(orch, "_graph_store", None)
+        for handle in (store, graph_store):
+            if handle is not None and hasattr(handle, "close"):
+                try:
+                    handle.close()
+                except Exception:  # noqa: BLE001
+                    pass
     return APIResult(
         kind="run",
         result=result,
