@@ -116,8 +116,8 @@ Phase 2A 派送 = 「現有 stdout → cron agent → Telegram」，**不變動*
 publisher:
   type: telegram
   channel: stdout
-  target_chat_id: "5132341473"          # 鼎鼎
-  secondary_targets: ["8029464467"]     # 彪彪（季報/部分月報）
+  target_chat_id: "${FIE_TELEGRAM_CHAT_ID}"             # 個人 chat_id 經環境變數注入（Phase 6.1 Workstream F）
+  secondary_targets: ["${FIE_TELEGRAM_SECONDARY_CHAT_ID}"]  # 月報/季報副本收件人
   retry_policy: none                    # 凍結：失敗交給 cron agent / Hermes 自己
   failure_action: cron_agent_reports_error
   max_message_length: 4096              # Telegram 限制；>4096 由 cron agent split

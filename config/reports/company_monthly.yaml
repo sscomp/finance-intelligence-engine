@@ -78,8 +78,8 @@ renderer:
 publisher:
   type: telegram
   channel: stdout
-  target_chat_id: "5132341473"
-  secondary_targets: ["8029464467"]   # 月報也送彪彪
+  target_chat_id: "${FIE_TELEGRAM_CHAT_ID}"   # 佔位符：個人 chat_id 經環境變數注入，不落盤（Phase 6.1 Workstream F）
+  secondary_targets: ["${FIE_TELEGRAM_SECONDARY_CHAT_ID}"]
   retry_policy: none
   failure_action: cron_agent_reports_error
   max_message_length: 4096

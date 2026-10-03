@@ -78,7 +78,7 @@ renderer:
 publisher:
   type: telegram
   channel: stdout
-  target_chat_id: "5132341473"
+  target_chat_id: "${FIE_TELEGRAM_CHAT_ID}"
   secondary_targets: []
   retry_policy: none
   failure_action: cron_agent_reports_error

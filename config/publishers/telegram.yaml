@@ -10,14 +10,23 @@
 # - 4 個 cron job 仍走「stdout → cron agent → telegram」凍結路徑
 # - 變更本檔不會改任何派送行為
 # - Phase 2A 任務是「把派送參數先結構化」，Phase 2C 才接 dispatcher
+#
+# ⚠️ 隱私（Phase 6.1 Workstream F）⚠️
+# - 送到 Telegram 的個人 chat_id 是個人資料，一律以環境變數注入，
+#   不得寫進任何被 git 追蹤的檔案（2026-10 起本檔僅留佔位符）：
+#       FIE_TELEGRAM_CHAT_ID            主要收件人
+#       FIE_TELEGRAM_SECONDARY_CHAT_ID  副本收件人（月報等）
+# - 本機實際值請放在未被追蹤的覆寫檔（見 .gitignore）：
+#       cp config/publishers/telegram.yaml config/publishers/telegram.local.yaml
+#       # 在 .local.yaml 填入實際 chat_id，並維持舊版欄位形狀
 # =============================================================================
 
 # 主要派送通道
 default:
   channel: telegram
   transport: stdout_to_cron_agent
-  target_chat_id: "5132341473"          # 鼎鼎
-  target_chat_id_int: 5132341473
+  target_chat_id: "${FIE_TELEGRAM_CHAT_ID}"
+  target_chat_id_int: null            # 由 FIE_TELEGRAM_CHAT_ID 注入；不落盤
   note: "目前 = print(stdout) → Hermes cron agent 抓 stdout → 送 telegram"
 
 # 訊息長度限制（Telegram 官方 4096）
@@ -30,10 +39,9 @@ message_limits:
 multi_channel:
   enabled: false                       # Phase 2A: 關閉
   secondary_targets:
-    - chat_id: "8029464467"            # 彪彪
-      name: 彪彪
+    - chat_id: "${FIE_TELEGRAM_SECONDARY_CHAT_ID}"
       condition: "report_type in [company_monthly]"
-      note: "目前月報副本送彪彪，行為由 cron job prompt 控制"
+      note: "月報副本收件人；行為由 cron job prompt 控制（既有凍結行為）"
 
 # Footer（Phase 2C prompt v2.0.0 之後由 dispatcher 自動加）
 footer:
@@ -53,7 +61,7 @@ retry:
 # 失敗通知
 failure_notification:
   enabled: true
-  target_chat_id: "5132341473"
+  target_chat_id: "${FIE_TELEGRAM_CHAT_ID}"
   format: |
     ⚠️ 報告派送失敗
     report_type: {report_type}

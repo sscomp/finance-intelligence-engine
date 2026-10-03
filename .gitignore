@@ -33,6 +33,14 @@ logs/
 *.sqlite3
 report_offline.json
 
+# Local config overrides (Phase 6.1 Workstream F — personal data must stay
+# untracked: Telegram chat IDs, operator host paths, delivery nicknames).
+# Tracked *.yaml files carry ${FIE_*} env placeholders only; copy one to a
+# .local.yaml and fill in real values there.
+config/publishers/telegram.local.yaml
+config/reports/*.local.yaml
+config/phase3/*.local.yaml
+
 # Temp / one-off
 /tmp_*.py
 /tmp_*.sh

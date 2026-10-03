@@ -424,7 +424,7 @@ class Utf8EncodingTests(unittest.TestCase):
         result = replace(
             result,
             warnings=("中文警告：缺少某些維度", "測試訊息：台灣市場"),
-            metadata={**result.metadata, "notes": "投資情報測試 — 鼎鼎"},
+            metadata={**result.metadata, "notes": "投資情報測試 — 訂閱者A"},
         )
         with tempfile.TemporaryDirectory() as tmp:
             cfg = ReportConfig(output_dir=tmp)
@@ -434,7 +434,7 @@ class Utf8EncodingTests(unittest.TestCase):
                 raw = fh.read()
             self.assertIn("中文警告", raw)
             self.assertIn("台灣市場", raw)
-            self.assertIn("鼎鼎", raw)
+            self.assertIn("訂閱者A", raw)
             with open(md_art.path, "r", encoding="utf-8") as fh:
                 md = fh.read()
             self.assertIn("中文警告", md)
