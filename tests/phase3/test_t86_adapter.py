@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from phase3.datamodel.signals import Signal, make_signal_id
@@ -153,6 +154,33 @@ class T86AdapterEdgeCaseTests(unittest.TestCase):
             {"code": "2330", "date_bucket": "2026-07-08", "foreign_net": True}
         )
         self.assertEqual(len(result.signals), 0)
+
+
+class T86AdapterTimestampPolicyTests(unittest.TestCase):
+    """Phase 6.1 Workstream E — canonical timestamp policy tests.
+
+    Policy: timestamps are timezone-aware UTC internally. ``_parse_date``
+    interprets a bare date string (date_bucket) as UTC midnight — the
+    same instant bridge/seed_signals.py writes ("...T00:00:00Z"). The
+    pre-6.1 implementation returned a NAIVE datetime, which collided
+    with aware rows during SignalLoader's mixed-record sort.
+    """
+
+    def test_bare_date_parses_as_aware_utc_midnight(self) -> None:
+        ts = T86Adapter._parse_date("2026-07-08")
+        self.assertIsNotNone(ts.tzinfo)
+        self.assertEqual(ts, datetime(2026, 7, 8, tzinfo=timezone.utc))
+        self.assertEqual(ts.utcoffset(), timedelta(0))
+
+    def test_datetime_string_parses_aware(self) -> None:
+        ts = T86Adapter._parse_date("2026-07-08T13:30:00")
+        self.assertIsNotNone(ts.tzinfo)
+        self.assertEqual(ts, datetime(2026, 7, 8, 13, 30, tzinfo=timezone.utc))
+
+    def test_garbage_string_falls_back_to_aware_utcnow(self) -> None:
+        ts = T86Adapter._parse_date("not-a-date")
+        self.assertIsNotNone(ts.tzinfo)
+        self.assertEqual(ts.utcoffset(), timedelta(0))
 
 
 class T86AdapterIndustryRollupTests(unittest.TestCase):

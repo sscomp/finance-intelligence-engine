@@ -8,12 +8,27 @@ temporary SQLite database.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
 from phase3.datamodel.signals import Signal, SignalSource
 from phase3.persistence.signal_repo import SignalRecord, SignalRepository
 from phase3.pipeline import LoadedSignals
+
+# Timezone policy (Phase 6.1 Workstream E): timestamps compare as
+# timezone-aware UTC internally. Naive inputs (legacy signal_log rows
+# or bare date strings) are interpreted as UTC — the same convention
+# the signal writers use ("...T00:00:00Z" / "+00:00"). Normalizing here
+# at the loader boundary keeps mixed-era rows comparable without a
+# backfill/migration of the append-only store.
+_AWARE_DT_MIN = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _to_aware_utc(dt: datetime) -> datetime:
+    """Return ``dt`` as a timezone-aware UTC datetime (naive → assume UTC)."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -79,23 +94,32 @@ class SignalLoader:
         if filters.source_types and record.source_type not in filters.source_types:
             return False
         ts = self._parse_dt(record.timestamp)
-        if filters.since and ts < filters.since:
+        # Normalize filter bounds through the same aware-UTC policy so a
+        # naive caller-supplied bound can never crash the comparison.
+        if filters.since and ts < _to_aware_utc(filters.since):
             return False
-        if filters.until and ts > filters.until:
+        if filters.until and ts > _to_aware_utc(filters.until):
             return False
         return True
 
     @staticmethod
     def _parse_dt(value: str | None) -> datetime:
         if not value:
-            return datetime.min
+            return _AWARE_DT_MIN
         try:
-            return datetime.fromisoformat(value)
+            return _to_aware_utc(datetime.fromisoformat(value))
         except ValueError:
-            return datetime.min
+            return _AWARE_DT_MIN
 
-    @staticmethod
-    def _record_to_signal(record: SignalRecord) -> Signal:
+    def _record_to_signal(self, record: SignalRecord) -> Signal:
+        """Hydrate a SignalRecord into a Signal datamodel object.
+
+        Phase 6.1 Workstream E: timestamps pass through the loader's
+        aware-UTC normalization at this boundary, so hydrated Signals
+        always carry timezone-aware stamps; unparsable/missing stamps
+        hydrate as aware-UTC epoch-min instead of crashing the whole
+        load.
+        """
         return Signal(
             signal_id=record.signal_id,
             entity_type=record.entity_type,
@@ -104,14 +128,12 @@ class SignalLoader:
             value=record.value,
             unit=record.unit,
             direction=record.direction,  # type: ignore[arg-type]
-            timestamp=datetime.fromisoformat(record.timestamp),
+            timestamp=self._parse_dt(record.timestamp),
             source=SignalSource(
                 source_id=record.source_id,
                 source_type=record.source_type,
                 ref=record.ref,
-                fetched_at=datetime.fromisoformat(record.fetched_at)
-                if record.fetched_at
-                else datetime.min,
+                fetched_at=self._parse_dt(record.fetched_at),
                 metadata=dict(record.metadata or {}),
             ),
             date_bucket=record.date_bucket,

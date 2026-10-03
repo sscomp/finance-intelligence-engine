@@ -282,8 +282,15 @@ class T86Adapter(SourceAdapter):
 
     @staticmethod
     def _parse_date(date_str: str) -> datetime:
+        # Timezone policy (Phase 6.1 Workstream E): timestamps are
+        # timezone-aware UTC internally. A bare date string (e.g. a
+        # date_bucket like "2026-07-08") denotes the UTC midnight
+        # instant — the same representation bridge/seed_signals.py
+        # writes ("...T00:00:00Z"). Without the .replace(tzinfo=utc)
+        # this returns a NAIVE datetime, which later collides with
+        # aware rows in SignalLoader's mixed-record sort.
         try:
-            return datetime.fromisoformat(date_str)
+            return datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
         except ValueError:
             return _utcnow()
 
