@@ -315,6 +315,41 @@ pg_ctl -D /tmp/fie-pg/pgdata -l /tmp/fie-pg/server.log \
 createdb -h /tmp/fie-pg -p 54329 -U fie fie_test
 ```
 
+### 服務邊界（Phase 6.5）
+
+Phase 6.5 在持久層抽象之上新增**transport-neutral 型別化服務邊界**
+（`phase3.service`）——未來 ChatGPT／其他 client 的唯一入口，全部**唯讀**：
+
+| 操作 | 說明 |
+|------|------|
+| `get_health` | readiness：backend family、counts、schema 版本 |
+| `get_latest_intelligence` | 各實體最新智慧摘要（含頭等 freshness / evidence refs / warnings） |
+| `get_entity_intelligence` | 單一實體完整智慧：score、payload、上游訊號、溯源 |
+| `get_evidence` | 沿 evidence graph 取得有限溯源（預設 50、上限 200） |
+| `get_freshness` | 新鮮度狀態：`FRESH / DEGRADED / STALE / UNAVAILABLE` |
+
+錯誤以穩定分類回報（`INVALID_REQUEST` / `NOT_FOUND` / `STALE_DATA` /
+`DATA_UNAVAILABLE` / `DEPENDENCY_UNAVAILABLE` / `INTERNAL_ERROR`），
+訊息經 URL/path 消毒；回應不含 DSN、SQL、表名、本機路徑或憑證。
+批次（排程計算）進入點獨立為 `phase3.service.batch.BatchWorker`。
+
+```bash
+# in-process 呼叫範例（與未來任何 transport 同一組 envelope）
+python3 - <<'PY'
+from phase3.service import (
+    DefaultIntelligenceService, dispatch, RequestContext,
+)
+service = DefaultIntelligenceService(open_store(resolve_spec()))  # 略去建置細節
+ctx = RequestContext(principal_id="synthetic-alpha", request_id="req-001")
+print(dispatch(service, "health", {}, ctx))
+PY
+```
+
+完整 tool 契約（`fie.health` / `fie.latest_intelligence` /
+`fie.entity_intelligence` / `fie.evidence` / `fie.freshness`，全部唯讀）：
+[docs/architecture/phase6-5/chatgpt-tool-contract.md](docs/architecture/phase6-5/chatgpt-tool-contract.md)。
+HTTP transport 刻意延後至 Phase 6.6+（ADR-010）。
+
 ### 執行評分 Pipeline
 
 ```bash
@@ -433,6 +468,18 @@ PYTHONPATH=. python -m unittest tests.phase3.test_pg_parity
 PG 測試目標 DSN 可用 `FIE_TEST_PG_DSN` 覆寫；預設指向本階段驗證用的
 trust-auth `/tmp` cluster（`postgresql://fie@/fie_contract?host=/tmp/fie-pg&port=54329`）。
 
+### 服務邊界契約測試 (Phase 6.5)
+
+```bash
+# 唯讀服務邊界契約（SQLite 為主, PG 腿需 disposable cluster, 附原因 skip）
+PYTHONPATH=. python -m unittest discover -s tests/phase3/service -t .
+```
+
+涵蓋工單 §17 的契約面：5 個操作的回應合約、錯誤分類、freshness 映射、
+opaque principal 傳播、讀取路徑純度（永不寫入、永不觸發攝入）、
+批次/互動分離、執行時設定優先序與機密消毒、可攜性審計（無開發機
+絕對路徑）、structured 請求日誌（§15）。
+
 ### 測試哲學
 
 - **確定性優先**：所有測試必須為確定性（deterministic），不依賴網路或時間
@@ -479,6 +526,8 @@ PHASE3B_ENABLED=1 python -m phase3.cli pipeline-run --date 2026-07-08 \
 - [FIE 架構總覽](docs/architecture/finance-intelligence-engine.md)
 - [資料供應鏈](docs/architecture/data-supply-chain.md)
 - [歷史資料治理](docs/architecture/historical-data-governance.md)
+- [Phase 6.5 ChatGPT Tool Contract](docs/architecture/phase6-5/chatgpt-tool-contract.md)
+- [Phase 6.5 Service Planes](docs/architecture/phase6-5/service-boundary-planes.md)
 
 ### 架構決策紀錄（ADR）
 
@@ -486,6 +535,12 @@ PHASE3B_ENABLED=1 python -m phase3.cli pipeline-run --date 2026-07-08 \
 - [ADR-002: Freshness/Staleness Metadata Guards](docs/adr/adr-002-freshness-staleness-guards.md)
 - [ADR-003: Historical Backfill Policy](docs/adr/adr-003-historical-backfill-policy.md)
 - [ADR-004: M8 Observation R3 Validation Semantics](docs/adr/adr-004-m8-r3-validation-semantics.md)
+- [ADR-005: Application Service Boundary（Phase 6.5）](docs/adr/adr-005-service-boundary.md)
+- [ADR-006: Interactive vs Batch Runtime（Phase 6.5）](docs/adr/adr-006-interactive-vs-batch-runtime.md)
+- [ADR-007: ChatGPT Tool Boundary（Phase 6.5）](docs/adr/adr-007-chatgpt-tool-boundary.md)
+- [ADR-008: Multi-User Data Boundary（Phase 6.5）](docs/adr/adr-008-multi-user-data-boundary.md)
+- [ADR-009: Cloud-Safe Runtime Configuration（Phase 6.5）](docs/adr/adr-009-runtime-configuration.md)
+- [ADR-010: Transport Decision（Phase 6.5）](docs/adr/adr-010-transport-decision.md)
 
 ### Phase 3 設計文件
 
