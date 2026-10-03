@@ -1,0 +1,53 @@
+# Finance Intelligence Engine (FIE) — project dependency baseline.
+#
+# Established in Phase 6.1 (portability/baseline recovery). Before this file
+# the repository declared no dependencies anywhere (see
+# FIE_PHASE6_0_..._AUDIT_REPORT.md §5); imports were identified by an
+# AST sweep before declaring anything here.
+#
+# Runtime dependencies (actual `import` sites):
+#   PyYAML   — phase3/config/loader.py, reports/registry.py (engine config)
+#   yfinance — macro_daily.py, company_monthly.py (legacy fetch scripts only;
+#              the phase3 engine and its signal adapters are import-safe and
+#              offline without it)
+# Test/dev dependencies:
+#   pytest   — optional test runner (suite is unittest-based and runnable via
+#              `python -m unittest discover`)
+#   pandas   — tests/phase3/test_fetch_range.py only (not needed at runtime)
+#
+# NOTE: the historical README instruction `pip install yfinance requests pyyaml`
+# listed `requests`, which is not imported anywhere in the codebase and is not
+# declared here.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "finance-intelligence-engine"
+version = "6.1.0"
+description = "FIE — deterministic investment intelligence engine (adapters, signals, scoring, evidence/research graph, portfolio shadow-run)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+    "PyYAML>=6,<8",
+    "yfinance>=0.2",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "pandas>=2,<4",
+]
+
+[project.scripts]
+# Additive convenience entrypoint; `python -m phase3.cli` remains the
+# documented invocation and keeps working either way.
+fie-cli = "phase3.cli:main"
+
+[tool.setuptools]
+packages.find = { include = ["phase3*", "reports*"] }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
