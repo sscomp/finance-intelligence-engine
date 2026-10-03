@@ -244,6 +244,14 @@ class TestAGM33MacroHistoryDbUnchanged(unittest.TestCase):
     """AG-M3-3: macro_history.db sha256 + mtime unchanged through test run."""
 
     def setUp(self):
+        # Phase 6.1: macro_history.db is the host's production history DB
+        # (git-ignored, per-host data). Absent from a portable checkout →
+        # skip explicitly instead of erroring; when present, the guard
+        # asserts byte-identity exactly as before.
+        if not _file_exists(MACRO_HISTORY_DB):
+            raise unittest.SkipTest(
+                "macro_history.db is host production data "
+                "(git-ignored; absent from a portable checkout)")
         self._before_sha = _sha256_file(MACRO_HISTORY_DB)
         self._before_stat = MACRO_HISTORY_DB.stat()
 
