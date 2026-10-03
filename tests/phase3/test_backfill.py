@@ -29,7 +29,7 @@ from pathlib import Path
 
 # Must import from phase3.backfill
 import sys
-sys.path.insert(0, "/home/ubuntu/macro-report")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from phase3.backfill import (
     BLOCKED_SOURCES,

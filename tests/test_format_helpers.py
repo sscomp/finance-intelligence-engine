@@ -28,7 +28,7 @@ PHASE2B_PLAN_AND_DIFF_PROPOSAL.md):
   Both must be kept as separate exports.
 
 How to run:
-  cd /home/ubuntu/macro-report
+  cd <repository-root>
   python3 tests/test_format_helpers.py         # direct stdlib runner
   python3 -m unittest tests.test_format_helpers -v   # unittest discovery
   python3 -m pytest tests/test_format_helpers.py     # pytest (if installed)

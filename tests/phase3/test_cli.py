@@ -3,7 +3,7 @@
 We invoke the CLI as a subprocess to verify the actual
 `python3 -m phase3.cli <subcmd>` user-facing flow (which is the
 form broken by the package-shadowing bug). Subprocess tests use
-the system Python in the macro-venv; no network, no live data.
+the current interpreter (sys.executable); no network, no live data.
 """
 from __future__ import annotations
 
@@ -13,13 +13,13 @@ import sys
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path("/home/ubuntu/macro-report")
-PYTHON = "/home/ubuntu/macro-venv/bin/python"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PYTHON = sys.executable
 
 ENV_BASE = {
     "PYTHONPATH": str(REPO_ROOT),
     "PATH": os.environ.get("PATH", ""),
-    "HOME": os.environ.get("HOME", "/home/ubuntu"),
+    "HOME": os.environ.get("HOME", str(REPO_ROOT)),
     "LANG": "en_US.UTF-8",
     "LC_ALL": "en_US.UTF-8",
 }

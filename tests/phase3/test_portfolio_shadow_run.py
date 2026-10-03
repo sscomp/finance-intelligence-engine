@@ -389,8 +389,11 @@ class TestPortfolioShadowRunAdditive(unittest.TestCase):
         # FIE UPDATE 2026-08-26: SHA updated from a67a99bd... to 5cb48bfc...
         # (additive --freshness-check flag on pipeline-run/pipeline-export,
         #  0 deletions — authorized T-1 freshness guard wiring).
+        # FIE Phase 6.1 UPDATE 2026-10-03: SHA updated from 5cb48bfc...
+        # to 3078349f88f5... (portability: example paths generalized in
+        # the cli.py docstring, 0 deletions — Phase 6.1 Workstream C).
         expected_post_m8_sha = (
-            "5cb48bfc2e72c29b7e3ee0829a440f2aa196f4c7fd18ac002f3fbe4254a125fb"
+            "3078349f88f5c29304a86a48c9cc9ef07f126e6254bb87e20e35ab02871c7924"
         )
         self.assertEqual(actual_sha, expected_post_m8_sha,
                          "cli.py SHA should match post-M8 baseline")

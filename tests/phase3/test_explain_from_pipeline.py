@@ -40,6 +40,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+_FIE_REPO_ROOT = str(Path(__file__).resolve().parents[2])
 from phase3.datamodel.graph import (
     EdgeType,
     GraphEdge,
@@ -61,7 +63,7 @@ from phase3.graph.explain_from_pipeline import (
 # ---------------------------------------------------------------------------
 
 
-_REPO = "/home/ubuntu/macro-report"
+_REPO = str(Path(__file__).resolve().parents[2])
 _PYTHONPATH_ENV = {**os.environ, "PYTHONPATH": _REPO}
 _BUILD_HARNESS = r'''
 import json
@@ -298,7 +300,7 @@ class CliIntegrationTests(unittest.TestCase):
     def _run(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable,
-             "/home/ubuntu/macro-report/phase3/cli.py",
+             _FIE_REPO_ROOT + "/phase3/cli.py",
              "explain-score", *args],
             capture_output=True, text=True,
             env=_PYTHONPATH_ENV, timeout=30,
@@ -503,7 +505,7 @@ class DirectNodeModeTests(unittest.TestCase):
     def test_explain_score_help_lists_pipeline_artifact(self) -> None:
         result = subprocess.run(
             [sys.executable,
-             "/home/ubuntu/macro-report/phase3/cli.py",
+             _FIE_REPO_ROOT + "/phase3/cli.py",
              "explain-score", "--help"],
             capture_output=True, text=True, env=_PYTHONPATH_ENV, timeout=15,
         )

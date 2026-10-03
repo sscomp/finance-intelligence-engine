@@ -16,11 +16,12 @@ import json
 import os
 import subprocess
 import sys
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
-REPO = Path("/home/ubuntu/macro-report")
+REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from phase3.bridge.seed_signals import (
@@ -34,9 +35,39 @@ from phase3.persistence.sqlite import SQLiteStore
 
 SOURCE_DB = str(REPO / "macro_history.db")
 INDUSTRY_CONFIG = str(REPO / "industry_config.json")
-VENV_PYTHON = "/home/ubuntu/macro-venv/bin/python3"
+VENV_PYTHON = sys.executable
 
 
+def _source_db_ready() -> bool:
+    """True when the host has a real production macro_history.db.
+
+    These bridge tests integrate with the operator's production history
+    DB (git-ignored, per-host data — absent from a portable checkout).
+    They skip explicitly when it is missing rather than failing, and
+    open it read-only so the check does not create an empty DB file.
+    """
+    if not os.path.exists(SOURCE_DB):
+        return False
+    conn = sqlite3.connect(f"file:{SOURCE_DB}?mode=ro", uri=True)
+    try:
+        names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    finally:
+        conn.close()
+    return {"macro_daily", "stock_monthly", "institutional_daily"} <= names
+
+
+_SKIP_PROD_DB = unittest.skipUnless(
+    _source_db_ready(),
+    "requires the host production macro_history.db (git-ignored data, "
+    "absent from a portable checkout)",
+)
+
+
+@_SKIP_PROD_DB
 class TestResolveAsOfDates(unittest.TestCase):
     """Test the deterministic freshness/as-of date resolution."""
 
@@ -81,6 +112,7 @@ class TestResolveAsOfDates(unittest.TestCase):
         self.assertEqual(r1, r2)
 
 
+@_SKIP_PROD_DB
 class TestBridgeSeeding(unittest.TestCase):
     """Test bridge seeding from macro_history.db."""
 
@@ -249,6 +281,7 @@ class TestBridgeSeeding(unittest.TestCase):
         store.close()
 
 
+@_SKIP_PROD_DB
 class TestPipelineExportWithSeedFromHistory(unittest.TestCase):
     """Test the --seed-from-history CLI integration."""
 
@@ -439,6 +472,7 @@ class TestPipelineExportWithSeedFromHistory(unittest.TestCase):
         self.assertIn("reserved", result.stderr.lower())
 
 
+@_SKIP_PROD_DB
 class TestEndToEndVerification(unittest.TestCase):
     """End-to-end verification showing real emitted score handles."""
 

@@ -1179,7 +1179,9 @@ class TestSafetyGuardAGM5_4_NoExternalFileModifications(unittest.TestCase):
         "phase3/portfolio/risk.py": "5f1e5ddab0b274254fdcb9f735cd4644da0ea2fa213073d38f5621b4ab96bb05",
         "phase3/portfolio/decision.py": "2bbcb209dd189ca1e76213b9fcea3015661fad13c333c1011c968a727d22679f",
         "phase3/portfolio/allocation.py": "9133f66d25342c0ccfbcdf2809de3388f1f1cc79fd26a8c9f952047c5a7a6e08",
-        "phase3/pipeline/scoring_pipeline.py": "5b778e00c99cec04c7d90965f291d70acada9507d5a99fb938f94fa03fb4dd59",
+        # Phase 6.1 UPDATE 2026-10-03: scoring_pipeline.py docstring citation
+        # generalized (portability) — SHA updated from 5b778e00... to b325b97eaae2...
+        "phase3/pipeline/scoring_pipeline.py": "b325b97eaae25be515b5a5aada35e28e530fa574836c714ba488108893a15e5a",
         "phase3/datamodel/scores.py": "cc934edd423b1cea8a51cd0554547546a5bc2a34bac169d0ba154332599a090c",
     }
 

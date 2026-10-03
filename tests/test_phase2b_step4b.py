@@ -21,7 +21,7 @@ touch the production metadata tree. They cover:
 Test isolation:
   - Each test gets its own tmp dir via setUp.
   - The store is configured to use the tmp dir, never the default
-    /home/ubuntu/macro-report/metadata.
+    <repository-root>/metadata.
   - A FakePlugin lives in this test module (same pattern as the
     Step 3+4A framework tests).
 """

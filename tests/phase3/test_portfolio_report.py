@@ -25,7 +25,7 @@ import unittest
 from pathlib import Path
 
 # Ensure PYTHONPATH includes the repo root.
-REPO_ROOT = Path("/home/ubuntu/macro-report")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 

@@ -37,7 +37,7 @@ from pathlib import Path
 # Paths
 # --------------------------------------------------------------------------- #
 
-REPO_ROOT = Path("/home/ubuntu/macro-report")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 ALLOCATION_PY = REPO_ROOT / "phase3" / "portfolio" / "allocation.py"
 DECISION_PY = REPO_ROOT / "phase3" / "portfolio" / "decision.py"
 DOMAIN_PY = REPO_ROOT / "phase3" / "portfolio" / "domain.py"
@@ -128,7 +128,7 @@ M2_M3_BASELINE = {
     "risk.py": "5f1e5ddab0b274254fdcb9f735cd4644da0ea2fa213073d38f5621b4ab96bb05",
     "test_portfolio_domain.py": "f72748113bda9b49cf072af19f8e1ed3d571e86a27c557bd0a12a5bdbabb6603",
     "test_portfolio_risk.py": "f955bc10dd8647a7ce85341582a0d7910c347beff146299fdefd996acefd32ed",
-    "test_portfolio_safety_guards.py": "6a0f05994a2ae898a6ae4f897d30c73190bbc91e5088d27960c60a83e038ed03",
+    "test_portfolio_safety_guards.py": "63ec1a58f6d784766d1c9b0febdbdb71af51ef17147467349066e27ad2a497c6",
 }
 
 # M4-S1 baseline SHAs (captured at M4-S1 commit 09c01f7; M4-S2 must not
@@ -155,6 +155,11 @@ M4_S1_BASELINE = {
 # FIE UPDATE 2026-08-26: cli.py is MODIFIED by freshness guard wiring
 # (additive --freshness-check flag on pipeline-run/pipeline-export).
 # SHA updated from a67a99bd... to 5cb48bfc... (additive, 0 deletions).
+# FIE Phase 6.1 UPDATE 2026-10-03: cli.py is MODIFIED by the portability
+# baseline recovery (docstring/example path generalization only — 0
+# semantic deletions per Workstream C). SHA updated from 5cb48bfc... to
+# 3078349f...; scoring_pipeline.py docstring citation generalized the
+# same way (5b778e00... to b325b97e...).
 M4_S2_BASELINE = {
     "decision.py": "2bbcb209dd189ca1e76213b9fcea3015661fad13c333c1011c968a727d22679f",
     "init.py": "bf19b5ea0fc01f574c374cefe48dd582da2d067ceb4db51f95e0da5a312278ff",
@@ -166,8 +171,8 @@ M4_S2_BASELINE = {
 PHASE3_BASELINE = {
     "phase3/__init__.py": "3020382849864e92f78ae38b2c9cbd0e48419e3120e76786f905d43a5eafaeaa",
     "phase3/api.py": "539d58838ff86088d7e71178fed3127065ead83c58786d8f62952d06a3cf50fe",
-    "phase3/cli.py": "5cb48bfc2e72c29b7e3ee0829a440f2aa196f4c7fd18ac002f3fbe4254a125fb",
-    "phase3/pipeline/scoring_pipeline.py": "5b778e00c99cec04c7d90965f291d70acada9507d5a99fb938f94fa03fb4dd59",
+    "phase3/cli.py": "3078349f88f5c29304a86a48c9cc9ef07f126e6254bb87e20e35ab02871c7924",
+    "phase3/pipeline/scoring_pipeline.py": "b325b97eaae25be515b5a5aada35e28e530fa574836c714ba488108893a15e5a",
     "phase3/pipeline/intelligence_pipeline.py": "025af0e538572fc056a73a9dc8ef2686f7518fd95723525693726f1da6fe5570",
     "phase3/datamodel/scores.py": "cc934edd423b1cea8a51cd0554547546a5bc2a34bac169d0ba154332599a090c",
 }

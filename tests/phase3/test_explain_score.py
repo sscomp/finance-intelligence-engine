@@ -34,7 +34,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from typing import Any
+
+_FIE_REPO_ROOT = str(Path(__file__).resolve().parents[2])
 
 from phase3.datamodel.graph import (
     EdgeType,
@@ -702,12 +705,12 @@ class ExplainScoreCLITests(unittest.TestCase):
         self, *args: str, env_extra: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess:
         env = os.environ.copy()
-        env["PYTHONPATH"] = "/home/ubuntu/macro-report"
+        env["PYTHONPATH"] = _FIE_REPO_ROOT
         if env_extra:
             env.update(env_extra)
         return subprocess.run(
             [sys.executable,
-             "/home/ubuntu/macro-report/phase3/cli.py",
+             _FIE_REPO_ROOT + "/phase3/cli.py",
              "explain-score", *args],
             capture_output=True, text=True, env=env, timeout=30,
         )
@@ -715,9 +718,9 @@ class ExplainScoreCLITests(unittest.TestCase):
     def test_help_lists_subcommand(self) -> None:
         result = subprocess.run(
             [sys.executable,
-             "/home/ubuntu/macro-report/phase3/cli.py", "--help"],
+             _FIE_REPO_ROOT + "/phase3/cli.py", "--help"],
             capture_output=True, text=True,
-            env={**os.environ, "PYTHONPATH": "/home/ubuntu/macro-report"},
+            env={**os.environ, "PYTHONPATH": _FIE_REPO_ROOT},
             timeout=15,
         )
         self.assertEqual(result.returncode, 0)

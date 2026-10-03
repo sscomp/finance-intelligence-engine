@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-REPO = Path("/home/ubuntu/macro-report")
+REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from phase3.bridge.seed_signals import seed_from_macro_history
@@ -26,6 +26,36 @@ from phase3.persistence.sqlite import SQLiteStore
 SOURCE_DB = str(REPO / "macro_history.db")
 
 
+def _source_db_ready() -> bool:
+    """True when the host has a real production macro_history.db.
+
+    These bridge tests integrate with the operator's production history
+    DB (git-ignored, per-host data — absent from a portable checkout).
+    They skip explicitly when it is missing rather than failing, and
+    open it read-only so the check does not create an empty DB file.
+    """
+    if not os.path.exists(SOURCE_DB):
+        return False
+    conn = sqlite3.connect(f"file:{SOURCE_DB}?mode=ro", uri=True)
+    try:
+        names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    finally:
+        conn.close()
+    return {"macro_daily", "stock_monthly", "institutional_daily"} <= names
+
+
+_SKIP_PROD_DB = unittest.skipUnless(
+    _source_db_ready(),
+    "requires the host production macro_history.db (git-ignored data, "
+    "absent from a portable checkout)",
+)
+
+
+@_SKIP_PROD_DB
 class TestBridgeSeedSignals(unittest.TestCase):
     """Verify the bridge correctly seeds Phase 3 signals from production data."""
 
@@ -85,7 +115,7 @@ class TestBridgeSeedSignals(unittest.TestCase):
         env = os.environ.copy()
         env["PYTHONPATH"] = str(REPO)
         cmd = [
-            "/home/ubuntu/macro-venv/bin/python3", "-m", "phase3.cli",
+            sys.executable, "-m", "phase3.cli",
             "pipeline-export",
             "--date", "2026-07-29",
             "--run-label", "bridge-test",

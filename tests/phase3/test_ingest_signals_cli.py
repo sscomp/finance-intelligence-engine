@@ -15,12 +15,13 @@ from __future__ import annotations
 import os
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path("/home/ubuntu/macro-report")
-PYTHON = "/home/ubuntu/macro-venv/bin/python"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PYTHON = sys.executable
 FIXTURES = REPO_ROOT / "tests" / "phase3" / "fixtures"
 
 
@@ -28,7 +29,7 @@ def _env(env_extra: dict | None = None) -> dict:
     env = {
         "PYTHONPATH": str(REPO_ROOT),
         "PATH": os.environ.get("PATH", ""),
-        "HOME": os.environ.get("HOME", "/home/ubuntu"),
+        "HOME": os.environ.get("HOME", str(REPO_ROOT)),
         "LANG": "en_US.UTF-8",
         "LC_ALL": "en_US.UTF-8",
     }

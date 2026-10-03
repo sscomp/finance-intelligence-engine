@@ -29,7 +29,7 @@ from pathlib import Path
 # Paths
 # --------------------------------------------------------------------------- #
 
-REPO_ROOT = Path("/home/ubuntu/macro-report")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 RISK_PY = REPO_ROOT / "phase3" / "portfolio" / "risk.py"
 DOMAIN_PY = REPO_ROOT / "phase3" / "portfolio" / "domain.py"
 INIT_PY = REPO_ROOT / "phase3" / "portfolio" / "__init__.py"

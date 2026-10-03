@@ -13,7 +13,7 @@ from phase3.persistence.sqlite import SQLiteStore
 from phase3.pipeline.signal_loader import SignalLoader, SignalLoaderFilters
 
 
-REPO_ROOT = Path("/home/ubuntu/macro-report")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _new_store() -> tuple[str, SQLiteStore]:

@@ -25,19 +25,52 @@ import sys
 import tempfile
 import copy
 
-# Add the scripts directory to path so we can import from m8_daily_observation
-SCRIPTS_DIR = os.path.expanduser("~/.hermes/scripts")
-sys.path.insert(0, SCRIPTS_DIR)
+# Phase 6.1 portability: the module under test (`m8_daily_observation`)
+# ships with the operator's external Hermes scheduler integration — it is
+# NOT vendored in this repository and never was (checked git history). It
+# is imported only when present; on machines without it the whole suite
+# skips with an explicit reason instead of erroring at import time (which
+# broke test collection on any non-Hermes checkout).
+HERMES_SCRIPTS_DIR = os.environ.get(
+    "FIE_HERMES_SCRIPTS_DIR", os.path.expanduser("~/.hermes/scripts"))
+if HERMES_SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, HERMES_SCRIPTS_DIR)
 
-from m8_daily_observation import (
-    capture_jobs_signature,
-    compare_jobs_signatures,
-    VOLATILE_JOB_FIELDS,
-)
+try:
+    from m8_daily_observation import (
+        capture_jobs_signature,
+        compare_jobs_signatures,
+        VOLATILE_JOB_FIELDS,
+    )
+    _HERMES_AVAILABLE = True
+    _HERMES_SKIP_REASON = ""
+except ImportError:
+    _HERMES_AVAILABLE = False
+    _HERMES_SKIP_REASON = (
+        "m8_daily_observation ships with the external Hermes scheduler "
+        f"integration (looked for it in {HERMES_SCRIPTS_DIR}); it is not "
+        "part of this repository, so this R3-validation suite has nothing "
+        "to import when Hermes is absent"
+    )
+
+
+class HermesR3TestCase(unittest.TestCase):
+    """Base class: skip the suite when Hermes is not present."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not _HERMES_AVAILABLE:
+            raise unittest.SkipTest(_HERMES_SKIP_REASON)
+        super().setUpClass()
 
 
 def make_test_jobs():
-    """Create a minimal jobs.json structure for testing."""
+    """Create a minimal jobs.json structure for testing.
+
+    Fixture values (Phase 6.1 Workstream F): the deliver/chat and workdir
+    values are placeholders — the production chat IDs and operator home
+    directory are personal data and must not live in tracked test code.
+    """
     return {
         "updated_at": "2026-08-18T22:00:00+08:00",
         "jobs": [
@@ -51,8 +84,8 @@ def make_test_jobs():
                 "prompt": "Generate morning brief",
                 "model": "gpt-4",
                 "provider": "openai",
-                "deliver": "telegram:5132341473",
-                "workdir": "/home/ubuntu",
+                "deliver": "telegram:1000000001",
+                "workdir": "/srv/app",
                 "created_at": "2026-05-27T01:23:38+08:00",
                 # Volatile fields
                 "last_run_at": "2026-08-18T08:30:05+08:00",
@@ -97,7 +130,7 @@ def write_jobs(tmpdir, data):
     return path
 
 
-class TestR3NoChange(unittest.TestCase):
+class TestR3NoChange(HermesR3TestCase):
     """Test case 1: No jobs.json change => PASS."""
 
     def test_identical_signatures(self):
@@ -111,7 +144,7 @@ class TestR3NoChange(unittest.TestCase):
             self.assertIn("No semantic changes", changes)
 
 
-class TestR3VolatileOnlyChange(unittest.TestCase):
+class TestR3VolatileOnlyChange(HermesR3TestCase):
     """Test case 2: Only allowed volatile/runtime fields change => PASS."""
 
     def test_volatile_field_changes_pass(self):
@@ -165,7 +198,7 @@ class TestR3VolatileOnlyChange(unittest.TestCase):
             self.assertTrue(safe, f"Expected PASS but got: {changes}")
 
 
-class TestR3UnrelatedJobMetadataChange(unittest.TestCase):
+class TestR3UnrelatedJobMetadataChange(HermesR3TestCase):
     """Test case 3: Unrelated job runtime metadata changes => PASS."""
 
     def test_other_job_volatile_changes(self):
@@ -189,7 +222,7 @@ class TestR3UnrelatedJobMetadataChange(unittest.TestCase):
             self.assertTrue(safe, f"Expected PASS but got: {changes}")
 
 
-class TestR3SemanticMutationFails(unittest.TestCase):
+class TestR3SemanticMutationFails(HermesR3TestCase):
     """Test case 4: Semantic/config field mutation => FAIL."""
 
     def test_name_change_fails(self):
@@ -254,7 +287,7 @@ class TestR3SemanticMutationFails(unittest.TestCase):
             self.assertFalse(safe, "Expected FAIL for provider change")
 
 
-class TestR3JobAdded(unittest.TestCase):
+class TestR3JobAdded(HermesR3TestCase):
     """Test case 5: Job added => FAIL."""
 
     def test_job_added_fails(self):
@@ -279,7 +312,7 @@ class TestR3JobAdded(unittest.TestCase):
             self.assertIn("added", changes.lower())
 
 
-class TestR3JobDeleted(unittest.TestCase):
+class TestR3JobDeleted(HermesR3TestCase):
     """Test case 6: Job deleted => FAIL."""
 
     def test_job_deleted_fails(self):
@@ -299,7 +332,7 @@ class TestR3JobDeleted(unittest.TestCase):
             self.assertIn("deleted", changes.lower())
 
 
-class TestR3EnableDisableMutation(unittest.TestCase):
+class TestR3EnableDisableMutation(HermesR3TestCase):
     """Test case 7: Enable/disable mutation => FAIL."""
 
     def test_disable_job_fails(self):
@@ -336,7 +369,7 @@ class TestR3EnableDisableMutation(unittest.TestCase):
             self.assertIn("enabled", changes)
 
 
-class TestR3ScheduleMutation(unittest.TestCase):
+class TestR3ScheduleMutation(HermesR3TestCase):
     """Test case 8: Schedule mutation => FAIL."""
 
     def test_schedule_change_fails(self):
@@ -356,7 +389,7 @@ class TestR3ScheduleMutation(unittest.TestCase):
             self.assertIn("schedule", changes)
 
 
-class TestR3ScriptDeliveryConfigMutation(unittest.TestCase):
+class TestR3ScriptDeliveryConfigMutation(HermesR3TestCase):
     """Test case 9: Script/delivery/config mutation => FAIL."""
 
     def test_script_change_fails(self):
@@ -424,7 +457,7 @@ class TestR3ScriptDeliveryConfigMutation(unittest.TestCase):
             self.assertIn("no_agent", changes)
 
 
-class TestR3MalformedUnreadable(unittest.TestCase):
+class TestR3MalformedUnreadable(HermesR3TestCase):
     """Test case 10: Malformed/unreadable jobs state => fail safely."""
 
     def test_malformed_json_fails(self):
@@ -477,7 +510,7 @@ class TestR3MalformedUnreadable(unittest.TestCase):
             self.assertIsNone(sig)
 
 
-class TestR3RealJobsJson(unittest.TestCase):
+class TestR3RealJobsJson(HermesR3TestCase):
     """Integration test against the real jobs.json file."""
 
     REAL_PATH = os.path.expanduser("~/.hermes/cron/jobs.json")

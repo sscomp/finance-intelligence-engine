@@ -23,7 +23,7 @@ from phase3.signals.adapters import (
     FixtureAdapter, MacroAdapter, RSSAdapter, T86Adapter, YFinanceAdapter,
 )
 
-REPO_ROOT = Path("/home/ubuntu/macro-report")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "tests" / "phase3" / "fixtures"
 
 

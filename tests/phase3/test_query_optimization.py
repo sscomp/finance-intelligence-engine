@@ -57,7 +57,7 @@ from phase3.graph.optimization import (
 from phase3.graph.sqlite_store import SQLiteGraphStore
 
 
-REPO_ROOT = Path("/home/ubuntu/macro-report")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 # Sentinel cleanup (Phase 4 Task 3A): the previous version hardcoded
 # MACRO_HISTORY_HASH = "828ce117...". The 08:30 cron legitimately
 # mutates macro_history.db, so a fixed-sentinel assertion breaks

@@ -47,7 +47,7 @@ from phase3.pipeline.intelligence_pipeline import (
 from phase3.pipeline.recovery import RunState
 from phase3.pipeline.reporting import ReportArtifact, ReportConfig
 
-REPO_ROOT = Path("/home/ubuntu/macro-report")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 # Sentinel cleanup (Phase 4 Task 3A): the previous version hardcoded
 # MACRO_HISTORY_HASH = "828ce117...". The 08:30 cron legitimately
 # mutates macro_history.db, so a fixed-sentinel assertion breaks

@@ -31,7 +31,7 @@ from phase3.datamodel import (
 )
 
 
-REPO_ROOT = Path("/home/ubuntu/macro-report")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 REAL_CONFIG_ROOT = REPO_ROOT / "config" / "phase3"
 
 

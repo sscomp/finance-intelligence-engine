@@ -15,14 +15,15 @@ import hashlib
 import os
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from phase3.persistence.sqlite import FORBIDDEN_DB_NAME
 
-REPO_ROOT = Path("/home/ubuntu/macro-report")
-PYTHON = "/home/ubuntu/macro-venv/bin/python"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PYTHON = sys.executable
 
 
 class NoNetworkOnImportTests(unittest.TestCase):

@@ -10,7 +10,7 @@ Verifies that:
 6. Values may be defaults (0.0) due to empty SignalRepository — that is expected
 
 Usage:
-    PYTHONPATH=/home/ubuntu/macro-report python3 tests/test_mvr_wrapper_coverage.py
+    PYTHONPATH=<repository-root> python3 tests/test_mvr_wrapper_coverage.py
 """
 import json
 import os
@@ -20,8 +20,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-REPO = Path("/home/ubuntu/macro-report")
-VENV_PYTHON = "/home/ubuntu/macro-venv/bin/python3"
+REPO = Path(__file__).resolve().parents[1]
+VENV_PYTHON = sys.executable
 TW50_CONFIG = REPO / "taiwan50_config.json"
 INDUSTRY_CONFIG = REPO / "industry_config.json"
 

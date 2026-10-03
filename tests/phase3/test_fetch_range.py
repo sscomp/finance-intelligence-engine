@@ -15,13 +15,14 @@ All tests use mocks/fixtures — no network calls, no production DB access.
 """
 import sys
 import os
+from pathlib import Path
 import json
 import tempfile
 import sqlite3
 from datetime import date, timedelta
 from unittest import TestCase, mock
 
-sys.path.insert(0, "/home/ubuntu/macro-report")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from phase3.backfill import (
     SUPPORTED_SOURCES,
@@ -463,7 +464,7 @@ class TestBackfillIntegration(TestCase):
         with self.assertRaises(ValueError):
             execute_backfill(
                 source_db="/tmp/fake.db",
-                target_db="/home/ubuntu/macro-report/macro_history.db",
+                target_db=str(Path(__file__).resolve().parents[2] / "macro_history.db"),
                 source_class=SOURCE_MACRO_DAILY,
                 start_date="2026-01-05",
                 end_date="2026-01-06",
