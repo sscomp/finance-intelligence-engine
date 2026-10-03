@@ -32,7 +32,11 @@ from phase3.freshness import (
     DATA_CLASS_MACRO,
     classify_freshness,
 )
-from phase3.service.errors import ServiceError, ServiceErrorCode
+from phase3.service.errors import (
+    ServiceError,
+    ServiceErrorCode,
+    sanitize_for_error,
+)
 from phase3.service.timeutil import today_utc, utc_now_iso
 
 __all__ = [
@@ -98,7 +102,7 @@ def freshness_for(
         raise ServiceError(
             ServiceErrorCode.DEPENDENCY_UNAVAILABLE,
             "signal observations are not readable",
-            {"reason": str(exc)},
+            {"reason": sanitize_for_error(str(exc))},
         ) from exc
 
     as_of_date = as_of or today_utc()

@@ -35,6 +35,21 @@ _DB_URL_RE = re.compile(
     r"\S*://\S+",  # any scheme://... string (credentials live in DSNs/URLs)
 )
 _PATH_RE = re.compile(r"(?:[\w@.-]*/)?[\w@-]*(?:/(?:[\w./@-]+))+", re.ASCII)
+# Phase 6.6R1 (DEFECT-A): internal implementation detail that external
+# consumers must never see — persistence exception reprs, SQL engine
+# diagnostics and raw traceback banners. Applied in order; everything
+# maps to the same neutral marker as DSNs/paths.
+_INTERNAL_DETAIL_RES = (
+    # dotted module/exception reprs ("sqlite3.OperationalError",
+    # "psycopg.errors.UndefinedTable")
+    re.compile(r"\b(?:sqlite3?|psycopg\d?|pg8000)\b(?:\.\w+)+"),
+    # exception class names ("OperationalError", "ValueError", …)
+    re.compile(r"\b[A-Za-z_]\w*(?:Error|Exception)\b"),
+    # SQL engine diagnostics ("no such table: score_snapshot", …)
+    re.compile(r"(?i)\bno such (?:table|column|function)\b[^\n]*"),
+    # raw traceback banners
+    re.compile(r"Traceback \(most recent call last\)"),
+)
 
 
 class ServiceErrorCode(str, Enum):
@@ -52,12 +67,15 @@ def sanitize_for_error(text: str) -> str:
     """Strip transport/secret-bearing fragments from error text.
 
     Error responses must never carry DSNs/URLs (which may embed
-    credentials) or host filesystem paths (work order §14). Both
-    patterns are replaced by a neutral marker regardless of content
-    — sanitization errs on the side of removing a benign string
-    rather than leaking a secret-bearing one.
+    credentials), host filesystem paths (work order §14), or internal
+    persistence/exception detail (Phase 6.6R1 DEFECT-A). All patterns
+    are replaced by a neutral marker regardless of content —
+    sanitization errs on the side of removing a benign string rather
+    than leaking a secret-bearing one.
     """
     text = _DB_URL_RE.sub("<redacted>", text)
+    for pattern in _INTERNAL_DETAIL_RES:
+        text = pattern.sub("<redacted>", text)
     return _PATH_RE.sub("<redacted>", text)
 
 

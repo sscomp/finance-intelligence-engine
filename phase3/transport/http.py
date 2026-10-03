@@ -184,14 +184,7 @@ class FIEReferenceRuntime:
 
 
 def _json(body: bytes, status: int, request_id: str) -> tuple[bytes, int, dict[str, str]]:
-    return (
-        body,
-        status,
-        {
-            "Content-Type": "application/json; charset=utf-8",
-            "X-Request-Id": request_id,
-        },
-    )
+    return body, status, {"X-Request-Id": request_id}
 
 
 class _TransportHandler(BaseHTTPRequestHandler):
@@ -213,10 +206,17 @@ class _TransportHandler(BaseHTTPRequestHandler):
         try:
             body, status, headers = self.handle_get()
         except Exception as exc:  # noqa: BLE001 - transport must never leak stacks
+            # (6.6R1) request-ID consistency: the fallback path used to
+            # send the literal header "unassigned" with no matching body
+            # field; use the same canonical request-id derivation as the
+            # auth-failure path so header == body.request_id.
             self.logger.exception("unhandled transport failure")  # server log only
+            request_id = _request_id_from_headers(self.headers)
             envelope = {
                 "schema_version": _schema_version(),
                 "kind": "transport",
+                "request_id": request_id,
+                "principal_id": "",
                 "status": "error",
                 "error": {
                     "code": "INTERNAL_ERROR",
@@ -225,7 +225,7 @@ class _TransportHandler(BaseHTTPRequestHandler):
                 "payload": None,
             }
             data = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
-            body, status, headers = _json(data, 500, "unassigned")
+            body, status, headers = _json(data, 500, request_id)
         self._send(body, status, headers, started)
 
     def do_HEAD(self) -> None:  # noqa: N802
@@ -239,11 +239,17 @@ class _TransportHandler(BaseHTTPRequestHandler):
     do_DELETE = do_POST
 
     def _reject_non_get(self) -> None:
+        # (6.6R1) request-ID consistency: the 405 envelope now carries
+        # the same request_id / principal_id shape as every other
+        # transport error, and the header echoes the body field.
+        request_id = uuid.uuid4().hex
         self._send(
             json.dumps(
                 {
                     "schema_version": _schema_version(),
                     "kind": "transport",
+                    "request_id": request_id,
+                    "principal_id": "",
                     "status": "error",
                     "error": {
                         "code": "INVALID_REQUEST",
@@ -255,7 +261,7 @@ class _TransportHandler(BaseHTTPRequestHandler):
                 ensure_ascii=False,
             ).encode("utf-8"),
             405,
-            {"Allow": "GET, HEAD", "X-Request-Id": uuid.uuid4().hex},
+            {"Allow": "GET, HEAD", "X-Request-Id": request_id},
             time.perf_counter(),
         )
 
@@ -274,6 +280,7 @@ class _TransportHandler(BaseHTTPRequestHandler):
                 "schema_version": _schema_version(),
                 "kind": "transport",
                 "request_id": request_id,
+                "principal_id": "",
                 "status": "error",
                 "error": ServiceError(
                     ServiceErrorCode.INVALID_REQUEST, "no such route"
@@ -391,6 +398,11 @@ class _TransportHandler(BaseHTTPRequestHandler):
     ) -> None:
         try:
             self.send_response(status)
+            # (6.6R1 DEFECT-B) every response body is a JSON envelope —
+            # success and error alike — so the contract-declared
+            # Content-Type belongs here, in the one shared response
+            # writer, not on individual call sites.
+            headers.setdefault("Content-Type", "application/json; charset=utf-8")
             for key, value in headers.items():
                 self.send_header(key, value)
             self.send_header("Content-Length", str(len(body)))

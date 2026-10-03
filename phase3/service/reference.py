@@ -24,15 +24,15 @@ Envelope shape (work order §5):
 
 Errors are the stable taxonomy mapped through
 :class:`~phase3.service.errors.ServiceError`; a non-ServiceError
-exception becomes INTERNAL_ERROR with no stack trace, no
-environment variables and no paths (sanitized by ServiceError).
+exception becomes INTERNAL_ERROR with the stable generic message —
+full diagnostics stay in server-side logging only (Phase 6.6R1
+DEFECT-A repair).
 """
 from __future__ import annotations
 
 import json
 import logging
 import time
-import traceback
 from typing import Any, Callable
 
 from phase3.service import contracts as C
@@ -97,10 +97,17 @@ def dispatch(
         except ServiceError as exc:
             envelope = error_envelope(exc, operation=operation, ctx=ctx)
         except Exception as exc:  # noqa: BLE001 - boundary must not leak stacks
-            # exception type/message only — never arguments, locals or envs
-            trace = "".join(traceback.format_exception_only(type(exc), exc))
+            # (6.6R1 DEFECT-A) the exception repr used to become the
+            # client-visible message; full diagnostics now stay in
+            # server-side logging and the envelope carries the stable
+            # generic message only — never arguments, locals or envs.
+            REQUEST_LOGGER.exception(
+                "service internal failure: operation=%s", operation
+            )
             envelope = error_envelope(
-                ServiceError(ServiceErrorCode.INTERNAL_ERROR, trace),
+                ServiceError(
+                    ServiceErrorCode.INTERNAL_ERROR, "internal service failure"
+                ),
                 operation=operation,
                 ctx=ctx,
             )
