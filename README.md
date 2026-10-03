@@ -211,6 +211,7 @@ M8 是 Phase 5 路線圖的營運驗收里程碑，要求連續 7 天執行 `por
 
 - Python 3.11+
 - SQLite 3（系統內建）
+- （選用）PostgreSQL 後端 parity 測試：`pip install -e ".[postgres]"` 與一個 disposable PG cluster
 - 網路連線（yfinance API、TWSE API、RSS feeds）
 
 ### 設定步驟（Phase 6.1 之後：宣告式相依 + 可移植路徑）
@@ -244,11 +245,16 @@ python -m phase3.cli --help
 > | `FIE_CONFIG_DIR` | 設定目錄 | 專案根 |
 > | `FIE_ARTIFACT_DIR` | 報告 artifact 輸出 | `<專案根>/metadata/reports/artifacts` |
 > | `FIE_DB_PATH` | 歷史資料庫 `macro_history.db` 位置 | `<FIE_DATA_DIR>/macro_history.db` |
+> | `FIE_DATABASE_URL` | Phase 3B `intelligence.db` 持久層後端指定（SQLite 路徑或 `postgres://` DSN） | 未設定 → SQLite `phase3/data/intelligence.db` |
 > | `FIE_PYTHON` | wrapper 使用的直譯器 | `python3` |
 > | `FIE_TELEGRAM_CHAT_ID` / `FIE_TELEGRAM_SECONDARY_CHAT_ID` | 派送 chat ID（個人資料，不落盤） | 無 |
 >
 > Phase 3B store (`intelligence.db`) 預設仍為 `phase3/data/intelligence.db`，可用
-> 各 pipeline 子命令的 `--db-path` 覆寫。
+> 各 pipeline 子命令的 `--db-path` 覆寫。Phase 6.3 起的後端選擇與優先序：
+> **明確引數 > `FIE_DATABASE_URL` > SQLite 預設路徑**。`postgres://`／
+> `postgresql://` 開頭開啟 PostgreSQL 後端（本階段僅限 disposable/synthetic
+> parity，見下文〈持久層後端〉；DSN 內含密碼時所有輸出一律遮罩，嚴禁將
+> 含密碼 DSN 落入 Git 或日誌）。
 
 ---
 
@@ -262,6 +268,51 @@ python -m phase3.cli init-db --force
 
 # 指定自訂路徑
 python -m phase3.cli init-db --db-path /tmp/my-intelligence.db --force
+
+# 指定 PostgreSQL（disposable/synthetic；見下節）
+python -m phase3.cli init-db --db-path "postgresql://fie@/fie_test?host=/tmp/fie-pg&port=54329" --force
+```
+
+### 持久層後端 (Phase 6.3)
+
+Phase 3B 的持久層在 Phase 6.3 抽象為雙後端：**SQLite 為預設並完整保留**；
+**PostgreSQL 僅作為 disposable/synthetic parity 後端**（驗證 schema 與 SQL
+方言可攜性；本階段不做 production migration／cloud provisioning）。兩個
+後端共用同一份 repository SQL（`%s` 佔位符）、同一組 migration 版本
+（v1 schema 雙方言孿生：`schema_v1` / `schema_pg`）、同一契約測試
+（`tests/phase3/persistence/test_backend_contract.py`）與確定性 pipeline
+parity 測試（`tests/phase3/test_pg_parity.py`）。
+
+後端指定方式（優先序：明確引數 > `FIE_DATABASE_URL` > SQLite 預設）：
+
+```bash
+# 方式一：--db-path 明確引數（上述 init-db / pipeline-run 等）
+# 方式二：環境變數
+export FIE_DATABASE_URL="postgresql://user:password@host:5432/db"   # 不得含真實密碼入 Git/日誌
+export FIE_DATABASE_URL="sqlite://phase3/data/intelligence.db"      # 等同預設
+```
+
+PostgreSQL 需要 optional extra：`pip install -e ".[postgres]"`（psycopg 3）。
+**僅在 disposable 資料庫上使用**——schema `score_snapshot` 為 append-only
+（trigger 強制），重置採 DROP 全表後重放 migration，切勿指向任何共
+用／生產資料庫：
+
+```bash
+# Docker 一行式（有 docker 的主機）
+docker run -d --rm --name fie-pg -e POSTGRES_USER=fie -e POSTGRES_PASSWORD=fie \
+    -e POSTGRES_DB=fie_test -p 54329:5432 postgres:18
+
+#  portable binaries（無 docker／無 root 主機；本階段驗證路徑）
+#   1) 下載 postgresql-18.6 portable tarball（記錄 sha256 後解壓至 /tmp/fie-pg）
+#   2) initdb 若報 libxml2 缺漏：建 /tmp/fie-pg/compat 目錄，
+#      將 libxml2.so.2 symlink 指向主機的 libxml2（本主機為 libxml2.so.16），
+#      以下指令皆帶 LD_LIBRARY_PATH=/tmp/fie-pg/compat
+#   3) 使用者層 cluster（trust auth、/tmp socket、非常規埠）：
+export PATH="/tmp/fie-pg/postgresql-18.6.0-x86_64-unknown-linux-gnu/bin:$PATH"
+initdb -D /tmp/fie-pg/pgdata -U fie --auth=trust
+pg_ctl -D /tmp/fie-pg/pgdata -l /tmp/fie-pg/server.log \
+    -o "-p 54329 -k /tmp/fie-pg" start
+createdb -h /tmp/fie-pg -p 54329 -U fie fie_test
 ```
 
 ### 執行評分 Pipeline
@@ -366,6 +417,21 @@ PYTHONPATH=. python -m unittest discover -s tests --top-level-dir=.
 PYTHONPATH=. python -m unittest tests.phase3.test_scorers
 PYTHONPATH=. python -m unittest tests.phase3.test_portfolio_allocation
 ```
+
+### 持久層契約與後端 parity 測試 (Phase 6.3)
+
+```bash
+# 後端契約測試：同一組斷言在 SQLite 與 disposable PostgreSQL 上各跑一次
+#   （無 psycopg 或無 disposable cluster 時,PG 腿會附原因 skip，不會失敗）
+PYTHONPATH=. python -m unittest tests.phase3.persistence.test_backend_contract
+
+# 確定性 pipeline parity：SQLite vs PostgreSQL，同 fixture → 同 domain 內容
+#   （run_id／wall-clock 時間戳為 per-run 揮發欄位，比對前正規化剔除）
+PYTHONPATH=. python -m unittest tests.phase3.test_pg_parity
+```
+
+PG 測試目標 DSN 可用 `FIE_TEST_PG_DSN` 覆寫；預設指向本階段驗證用的
+trust-auth `/tmp` cluster（`postgresql://fie@/fie_contract?host=/tmp/fie-pg&port=54329`）。
 
 ### 測試哲學
 
