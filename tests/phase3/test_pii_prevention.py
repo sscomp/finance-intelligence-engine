@@ -45,6 +45,37 @@ R3 hardening semantics (each replaces an R2 bypass):
   including newlines) and optional quotes/colon-or-equals/colon-like
   separators is flagged, whatever line the value sits on.
 
+R5 fail-closed scan-completeness contract (defect R4-SEC-01):
+
+> **SCAN COMPLETE + ZERO UNAPPROVED PII = PASS**
+> **SCAN INCOMPLETE / READ ERROR / CLASSIFICATION ERROR = FAIL CLOSED**
+
+An inability to *completely* scan an in-scope file was previously
+collapsed into the same empty-findings result as a clean scan
+(``collect_findings`` used ``except OSError: continue``), so an
+enumerated-but-unreadable file was accepted as clean. This module now
+distinguishes three explicit scan states:
+
+* ``CLEAN`` — every in-scope file scanned, no unapproved match;
+* ``FINDINGS_PRESENT`` — scanned completely, unapproved match(es);
+* ``SCAN_INCOMPLETE`` — at least one in-scope file could not be
+  conclusively scanned (read/open ``OSError``, strict-UTF-8 decode
+  failure, or an internal classification error); the gate **fails
+  closed**. An empty findings collection is NOT proof of success.
+
+* **Decode contract (no error-driven silence).** Files are decoded
+  strictly as UTF-8; a decode failure is a scan-completeness failure
+  (``PII_SCAN_DECODE_ERROR``), not a silent content-masking skip.
+  There is deliberately NO errors-``replace`` fallback and no
+  extension-based binary exclusion: any in-scope file whose bytes
+  this contract cannot decode fails the gate deterministically. The
+  tracked tree is required to be pure UTF-8 test text.
+* **Reason codes** (safe, machine-readable; no file contents or
+  matched values are ever dumped):
+  ``PII_SCAN_READ_ERROR`` / ``PII_SCAN_DECODE_ERROR`` /
+  ``PII_SCAN_INTERNAL_ERROR``; overall incomplete state
+  ``PII_SCAN_INCOMPLETE`` with ``gate_result=FAIL``.
+
 Documented, narrow exemptions (kept in repo, reviewable, with reasons):
 
 * message-id left context: numbers directly preceded by a *message id*
@@ -77,6 +108,7 @@ import tempfile
 import unittest
 from bisect import bisect_right
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -275,26 +307,107 @@ def _scan_text(text: str) -> list[tuple[int, str, str]]:
     return unique
 
 
-def collect_findings(files: list[Path]) -> list[dict[str, object]]:
-    """Scan the given files; return redacted findings records."""
-    findings: list[dict[str, object]] = []
+class PIIScanIncompleteError(RuntimeError):
+    """Fail-closed signal: an in-scope file could not be conclusively
+    scanned. The overall gate result is FAIL — never a clean-equivalent."""
+
+
+def _safe_path(path: Path) -> str:
+    """Repository-relative path when possible (no file contents)."""
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def collect_scan_report(files: list[Path]) -> dict[str, object]:
+    """Scan the given files and return the fail-closed scan report.
+
+    States (work order §5):
+
+    * ``state``: ``SCAN_COMPLETE`` or ``SCAN_INCOMPLETE``;
+    * ``scan_errors``: per-file failure records with safe path, reason
+      code and exception class (never file contents or matched values);
+    * ``findings``: unapproved redacted findings (allowlist filtered);
+    * ``gate_result``: ``PASS`` only when scanning completed AND there
+      are zero unapproved findings — any in-scope file that cannot be
+      conclusively scanned forces ``FAIL``.
+    """
+    raw: list[dict[str, object]] = []
+    errors: list[dict[str, str]] = []
     for path in files:
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+            text = path.read_text(encoding="utf-8")  # strict: F4 fail closed
+        except UnicodeDecodeError as exc:  # F4 — decode contract failure
+            errors.append({
+                "path": _safe_path(path),
+                "reason_code": "PII_SCAN_DECODE_ERROR",
+                "error_class": type(exc).__name__,
+            })
             continue
-        for lineno, category, fp in _scan_text(text):
-            findings.append({
-                "path": str(path),
+        except OSError as exc:  # F1/F2/F3 — incompleteness, not cleanliness
+            errors.append({
+                "path": _safe_path(path),
+                "reason_code": "PII_SCAN_READ_ERROR",
+                "error_class": type(exc).__name__,
+            })
+            continue
+        try:
+            found_rows = _scan_text(text)  # F5 — internal failure fails closed
+        except Exception as exc:  # noqa: BLE001 — converted to FAIL, never passed
+            errors.append({
+                "path": _safe_path(path),
+                "reason_code": "PII_SCAN_INTERNAL_ERROR",
+                "error_class": type(exc).__name__,
+            })
+            continue
+        for lineno, category, fp in found_rows:
+            raw.append({
+                "path": _safe_path(path),
                 "line": lineno,
                 "category": category,
                 "fingerprint": fp,
                 "raw_value_recorded": False,
             })
     allowed = {entry["fingerprint_prefix"] for entry in ALLOWLIST}
-    return [f for f in findings
-            if not any(f["fingerprint"] == fp or f["fingerprint"].startswith(fp)
-                       for fp in allowed)]
+    findings = [f for f in raw
+                if not any(f["fingerprint"] == fp or f["fingerprint"].startswith(fp)
+                           for fp in allowed)]
+    incomplete = bool(errors)
+    return {
+        "state": "SCAN_INCOMPLETE" if incomplete else "SCAN_COMPLETE",
+        "scan_complete": not incomplete,
+        "scan_errors": errors,
+        "findings": findings,
+        "raw_match_count": len(raw),
+        "allowlisted_count": len(raw) - len(findings),
+        "unapproved_pii_count": len(findings),
+        "gate_result": "FAIL" if (incomplete or findings) else "PASS",
+    }
+
+
+def _incomplete_message(report: dict[str, object]) -> str:
+    """Safe structured failure text — reason codes + error classes only."""
+    lines = ["PII_SCAN_INCOMPLETE: gate_result=FAIL "
+             f"unscanned_files={len(report['scan_errors'])}"]
+    for err in report["scan_errors"]:  # type: ignore[union-attr]
+        lines.append(f"  reason_code={err['reason_code']} "
+                     f"error_class={err['error_class']} path={err['path']}")
+    return "\n".join(lines)
+
+
+def collect_findings(files: list[Path]) -> list[dict[str, object]]:
+    """Scan the given files; return redacted findings records.
+
+    Fail closed (R4-SEC-01 repair): if ANY in-scope file cannot be
+    conclusively scanned, raises :class:`PIIScanIncompleteError` instead
+    of returning a clean-equivalent empty result. Callers that need the
+    distinction as data should use :func:`collect_scan_report`.
+    """
+    report = collect_scan_report(files)
+    if not report["scan_complete"]:
+        raise PIIScanIncompleteError(_incomplete_message(report))
+    return report["findings"]  # type: ignore[return-value]
 
 
 def _tracked_files() -> list[Path]:
@@ -627,13 +740,234 @@ class TestAdversarialMatrix(unittest.TestCase):
         self.assertIn("telegram_chat_id", cats)
 
 
+class TestR5FailClosedScanCompleteness(unittest.TestCase):
+    """Permanent regression suite for defect R4-SEC-01 (work order §8).
+
+    Baseline behavior (repair SHA 772da949): any read failure on an
+    enumerated in-scope file was swallowed with
+    ``except OSError: continue`` and the gate returned the SAME
+    zero-findings result as a clean scan — a prohibited payload was
+    accepted as clean whenever its carrier file could not be read.
+
+    Every test here must FAIL on the baseline implementation and PASS
+    only after the fail-closed repair. All fixtures are synthetic,
+    runtime-assembled payloads; no real PII, no secrets.
+    """
+
+    def _payload(self) -> str:
+        # synthetic prohibited payload (chat id + attacker-style email),
+        # detectable by the positive control
+        return ("deliver: \"chat" + "_id\": " + SYNTH_CHAT + "\npage "
+                + SYNTH_CONTACT_LOCAL + "@" + SYNTH_RELAY_DOMAIN + "\n")
+
+    def _readable_finding(self, fixture: Path) -> dict[str, object]:
+        # positive control: the fixture MUST be scanned & detected now
+        report = collect_scan_report([fixture])
+        self.assertIs(report["scan_complete"], True)
+        self.assertGreaterEqual(report["unapproved_pii_count"], 1)  # type: ignore[operator]
+        self.assertEqual("FAIL", report["gate_result"])
+        return report  # type: ignore[return-value]
+
+    def _assert_report_fail_closed(self, fixture: Path,
+                                   report: dict[str, object],
+                                   reason_code: str,
+                                   error_class: str) -> None:
+        """Report-level fail-closed assertions (structure + semantics)."""
+        self.assertFalse(
+            report["scan_complete"],
+            "a scan/read failure must NOT be reported as a complete scan")
+        self.assertEqual("SCAN_INCOMPLETE", report["state"])
+        self.assertEqual("FAIL", report["gate_result"])
+        self.assertEqual(
+            [{"reason_code": reason_code, "error_class": error_class}],
+            [{"reason_code": e["reason_code"], "error_class": e["error_class"]
+              } for e in report["scan_errors"]],  # type: ignore[union-attr]
+            "structured failure record must carry reason code + error class")
+        self.assertEqual(0, report["unapproved_pii_count"])
+        # safe (repository-relative-or-external) path record present
+        self.assertEqual(str(fixture), report["scan_errors"][0]["path"])  # type: ignore[index]
+
+    def _assert_entrypoint_fail_closed(self, fixture: Path,
+                                       reason_code: str) -> None:
+        """The canonical entrypoint must hard-fail in the SAME state the
+        report was produced in — never return a clean-equivalent."""
+        with self.assertRaises(PIIScanIncompleteError) as caught:
+            collect_findings([fixture])
+        message = str(caught.exception)
+        self.assertIn("PII_SCAN_INCOMPLETE", message)
+        self.assertIn(reason_code, message)
+        self.assertIn("gate_result=FAIL", message)
+        # failure text is value-free: no file contents / matched values
+        self.assertNotIn(self._payload(), message)
+
+    # --- T1: FileNotFoundError / disappeared file -----------------------
+
+    def test_T1_file_not_found_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "carrier.md"
+            fixture.write_text(self._payload(), encoding="utf-8")
+            self._readable_finding(fixture)  # positive control (baseline T7)
+            enumerated = [fixture]
+            fixture.unlink()  # disappears between enumeration and read
+            report = collect_scan_report(enumerated)
+            self._assert_report_fail_closed(fixture, report,
+                                            "PII_SCAN_READ_ERROR",
+                                            "FileNotFoundError")
+            self._assert_entrypoint_fail_closed(fixture, "PII_SCAN_READ_ERROR")
+
+    # --- T2: PermissionError / unreadable file ---------------------------
+
+    def test_T2_permission_error_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "carrier.md"
+            fixture.write_text(self._payload(), encoding="utf-8")
+            self._readable_finding(fixture)
+            privileged_env = False
+            fixture.chmod(0)
+            try:
+                report = collect_scan_report([fixture])
+                if report["scan_complete"]:
+                    # hosts that ignore permission bits (e.g. running as
+                    # root) cannot produce PermissionError from chmod —
+                    # deterministic controlled-mock fallback, same class
+                    privileged_env = True
+                else:
+                    self._assert_report_fail_closed(
+                        fixture, report, "PII_SCAN_READ_ERROR",
+                        "PermissionError")
+                    self._assert_entrypoint_fail_closed(
+                        fixture, "PII_SCAN_READ_ERROR")
+            finally:
+                fixture.chmod(0o644)  # restore readability/state
+            if privileged_env:
+                exc = PermissionError(13, "simulated-locked read seam")
+                with self._read_failure_seam(fixture, exc):
+                    report = collect_scan_report([fixture])
+                    self._assert_report_fail_closed(
+                        fixture, report, "PII_SCAN_READ_ERROR",
+                        "PermissionError")
+                    self._assert_entrypoint_fail_closed(
+                        fixture, "PII_SCAN_READ_ERROR")
+            # readability restored → the same prohibited payload detects
+            restored = self._readable_finding(fixture)
+            self.assertGreaterEqual(restored["unapproved_pii_count"], 1)  # type: ignore[operator]
+
+    # --- T3: generic OSError / I/O failure -------------------------------
+
+    def _read_failure_seam(self, fixture: Path, exc: Exception):
+        """Narrowest safe seam: only this fixture's read raises; every
+        other file reads normally through the real implementation."""
+        original = Path.read_text
+
+        def raiser(path_self: Path, *args: object, **kwargs: object):
+            if path_self == fixture:
+                raise exc
+            return original(path_self, *args, **kwargs)  # type: ignore[arg-type]
+
+        return mock.patch.object(Path, "read_text", new=raiser)
+
+    def test_T3_generic_oserror_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "carrier.md"
+            fixture.write_text(self._payload(), encoding="utf-8")
+            self._readable_finding(fixture)
+            with self._read_failure_seam(
+                    fixture, OSError(5, "simulated generic I/O failure")):
+                report = collect_scan_report([fixture])
+                self._assert_report_fail_closed(fixture, report,
+                                                "PII_SCAN_READ_ERROR",
+                                                "OSError")
+                self._assert_entrypoint_fail_closed(fixture,
+                                                    "PII_SCAN_READ_ERROR")
+
+    # --- T4: decode failure (strict-UTF-8 contract, no masking) ----------
+
+    def test_T4_decode_failure_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "carrier.md"
+            # non-UTF-8 bytes carrying the same prohibited payload shape:
+            # the old errors="replace" contract silently decoded this to
+            # mask characters and would have hidden any non-UTF-8 encoded
+            # prohibited value; the strict contract fails closed instead.
+            payload_bytes = ("deliver: \"chat" + "_id\": " + SYNTH_CHAT + "\n"
+                             ).encode("utf-8") + b"\xff\xfe\x00payload\n"
+            fixture.write_bytes(payload_bytes)
+            report = collect_scan_report([fixture])
+            self._assert_report_fail_closed(fixture, report,
+                                            "PII_SCAN_DECODE_ERROR",
+                                            "UnicodeDecodeError")
+            self._assert_entrypoint_fail_closed(fixture, "PII_SCAN_DECODE_ERROR")
+
+    # --- T5: scanner internal/classification error -----------------------
+
+    def test_T5_scanner_internal_error_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "carrier.md"
+            fixture.write_text(self._payload(), encoding="utf-8")
+            self._readable_finding(fixture)
+            with mock.patch(f"{__name__}._scan_text",
+                            side_effect=RuntimeError(
+                                "simulated classification fault")):
+                report = collect_scan_report([fixture])
+                self._assert_report_fail_closed(fixture, report,
+                                                "PII_SCAN_INTERNAL_ERROR",
+                                                "RuntimeError")
+                self._assert_entrypoint_fail_closed(
+                    fixture, "PII_SCAN_INTERNAL_ERROR")
+
+    # --- T6/T7/T8: gate-decision controls ---------------------------------
+
+    def test_T6_clean_scan_still_passes(self) -> None:
+        report = collect_scan_report(_tracked_files())
+        self.assertIs(report["scan_complete"], True)
+        self.assertEqual(0, report["unapproved_pii_count"])
+        self.assertEqual("PASS", report["gate_result"])
+
+    def test_T7_readable_prohibited_fixture_fails_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "carrier.md"
+            fixture.write_text(self._payload(), encoding="utf-8")
+            report = self._readable_finding(fixture)
+            self.assertEqual("FAIL", report["gate_result"])
+            self.assertEqual({"telegram_chat_id", "personal_email"},
+                             {f["category"] for f in report["findings"]})
+
+    def test_T8_approved_synthetic_fixture_remains_allowed(self) -> None:
+        # documented approved/synthetic family: reserved example domains
+        # and the URI DSN form are exempt content — scan completes and
+        # the gate passes with zero unapproved findings
+        content = ("owner: team@sub.example.test docs https://docs.example.org/x\n"
+                   "dsn: postgresql://user:pass@db.internal:5432/fie_db\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "approved_fixture.md"
+            fixture.write_text(content, encoding="utf-8")
+            report = collect_scan_report([fixture])
+            self.assertIs(report["scan_complete"], True)
+            self.assertEqual(0, report["unapproved_pii_count"])
+            self.assertEqual("PASS", report["gate_result"])
+
+
 class TestRepoCleanOfOI07A(unittest.TestCase):
     """The gate itself: tracked content must be free of prohibited PII."""
 
     def test_tracked_tree_has_no_prohibited_identifiers(self) -> None:
-        findings = collect_findings(_tracked_files())
-        self.assertEqual([], findings, "PII/secret findings (redacted): "
-                          + json.dumps(findings, ensure_ascii=False, indent=1))
+        # Fail-closed contract (R5): BOTH conditions must hold — the scan
+        # must be complete AND unapproved PII must be zero. An incomplete
+        # scan (e.g. a read/decode/internal error) is a gate failure by
+        # itself and is never interpreted as a clean result.
+        report = collect_scan_report(_tracked_files())
+        self.assertEqual(
+            [], report["findings"],
+            "unapproved PII/secret findings (redacted): "
+            + json.dumps(report["findings"], ensure_ascii=False, indent=1))
+        self.assertIs(report["scan_complete"], True,
+                      "scan incompleteness must fail the gate, "
+                      "details: " + json.dumps(report["scan_errors"],
+                                               ensure_ascii=False, indent=1))
+        self.assertEqual("PASS", report["gate_result"],
+                         "gate decision details: "
+                         + json.dumps(report["scan_errors"],
+                                      ensure_ascii=False, indent=1))
 
     def test_failure_output_redacts_values(self) -> None:
         # Fragment-assembled address: it stays invisible to this file's own
