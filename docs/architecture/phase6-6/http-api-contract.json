@@ -4,7 +4,7 @@
   "info": {
     "title": "FIE reference read-only intelligence runtime",
     "version": "6.5",
-    "x-revision": "phase-6.7a-contract-reconciliation-1 (reconciled to executable runtime behaviour; see ADR-016 and tests/phase3/transport/test_67a_contract_reconciliation.py)",
+    "x-revision": "phase-6.7b-r2-1 (reconciled to executable runtime behaviour; /healthz reclassified as the public operational liveness probe — HP-01/ADR-018; /readyz stays authenticated; see ADR-016 and tests/phase3/transport/test_67a_contract_reconciliation.py)",
     "description": "Thin HTTP transport over the frozen Phase 6.5 IntelligenceService boundary. Read-only interactive plane (§3.5): only GET is served (HEAD mirrors GET with an empty body).",
     "schema_version": "6.5"
   },
@@ -13,22 +13,20 @@
     "/healthz": {
       "get": {
         "operationId": "liveness",
-        "summary": "Process liveness — no persistence access (§10)",
+        "summary": "Process liveness — no persistence access (§10); public operational probe (no authentication)",
         "responses": {
           "200": {
-            "description": "process alive",
+            "description": "process alive — minimal fixed envelope (no principal, no persistence state)",
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LivenessEnvelope"}}}
           },
-          "401": {"$ref": "#/components/responses/Error401"},
-          "405": {"$ref": "#/components/responses/Error405"},
-          "500": {"$ref": "#/components/responses/Error500"}
+          "405": {"$ref": "#/components/responses/Error405"}
         }
       }
     },
     "/readyz": {
       "get": {
         "operationId": "readiness",
-        "summary": "Readiness — service initialised and persistence reachable (§10); maps to fie.health/get_health. No live Yahoo/TWSE/RSS fetch is required or performed.",
+        "summary": "Readiness — service initialised and persistence reachable (§10); maps to fie.health/get_health. AUTHENTICATED in every profile (it exercises the persistence seam): credentialless callers receive 401 in token mode — credentialless orchestrators use /healthz. No live Yahoo/TWSE/RSS fetch is required or performed.",
         "responses": {
           "200": {"description": "ready", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Envelope"}}}},
           "401": {"$ref": "#/components/responses/Error401"},
@@ -126,7 +124,7 @@
   },
   "components": {
     "securitySchemes": {
-      "bearerAuth": {"type": "http", "scheme": "bearer", "description": "FIE_AUTH_MODE=token with FIE_AUTH_TOKEN (env-only, §6). Mode none = anonymous dev/test. In token mode the auth gate runs on EVERY path (including /healthz and /readyz, before routing); missing/invalid credentials → 401 below."}
+      "bearerAuth": {"type": "http", "scheme": "bearer", "description": "FIE_AUTH_MODE=token with FIE_AUTH_TOKEN (env-only, §6). Mode none = anonymous dev/test. In token mode the auth gate runs on every protected path (before routing); missing/invalid credentials → 401 below. EXACTLY one path is exempted as a public operational probe: GET /healthz (process liveness, minimal fixed envelope — see x-operational-probe-surface); readiness /readyz and /v1/health stay authenticated."}
     },
     "responses": {
       "Error401": {
@@ -138,7 +136,7 @@
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}
       },
       "Error500": {
-        "description": "INTERNAL_ERROR catch-all (transport-produced: kind=transport, principal_id=\"\", sanitised generic message) — structurally reachable on every path via the transport catch-all; request-ID echoed in header and body",
+        "description": "INTERNAL_ERROR catch-all (transport-produced: kind=transport, principal_id=\"\", sanitised generic message) — structurally reachable on every AUTHENTICATED path via the transport catch-all; the public liveness probe /healthz never reaches the transport dispatch edge (Phase 6.7B-R2/ADR-018); request-ID echoed in header and body",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}
       }
     },
@@ -234,8 +232,20 @@
     "description": "every response body — success and error alike — is JSON with this Content-Type (6.6R1 DEFECT-B contract)"
   },
   "x-auth-gate": {
-    "description": "FIE_AUTH_MODE=token: bearer authentication runs at the transport edge BEFORE routing — therefore 401 is reachable on every path including /healthz and /readyz; production deployments typically terminate auth at a gateway and permit the platform probes",
+    "description": "FIE_AUTH_MODE=token: bearer authentication runs at the transport edge BEFORE routing on every protected path — therefore 401 is reachable on all paths EXCEPT the single classified public liveness probe /healthz (operational probe surface, Phase 6.7B-R2/ADR-018: minimal fixed envelope, no persistence, no authenticator invocation, no credential-validity oracle). There is no bypass mechanism: no header, query parameter, environment variable, source address, User-Agent or probe token disables authentication anywhere. Production deployments typically terminate auth at a gateway and use the credentialless /healthz probe for container health.",
     "canonical-401-behavior": "401 UNAUTHENTICATED, kind=transport, principal_id=\"\", X-Request-Id echoed in header and body (never revealed credential detail)"
+  },
+  "x-operational-probe-surface": {
+    "description": "Phase 6.7B-R2 (HP-01 repair) — the operational probe surface is the CLOSED set of route operations served before authentication: {liveness} only (GET/HEAD /healthz)",
+    "members": ["/healthz"],
+    "excluded": ["/readyz", "/v1/health", "/v1/intelligence/*", "/v1/evidence/*", "/v1/freshness/*"],
+    "security-properties": [
+      "handler touches no database, no filesystem, no business service, no protected data",
+      "the Authenticator is not invoked for probe requests — missing, invalid and valid credentials produce byte-identical responses (no credential-validity oracle)",
+      "no bypass primitive exists: no header, query parameter, environment variable, source address, User-Agent or probe token can widen the surface or skip authentication elsewhere",
+      "the set is frozen and pinned by tests/phase3/transport/test_67b_r2_auth_health.py; adding a protected operation to it fails the suite",
+      "every alternate path representation that normalises to /healthz serves liveness only; no representation can classify a protected endpoint as a probe"
+    ]
   },
   "x-http-status-mapping": {
     "description": "phase3.transport.errors.HTTP_STATUS_BY_CODE (§7); DEGRADED is a freshness state and is served with HTTP 200 + metadata",

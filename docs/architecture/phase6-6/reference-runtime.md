@@ -60,8 +60,13 @@ SQLite / PostgreSQL（僅持久層 seams；無 SQL 在傳輸層）
   非 GET 的 POST/PUT/PATCH/DELETE 一律 `405`
   （`Allow: GET, HEAD`；互動平面唯讀 §3.5；405 訊息
   「only GET or HEAD is supported…」）。
-* token 模式的認證閘**先於路由**執行：所有路徑（含 `/healthz`、
-  `/readyz`）在 token 模式下可回 `401`。
+* token 模式的認證閘**先於任何領域分派**執行：所有**受保護路徑**
+  （含 `/readyz`、`/v1/health` 與全部 `/v1/*`）在 token 模式下可回
+  `401`。**唯一例外**是公開營運探針 `GET/HEAD /healthz`（存活；
+  Phase 6.7B-R2/HP-01/ADR-018）：在認證之前服務、不觸及任何受保護
+  面、不評估憑證（缺/誤/有效憑證回應逐位元組相同）、無旁路原語；
+  `/readyz` 維持已認證（觸及持久層接縫），無憑證 orchestrator
+  使用 `/healthz`。
 * HTTP 狀態映射（§7）：INVALID_REQUEST→400、UNAUTHENTICATED→401、
   FORBIDDEN→403、NOT_FOUND→404、STALE_DATA→409、
   DATA_UNAVAILABLE/DEPENDENCY_UNAVAILABLE→503、INTERNAL_ERROR→500。
@@ -122,8 +127,11 @@ DSN **可達性**驗證與 schema 就緒閘屬 R3；連線失敗維持
 
 ## 5. 健康與就緒 (§10)
 
-* `/healthz`：程序存活（完全不觸及持久層）。
+* `/healthz`：程序存活（完全不觸及持久層）。**公開營運探針**
+  （Phase 6.7B-R2/ADR-018）：無需認證，各 profile 行為一致；
+  最小固定信封、不評估憑證、無旁路原語。
 * `/readyz`：服務初始化 + 持久層可達（包裝 `get_health`）。
+  **已認證**（觸及持久層接縫；token 模式無憑證 → 401）。
   不要求任何 live Yahoo/TWSE/RSS 抓取；stale/degraded 狀態
   以 `freshness` 元資料誠實呈現（§8）。
 * `/readyz` 與查詢路徑使用**同一宣告的存取模式**（6.6R4/ADR-013）：

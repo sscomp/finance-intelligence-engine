@@ -361,7 +361,10 @@ class TestContractManifest(unittest.TestCase):
     def test_declared_status_matrix_is_pinned(self) -> None:
         """Per-path status sets — changed only with matching evidence."""
         expected = {
-            "/healthz": {200, 401, 405, 500},
+            # Phase 6.7B-R2/ADR-018: /healthz is the public operational
+            # liveness probe — served before authentication (no 401) and
+            # it never reaches the transport dispatch edge (no 500).
+            "/healthz": {200, 405},
             "/readyz": {200, 401, 405, 500, 503},
             "/v1/health": {200, 401, 405, 500, 503},
             "/v1/intelligence/latest": {200, 400, 401, 405, 500},
@@ -650,11 +653,18 @@ class TestRequestIDCoherence(_MigratedDBBase):
 
 
 class TestTransportAuthGate(_TokenDBBase):
-    """401 UNAUTHENTICATED on every declared path (S-03)."""
+    """401 UNAUTHENTICATED on every declared protected path (S-03).
+
+    Phase 6.7B-R2/ADR-018: /healthz is the public operational liveness
+    probe — served BEFORE authentication and verified separately below
+    (200 credentialless in token mode, identical to authenticated).
+    """
 
     def test_401_on_every_declared_path(self) -> None:
         contract = _load_contract()
-        for template, (sample, _) in _PATH_SAMPLES.items():
+        probe_templates = (t for t in _PATH_SAMPLES if t != "/healthz")
+        for template in probe_templates:
+            sample = _PATH_SAMPLES[template][0]
             with self.subTest(path=template):
                 declared = {int(k) for k in
                             contract["paths"][template]["get"]["responses"]}
@@ -671,11 +681,38 @@ class TestTransportAuthGate(_TokenDBBase):
                 self.assertEqual(headers["Content-Type"], _JSON_CT)
                 _assert_no_leak(self, envelope, extra=(_TOKEN,))
 
+    def test_liveness_probe_is_public_in_token_mode(self) -> None:
+        """The HP-01 repair: /healthz must answer 200 with NO credential
+        in token mode, identical to the response with a VALID credential
+        (the probe never evaluates credentials — no validity oracle).
+        A fixed X-Request-Id pins the volatile field so the bodies can
+        be compared byte-identically."""
+        contract = _load_contract()
+        bodies = {}
+        for label, headers in (
+            ("none", {"X-Request-Id": "req-probe-oracle"}),
+            ("valid", {"X-Request-Id": "req-probe-oracle",
+                       "Authorization": f"Bearer {_TOKEN}"}),
+            ("invalid", {"X-Request-Id": "req-probe-oracle",
+                         "Authorization": "Bearer definitely-not-the-token"}),
+        ):
+            with self.subTest(credential=label):
+                status, _, body = _request(
+                    "GET", self.base + "/healthz", headers=headers)
+                self.assertEqual(status, 200)
+                _conforms(self, json.loads(body),
+                          "LivenessEnvelope", contract)
+                bodies[label] = body
+        self.assertEqual(bodies["none"], bodies["valid"])
+        self.assertEqual(bodies["none"], bodies["invalid"])
+
     def test_declared_401_shares_error_component(self) -> None:
         contract = _load_contract()
         for template in _PATH_SAMPLES:
+            responses = contract["paths"][template]["get"]["responses"]
+            if "401" not in responses:
+                continue  # probe-surface path: no declared 401 (ADR-018)
             with self.subTest(path=template):
-                responses = contract["paths"][template]["get"]["responses"]
                 declared = responses["401"]
                 if "$ref" in declared:
                     declared = _resolve_ref(contract, declared["$ref"])
@@ -686,10 +723,10 @@ class TestTransportAuthGate(_TokenDBBase):
 
     def test_valid_token_passes(self) -> None:
         status, _, body = _request(
-            "GET", self.base + "/healthz",
+            "GET", self.base + "/v1/health",
             headers={"Authorization": f"Bearer {_TOKEN}"})
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["status"], "alive")
+        self.assertEqual(json.loads(body)["status"], "ok")
 
 
 # -------------------------------------------------------- catch-all 500
@@ -701,6 +738,15 @@ class TestCatchAll500(_CatchAllDBBase):
     def test_500_on_every_path_conforms(self) -> None:
         contract = _load_contract()
         for template, (sample, _) in _PATH_SAMPLES.items():
+            if template == "/healthz":
+                # Phase 6.7B-R2/ADR-018: the public liveness probe never
+                # reaches the transport dispatch edge, so the catch-all
+                # is unreachable on it — an exploding Authenticator (a
+                # broken IdP integration) must NOT take liveness down.
+                status, _, body = _request("GET", self.base + sample)
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)["status"], "alive")
+                continue
             with self.subTest(path=template):
                 status, headers, body = _request("GET", self.base + sample)
                 self.assertEqual(status, 500)
@@ -856,14 +902,19 @@ class TestDeclaredStatusMatrix(unittest.TestCase):
                     self.assertEqual(status, 404)
 
                 # token server: auth gate on every declared path
+                # (EXCEPT /healthz — public operational probe, ADR-018)
                 status, _, _ = _request("GET", self.base_token + sample)
                 produced.add(status)
-                self.assertEqual(status, 401)
+                self.assertEqual(status,
+                                 401 if template != "/healthz" else 200)
 
                 # exploding server: transport catch-all on every path
+                # (EXCEPT /healthz — liveness survives authenticator
+                # failure, ADR-018)
                 status, _, _ = _request("GET", self.base_explode + sample)
                 produced.add(status)
-                self.assertEqual(status, 500)
+                self.assertEqual(status, 500 if template != "/healthz"
+                                 else 200)
 
                 # un-migrated server: persistence-failure statuses
                 if template in _UNMIGRATED_PROBES:

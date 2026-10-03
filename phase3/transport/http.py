@@ -51,6 +51,12 @@ contract reconciliation — the canonical machine contract,
 HTTP status is the deterministic mapping in
 :mod:`phase3.transport.errors` — never a replacement for the domain
 error code.
+
+Operational probe surface (Phase 6.7B-R2, HP-01): exactly ONE route
+operation — liveness (``GET /healthz``) — is classified as a public
+operational probe endpoint and is served before authentication.
+See :data:`OPERATIONAL_PROBE_OPERATIONS` for the security shape of
+that classification and :mod:`docs/adr/adr-018` for its record.
 """
 from __future__ import annotations
 
@@ -80,6 +86,7 @@ __all__ = [
     "main",
     "TRANSPORT_LOGGER",
     "API_VERSION",
+    "OPERATIONAL_PROBE_OPERATIONS",
 ]
 
 API_VERSION = "v1"
@@ -87,6 +94,33 @@ API_VERSION = "v1"
 TRANSPORT_LOGGER = logging.getLogger("fie.transport")
 
 _MAX_LIMIT = 200
+
+#: The operational probe surface (Phase 6.7B-R2, HP-01) — the CLOSED set
+#: of route operations served as public, credentialless liveness probes.
+#:
+#: Security shape of the classification (work order §6/§8; ADR-018):
+#:
+#: * ``liveness`` is the ONLY member. It is produced by ``_route()`` for
+#:   exactly one canonical request form (``GET/HEAD /healthz`` after URL
+#:   decoding and empty-segment normalisation — see ``_route``), and its
+#:   handler (``_liveness_payload``) builds a fixed, minimal envelope
+#:   from constants: it touches NO database, NO filesystem, NO business
+#:   service (``dispatch`` is never reached) and NO protected data, and
+#:   it does NOT invoke the authenticator — so a probe can never leak
+#:   credential validity (an invalid bearer behaves byte-identically to
+#:   a missing one).
+#: * There is deliberately NO bypass primitive: no header, query
+#:   parameter, environment variable, source address, User-Agent or
+#:   probe token can put a protected operation into this set or skip
+#:   authentication anywhere else. Every non-liveness route — including
+#:   ``readiness`` (``/readyz``, which exercises the persistence seam) —
+#:   still passes the authenticator exactly as before (ADR-018).
+#: * The set is frozen and pinned by the R2 suite
+#:   (``tests/phase3/transport/test_67b_r2_auth_health.py``): adding a
+#:   protected operation here is a test failure, and the reconciliation
+#:   matrix proves every protected path stays authenticated under
+#:   probe-like request characteristics.
+OPERATIONAL_PROBE_OPERATIONS = frozenset({"liveness"})
 
 
 class _OneThreadExecutor:
@@ -318,6 +352,14 @@ class _TransportHandler(BaseHTTPRequestHandler):
             self._telemetry("transport", None, 400, envelope, started)
             return data, 400, {"X-Request-Id": request_id}
         op, captured = route
+        # Phase 6.7B-R2 (HP-01 / ADR-018): the operational probe surface
+        # is served BEFORE authentication — see OPERATIONAL_PROBE_OPERATIONS
+        # for why `liveness` alone qualifies (fixed minimal body, nothing
+        # protected reachable, no credential evaluation, no bypass
+        # primitives). Every other route — including readiness — still
+        # authenticates below, so no probe characteristic can widen this.
+        if op in OPERATIONAL_PROBE_OPERATIONS:
+            return self._liveness_payload(started)
         # auth happens at the transport edge, BEFORE any domain dispatch
         try:
             ctx = self.authenticator.authenticate(self.headers)
@@ -351,8 +393,8 @@ class _TransportHandler(BaseHTTPRequestHandler):
         ctx: RequestContext,
         started: float,
     ) -> tuple[bytes, int, dict[str, str]]:
-        if op in ("liveness", "readiness"):
-            return self._health_payloads(op, ctx, started)
+        if op == "readiness":
+            return self._readiness_payload(ctx, started)
         merged = {**params, **captured}
         envelope = dispatch(self.runtime.service, op, merged, ctx)
         status = 200
@@ -362,24 +404,51 @@ class _TransportHandler(BaseHTTPRequestHandler):
         self._telemetry(op, ctx, status, envelope, started)
         return data, status, {"X-Request-Id": ctx.request_id}
 
-    def _health_payloads(
-        self, op: str, ctx: RequestContext, started: float
+    def _liveness_payload(
+        self, started: float
     ) -> tuple[bytes, int, dict[str, str]]:
-        if op == "liveness":
-            envelope = {
-                "schema_version": _schema_version(),
-                "kind": "healthz",
-                "request_id": ctx.request_id,
-                "status": "alive",
-            }
-            status = 200
-        else:
-            envelope = dispatch(self.runtime.service, "health", {}, ctx)
-            status = 200 if envelope.get("status") == "ok" else http_status_for(
-                envelope["error"]["code"]
-            )
+        """Serve ``GET/HEAD /healthz`` (Phase 6.7B-R2, ADR-018).
+
+        Public liveness probe: minimal fixed envelope, request-id
+        derived with the shared sanitiser, NO authenticator invocation
+        and NO dispatch — the process answers from constants alone, so
+        the probe can neither expose protected application
+        functionality nor reveal whether a presented credential was
+        valid. Telemetry keeps the standard record shape with the
+        transport-error principal convention (``principal_id=""``) —
+        the caller is unauthenticated by definition.
+        """
+        request_id = _request_id_from_headers(self.headers)
+        envelope = {
+            "schema_version": _schema_version(),
+            "kind": "healthz",
+            "request_id": request_id,
+            "status": "alive",
+        }
         data = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
-        self._telemetry(op, ctx, status, envelope, started)
+        probe_ctx = RequestContext(
+            principal_id="", request_id=request_id, scopes=frozenset(),
+        )
+        self._telemetry("liveness", probe_ctx, 200, envelope, started)
+        return data, 200, {"X-Request-Id": request_id}
+
+    def _readiness_payload(
+        self, ctx: RequestContext, started: float
+    ) -> tuple[bytes, int, dict[str, str]]:
+        """Serve ``GET/HEAD /readyz`` — AUTHENTICATED readiness (ADR-018).
+
+        Readiness exercises the persistence seam (service ``health`` op)
+        and reports service metadata, so it keeps the Phase 6.6
+        authenticated access policy: in token mode a credentialless
+        caller receives 401 like any protected path. Credentialless
+        orchestrators use the public liveness probe ``/healthz``.
+        """
+        envelope = dispatch(self.runtime.service, "health", {}, ctx)
+        status = 200 if envelope.get("status") == "ok" else http_status_for(
+            envelope["error"]["code"]
+        )
+        data = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+        self._telemetry("readiness", ctx, status, envelope, started)
         return data, status, {"X-Request-Id": ctx.request_id}
 
     def _telemetry(
