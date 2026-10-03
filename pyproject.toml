@@ -46,9 +46,11 @@ postgres = [
 ]
 
 [project.scripts]
-# Additive convenience entrypoint; `python -m phase3.cli` remains the
-# documented invocation and keeps working either way.
+# Additive convenience entrypoints; `python -m phase3.cli` remains the
+# documented invocation and keeps working either way. `fie-http-server`
+# is the Phase 6.6 reference HTTP runtime (stdlib-only, read-only).
 fie-cli = "phase3.cli:main"
+fie-http-server = "phase3.transport.http:main"
 
 [tool.setuptools]
 packages.find = { include = ["phase3*", "reports*"] }
