@@ -51,57 +51,66 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
+# ---------------------------------------------------------------------------
+# Phase 6.3 — single-owner DDL. These three CREATE TABLE strings are the
+# ONLY copies of the legacy history-table schema; phase3/backfill.py
+# imports them (previously it carried a byte-duplicate of the same DDL
+# that could drift out of sync with this file).
+# ---------------------------------------------------------------------------
+DDL_MACRO_DAILY = """
+    CREATE TABLE IF NOT EXISTS macro_daily (
+        date TEXT PRIMARY KEY,
+        us10y REAL, us2y REAL, us13w REAL,
+        dxy REAL, vix REAL, usdtwd REAL,
+        yield_spread REAL,
+        score INTEGER,
+        verdict TEXT,
+        signals_json TEXT,
+        created_at TEXT
+    )
+"""
+
+DDL_STOCK_MONTHLY = """
+    CREATE TABLE IF NOT EXISTS stock_monthly (
+        date TEXT,
+        code TEXT,
+        name TEXT,
+        sector TEXT,
+        price REAL,
+        eps_ttm REAL, pe_trailing REAL, pe_forward REAL,
+        roe REAL, roa REAL,
+        gross_margin REAL, operating_margin REAL, profit_margin REAL,
+        dividend_rate REAL, dividend_yield REAL, payout_ratio REAL,
+        pb_ratio REAL, revenue_growth REAL, earnings_growth REAL,
+        nim_growth REAL, interest_spread REAL,
+        high_52 REAL, low_52 REAL, dist_from_high REAL,
+        target_mean REAL, peg_ratio REAL, market_cap REAL,
+        PRIMARY KEY (date, code)
+    )
+"""
+
+DDL_INSTITUTIONAL_DAILY = """
+    CREATE TABLE IF NOT EXISTS institutional_daily (
+        date TEXT,
+        code TEXT,
+        foreign_net INTEGER,
+        prop_net INTEGER,
+        total_net INTEGER,
+        trading_days INTEGER,
+        PRIMARY KEY (date, code)
+    )
+"""
+
 def init_db():
     """Create tables if not exist."""
     conn = get_db()
     c = conn.cursor()
     
-    # 每日總體指標
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS macro_daily (
-            date TEXT PRIMARY KEY,
-            us10y REAL, us2y REAL, us13w REAL,
-            dxy REAL, vix REAL, usdtwd REAL,
-            yield_spread REAL,
-            score INTEGER,
-            verdict TEXT,
-            signals_json TEXT,
-            created_at TEXT
-        )
-    """)
-    
-    # 每月個股基本面
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS stock_monthly (
-            date TEXT,
-            code TEXT,
-            name TEXT,
-            sector TEXT,
-            price REAL,
-            eps_ttm REAL, pe_trailing REAL, pe_forward REAL,
-            roe REAL, roa REAL,
-            gross_margin REAL, operating_margin REAL, profit_margin REAL,
-            dividend_rate REAL, dividend_yield REAL, payout_ratio REAL,
-            pb_ratio REAL, revenue_growth REAL, earnings_growth REAL,
-            nim_growth REAL, interest_spread REAL,
-            high_52 REAL, low_52 REAL, dist_from_high REAL,
-            target_mean REAL, peg_ratio REAL, market_cap REAL,
-            PRIMARY KEY (date, code)
-        )
-    """)
-    
-    # 法人動向（每日累積值 snapshot）
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS institutional_daily (
-            date TEXT,
-            code TEXT,
-            foreign_net INTEGER,
-            prop_net INTEGER,
-            total_net INTEGER,
-            trading_days INTEGER,
-            PRIMARY KEY (date, code)
-        )
-    """)
+    # 每日總體指標 / 每月個股基本面 / 法人動向
+    # (Phase 6.3: DDL 單一所有權 — 字串常數見本檔上方 DDL_*，backfill.py 引用同一份)
+    c.execute(DDL_MACRO_DAILY)
+    c.execute(DDL_STOCK_MONTHLY)
+    c.execute(DDL_INSTITUTIONAL_DAILY)
     
     conn.commit()
     conn.close()

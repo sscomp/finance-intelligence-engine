@@ -807,52 +807,25 @@ def execute_backfill(
 def _ensure_table(c: sqlite3.Cursor, source_class: str) -> None:
     """Ensure the target table exists in the target DB.
 
-    Uses the same schema as the production db.py init_db() function.
+    Phase 6.3: single-owner DDL — the strings live in the production
+    ``db.py`` (``DDL_MACRO_DAILY`` / ``DDL_STOCK_MONTHLY`` /
+    ``DDL_INSTITUTIONAL_DAILY``); this module no longer carries its own
+    byte-duplicate. The lazy import keeps the production-root ``db``
+    module loadable in the same portable invocation style as the other
+    root-level modules (repo root on ``sys.path``).
     """
+    from db import (
+        DDL_INSTITUTIONAL_DAILY,
+        DDL_MACRO_DAILY,
+        DDL_STOCK_MONTHLY,
+    )
+
     if source_class == SOURCE_MACRO_DAILY:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS macro_daily (
-                date TEXT PRIMARY KEY,
-                us10y REAL, us2y REAL, us13w REAL,
-                dxy REAL, vix REAL, usdtwd REAL,
-                yield_spread REAL,
-                score INTEGER,
-                verdict TEXT,
-                signals_json TEXT,
-                created_at TEXT
-            )
-        """)
+        c.execute(DDL_MACRO_DAILY)
     elif source_class == SOURCE_STOCK_MONTHLY:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS stock_monthly (
-                date TEXT,
-                code TEXT,
-                name TEXT,
-                sector TEXT,
-                price REAL,
-                eps_ttm REAL, pe_trailing REAL, pe_forward REAL,
-                roe REAL, roa REAL,
-                gross_margin REAL, operating_margin REAL, profit_margin REAL,
-                dividend_rate REAL, dividend_yield REAL, payout_ratio REAL,
-                pb_ratio REAL, revenue_growth REAL, earnings_growth REAL,
-                nim_growth REAL, interest_spread REAL,
-                high_52 REAL, low_52 REAL, dist_from_high REAL,
-                target_mean REAL, peg_ratio REAL, market_cap REAL,
-                PRIMARY KEY (date, code)
-            )
-        """)
+        c.execute(DDL_STOCK_MONTHLY)
     elif source_class == SOURCE_INSTITUTIONAL_DAILY:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS institutional_daily (
-                date TEXT,
-                code TEXT,
-                foreign_net INTEGER,
-                prop_net INTEGER,
-                total_net INTEGER,
-                trading_days INTEGER,
-                PRIMARY KEY (date, code)
-            )
-        """)
+        c.execute(DDL_INSTITUTIONAL_DAILY)
 
 
 # ---------------------------------------------------------------------------

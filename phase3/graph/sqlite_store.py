@@ -76,15 +76,28 @@ class SQLiteGraphStore:
 
     # ----- lifecycle -------------------------------------------------------
 
-    def ensure_schema(self) -> None:
-        """Run the v1 migration. Idempotent."""
+    def ensure_schema(self) -> tuple[list[Any], int]:
+        """Run the v1 migration. Idempotent.
+
+        Returns ``(newly_applied, current_version)``; ``newly_applied``
+        is empty when the schema is already up to date.
+        """
         mgr = MigrationManager(self._store, [schema_v1.build()])
-        mgr.apply()
+        applied = mgr.apply()
+        return applied, mgr.current_version()
 
     @property
     def path(self) -> str:
         """Resolved path to the database file."""
         return self._store.path
+
+    def set_query_only(self) -> None:
+        """Flip the underlying connection to read-only (Phase 6.3 seam).
+
+        Delegates to :meth:`SQLiteStore.set_query_only` so read-only
+        CLI paths stop digging at ``store._store._conn``.
+        """
+        self._store.set_query_only()
 
     def close(self) -> None:
         self._store.close()

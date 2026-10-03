@@ -235,7 +235,6 @@ def cmd_init_db(args: argparse.Namespace) -> int:
     # import cleanly even if persistence is missing in some
     # deployments.
     from phase3.graph.sqlite_store import DEFAULT_DB_PATH, SQLiteGraphStore
-    from phase3.persistence.migrations import MigrationManager
     from phase3.persistence.sqlite import quick_check
     from phase3.persistence import schema_v1
 
@@ -247,9 +246,7 @@ def cmd_init_db(args: argparse.Namespace) -> int:
     # visibility for the operator, so we run it explicitly here and
     # own the result.
     with SQLiteGraphStore(target, auto_migrate=False) as store:
-        mgr = MigrationManager(store._store, [schema_v1.build()])
-        applied = mgr.apply()
-        current = mgr.current_version()
+        applied, current = store.ensure_schema()
         qc = quick_check(store.path)
     print(f"[init-db] current_version = {current}")
     if applied:
@@ -670,12 +667,14 @@ def _resolve_graph_store(args: argparse.Namespace) -> tuple[Any, str]:
         )
         raise SystemExit(1) from exc
     # Hard guarantee: the production DB cannot be mutated from
-    # this CLI even if a future bug writes by accident.
+    # this CLI even if a future bug writes by accident. (Phase 6.3:
+    # goes through the store's public seam instead of digging at
+    # store._store._conn.)
     try:
-        store._store._conn.execute("PRAGMA query_only = 1")
+        store.set_query_only()
     except Exception as exc:  # noqa: BLE001
         print(
-            f"failed to enable PRAGMA query_only on {db_path!r}: {exc}",
+            f"failed to enable read-only mode on {db_path!r}: {exc}",
             file=sys.stderr,
         )
         raise SystemExit(1) from exc

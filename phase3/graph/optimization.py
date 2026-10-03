@@ -80,9 +80,8 @@ The module exposes two tiers of API:
 """
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Iterable, Literal, Tuple, cast
+from typing import TYPE_CHECKING, Any, Iterable, Literal
 
 from phase3.datamodel.graph import EdgeType, GraphEdge, GraphNode
 
@@ -170,11 +169,11 @@ def batched_edges_lookup(
         return {}
     types_list = list(edge_types) if edge_types else None
 
-    # SQLite-backed fast path: a single SQL query per direction.
-    sqlite_conn = _try_sqlite_connection(store)
-    if sqlite_conn is not None:
-        return _batched_edges_sqlite(
-            sqlite_conn, node_ids_list, direction=direction,
+    # SQL-backed fast path: a single SQL query per direction.
+    repo = _sql_batch_repo(store)
+    if repo is not None:
+        return _batched_edges_sql(
+            repo, node_ids_list, direction=direction,
             edge_types=types_list,
         )
 
@@ -219,9 +218,9 @@ def batched_nodes_lookup(
     node_ids_list = list(node_ids)
     if not node_ids_list:
         return {}
-    sqlite_conn = _try_sqlite_connection(store)
-    if sqlite_conn is not None:
-        return _batched_nodes_sqlite(sqlite_conn, node_ids_list)
+    repo = _sql_batch_repo(store)
+    if repo is not None:
+        return _batched_nodes_sql(repo, node_ids_list)
     out: dict[str, GraphNode] = {}
     for nid in node_ids_list:
         n = store.get_node(nid)
@@ -493,109 +492,75 @@ class BatchReader:
 # ---------------------------------------------------------------------------
 
 
-def _try_sqlite_connection(store: Any) -> sqlite3.Connection | None:
-    """Return the underlying sqlite3.Connection if ``store`` is a
-    :class:`~phase3.graph.sqlite_store.SQLiteGraphStore`, else None.
+def _sql_batch_repo(store: Any) -> Any | None:
+    """Return the backing :class:`GraphRepository` if ``store`` was
+    built on one, else None.
 
-    Avoids a hard import on :class:`SQLiteGraphStore` so this
-    module remains import-time free of the persistence layer.
-    The duck-typed check is: ``store`` has a ``_store`` attribute
-    with a ``connection`` attribute that is a ``sqlite3.Connection``.
+    Works for any SQL-backed graph store (SQLite or PostgreSQL,
+    Phase 6.3) without importing the persistence layer at module
+    import time. The duck-typed check is: ``store`` has a ``_repo``
+    attribute exposing the batched-read seam
+    (``fetch_edges_by_nodes`` / ``fetch_nodes_by_ids``).
     """
-    inner = getattr(store, "_store", None)
-    if inner is None:
+    repo = getattr(store, "_repo", None)
+    if repo is None:
         return None
-    conn = getattr(inner, "connection", None)
-    if isinstance(conn, sqlite3.Connection):
-        return conn
+    if callable(getattr(repo, "fetch_edges_by_nodes", None)) and callable(
+        getattr(repo, "fetch_nodes_by_ids", None)
+    ):
+        return repo
     return None
 
 
-def _batched_edges_sqlite(
-    conn: sqlite3.Connection,
+def _batched_edges_sql(
+    repo: Any,
     node_ids: list[str],
     *,
     direction: Literal["from", "to", "both"],
     edge_types: list[EdgeType] | None = None,
 ) -> dict[str, list[GraphEdge]]:
-    """One SQL query per direction, then Python-side filter.
+    """One SQL query per direction, then Python-side grouping.
 
-    Avoids the per-node round-trip in the existing
+    Avoids the per-node round-trip in
     :meth:`SQLiteGraphStore.edges_from` /
-    :meth:`SQLiteGraphStore.edges_to` path. The row -> GraphEdge
-    conversion goes through the same module-private helpers
-    that :class:`SQLiteGraphStore` uses, so the output is
-    byte-identical to the 1-by-1 path on the same store.
+    :meth:`SQLiteGraphStore.edges_to`. Conversion goes through the
+    repo's ``EdgeRow`` DTO and the same
+    ``_edge_from_row`` helper the SQL-backed graph store uses, so
+    the output is identical to the 1-by-1 path on the same store
+    (asserted by the backend contract tests on both backends).
     """
     from phase3.graph.sqlite_store import _edge_from_row
-    from phase3.persistence.graph_repo import _edge_row
 
-    types_filter = (
-        [et.value for et in edge_types] if edge_types else None
-    )
-
-    placeholders = ",".join("?" * len(node_ids))
+    types_filter = [et.value for et in edge_types] if edge_types else None
     out: dict[str, list[GraphEdge]] = {nid: [] for nid in node_ids}
-
-    def _fetch(sql_clause_col: str) -> None:
-        if types_filter:
-            type_placeholders = ",".join("?" * len(types_filter))
-            sql = (
-                f"SELECT * FROM graph_edges "
-                f"WHERE {sql_clause_col} IN ({placeholders}) "
-                f"AND edge_type IN ({type_placeholders}) "
-                f"ORDER BY edge_id"
-            )
-            params: Tuple[Any, ...] = (*node_ids, *types_filter)
-        else:
-            sql = (
-                f"SELECT * FROM graph_edges "
-                f"WHERE {sql_clause_col} IN ({placeholders}) "
-                f"ORDER BY edge_id"
-            )
-            params = tuple(node_ids)
-        rows = conn.execute(sql, params).fetchall()
-        for r in rows:
-            # Two-step conversion matches the existing
-            # ``SQLiteGraphStore.edges_from`` chain:
-            # raw ``sqlite3.Row`` -> ``EdgeRow`` (via
-            # ``_edge_row`` from graph_repo) -> ``GraphEdge`` (via
-            # ``_edge_from_row`` from sqlite_store). Keeping the
-            # chain identical preserves the byte-equivalent
-            # contract.
-            edge = _edge_from_row(_edge_row(r))
-            if sql_clause_col == "from_node_id":
-                out.setdefault(edge.from_node_id, []).append(edge)
-            else:
-                out.setdefault(edge.to_node_id, []).append(edge)
-
+    # Group by the queried side, exactly like the former raw-SQL path:
+    # the from-side pass fills ``out[from]``, then the to-side pass
+    # fills ``out[to]`` — including the historical double-append for
+    # self-loops under ``direction="both"``, and the stable
+    # ``ORDER BY edge_id`` ordering within each pass.
     if direction in ("from", "both"):
-        _fetch("from_node_id")
+        for edge_row in repo.fetch_edges_by_nodes(
+            node_ids, direction="from", edge_types=types_filter
+        ):
+            edge = _edge_from_row(edge_row)
+            out.setdefault(edge.from_node_id, []).append(edge)
     if direction in ("to", "both"):
-        _fetch("to_node_id")
+        for edge_row in repo.fetch_edges_by_nodes(
+            node_ids, direction="to", edge_types=types_filter
+        ):
+            edge = _edge_from_row(edge_row)
+            out.setdefault(edge.to_node_id, []).append(edge)
     return out
 
 
-def _batched_nodes_sqlite(
-    conn: sqlite3.Connection,
-    node_ids: list[str],
-) -> dict[str, GraphNode]:
+def _batched_nodes_sql(repo: Any, node_ids: list[str]) -> dict[str, GraphNode]:
     """One SQL query for many nodes. Returns ``{node_id: GraphNode}``
     for ids that exist; missing ids are absent (matches the
     :meth:`GraphStore.get_node` returns-None contract)."""
     from phase3.graph.sqlite_store import _node_from_row
-    from phase3.persistence.graph_repo import _node_row
-
-    if not node_ids:
-        return {}
-    placeholders = ",".join("?" * len(node_ids))
-    sql = (
-        f"SELECT * FROM graph_nodes WHERE node_id IN ({placeholders})"
-    )
-    rows = conn.execute(sql, tuple(node_ids)).fetchall()
     return {
-        cast(str, r["node_id"]): _node_from_row(_node_row(r))
-        for r in rows
+        row.node_id: _node_from_row(row)
+        for row in repo.fetch_nodes_by_ids(node_ids)
     }
 
 
