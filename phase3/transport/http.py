@@ -165,13 +165,26 @@ class FIEReferenceRuntime:
         self.store = None
 
     @classmethod
-    def open(cls, db_spec: str | None = None) -> "FIEReferenceRuntime":
+    def open(
+        cls,
+        db_spec: str | None = None,
+        *,
+        access_mode: str | None = None,
+    ) -> "FIEReferenceRuntime":
+        """Open the reference runtime.
+
+        ``access_mode`` (Phase 6.6R4) selects the SQLite read-only
+        deployment open semantics (writable | readonly |
+        immutable_snapshot); ``None``/``writable`` keeps the
+        historical behavior. PostgreSQL specs only accept the writable
+        default (rejected by :func:`open_store` otherwise).
+        """
         from phase3.persistence.backend import open_store, resolve_spec
         from phase3.service.boundary import DefaultIntelligenceService
 
         def factory() -> DefaultIntelligenceService:
             spec = resolve_spec(db_spec) if db_spec else resolve_spec()
-            store = open_store(spec)
+            store = open_store(spec, access_mode=access_mode)
             return DefaultIntelligenceService(store)
 
         return cls(factory)
@@ -516,7 +529,10 @@ def run_server(
     ``shutdown()`` deterministically.
     """
     config = config or load_transport_config(db_spec)
-    runtime = FIEReferenceRuntime.open(config.db_spec)
+    runtime = FIEReferenceRuntime.open(
+        config.db_spec,
+        access_mode=getattr(config, "sqlite_access_mode", None),
+    )
     server = make_http_server(runtime, config)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

@@ -6,6 +6,18 @@ Provides:
   exposes :meth:`transaction` as a ``BEGIN IMMEDIATE`` / ``COMMIT`` /
   ``ROLLBACK`` context manager, and rejects any path that resolves to
   ``macro_history.db``.
+- **access modes (Phase 6.6R4)** — :data:`ACCESS_WRITABLE` (default;
+  the historical read-write open with the full PRAGMA profile),
+  :data:`ACCESS_READONLY` (``file:...?mode=ro`` URI — read-only
+  connection; SQLite may still create ``-shm``/``-wal`` sidecars when
+  the database is in WAL journal mode and the directory is writable),
+  and :data:`ACCESS_IMMUTABLE` (``file:...?mode=ro&immutable=1`` —
+  the *published snapshot* open for the declared Phase 6.6 read-only
+  deployment: SQLite assumes the artifact will never change while the
+  connection lives, so no sidecar state is created or required, and
+  the artifact **must not** be modified while such a reader is open).
+  The ``journal_mode`` PRAGMA — a database-header write — is skipped
+  for both read-only modes.
 - :func:`integrity_check` / :func:`quick_check` — small helpers that
   work on any sqlite file (used by retention + backup tests).
 - :data:`FORBIDDEN_DB_NAME` — the protected production DB filename.
@@ -21,6 +33,18 @@ Design notes
   access they should open a second store. The WAL pragma is set so
   reads do not block a single writer, but a second writer will
   ``SQLITE_BUSY`` until the first commits (caller's responsibility).
+* Deployment semantics (Phase 6.6R4, why read-only access modes exist):
+  WAL journal mode is *persistent* in the database header. Any open of
+  a WAL-mode database requires the wal-index shared-memory file
+  (``-shm``) — created on demand — so a read-only *open* of a
+  WAL-mode artifact inside a read-only directory/mount cannot even
+  start querying (``OperationalError``) unless the deployment supplied
+  sidecar state. The Phase 6.6 reference deployment (documented
+  ``-v <host-data-dir>:/data:ro``) ships the main ``.db`` only, so its
+  consumer must open the artifact with the
+  :data:`ACCESS_IMMUTABLE` semantics instead. Write-path workflows
+  (ingest/scoring/CLI) keep the default :data:`ACCESS_WRITABLE`
+  behaviour unchanged.
 * Path resolution uses :func:`os.path.realpath` so symlinks cannot
   bypass the guard.
 """
@@ -30,6 +54,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from typing import Any, Iterator
+from urllib.parse import quote as _uri_quote
 
 # ---------------------------------------------------------------------------
 # Hard guard
@@ -82,17 +107,63 @@ def _check_path(db_path: str | os.PathLike[str]) -> str:
 # PRAGMA profile
 # ---------------------------------------------------------------------------
 
+#: Access modes for :class:`SQLiteStore` (Phase 6.6R4 contract).
+#:
+#: - ``writable`` — default; the historical read-write open. This is
+#:   the producer/batch/CLI profile (ingest, scoring, retention,
+#:   backup): reads and writes, full PRAGMA profile with WAL.
+#: - ``readonly`` — read-only connection (``mode=ro``). No writes of
+#:   database content ever occur, but the reader still participates in
+#:   live SQLite locking: if the artifact is a WAL-mode database the
+#:   reader needs writable sidecar space (``-shm``/``-wal`` created in
+#:   the database's directory) — an explicit, portable requirement.
+#: - ``immutable_snapshot`` — read-only open of a *published snapshot*:
+#:   SQLite is told the file will never change while this connection
+#:   lives (``immutable=1``), so locking and WAL/shm state are skipped
+#:   entirely and a clean DB-only artifact opens inside a strictly
+#:   read-only directory/mount. The artifact **must not** be modified
+#:   while an immutable-snapshot reader is open — that is the declared
+#:   Phase 6.6 read-only deployment contract (ADR-013).
+ACCESS_WRITABLE = "writable"
+ACCESS_READONLY = "readonly"
+ACCESS_IMMUTABLE = "immutable_snapshot"
+
+#: All valid access modes, in declaration order (used by validation).
+ACCESS_MODES: tuple[str, ...] = (
+    ACCESS_WRITABLE,
+    ACCESS_READONLY,
+    ACCESS_IMMUTABLE,
+)
+
 #: Default PRAGMA settings applied to every connection opened by
 #: :class:`SQLiteStore`. ``WAL`` lets readers proceed while a writer
 #: holds the lock; ``synchronous=NORMAL`` is the recommended pairing for
 #: WAL (full durability is preserved at checkpoint); ``busy_timeout``
 #: is a small grace period for short concurrent transactions.
+#:
+#: Note (Phase 6.6R4): ``journal_mode`` is a header-write operation —
+#: :class:`SQLiteStore` applies it in the default :data:`ACCESS_WRITABLE`
+#: mode and *skips* it for the two read-only access modes.
 _DEFAULT_PRAGMAS: dict[str, Any] = {
     "journal_mode": "WAL",
     "synchronous": "NORMAL",
     "foreign_keys": "ON",
     "busy_timeout": 5000,
 }
+
+
+def _read_only_open_uri(resolved_path: str, *, immutable: bool) -> str:
+    """Build the SQLite ``file:`` URI that opens ``resolved_path`` read-only.
+
+    The path is percent-encoded so the URI keeps filesystem semantics for
+    names containing URI-reserved characters. ``immutable`` appends the
+    ``immutable=1`` flag (:data:`ACCESS_IMMUTABLE`).
+    """
+    encoded = _uri_quote(resolved_path, safe="/")
+    uri = f"file:{encoded}?mode=ro"
+    if immutable:
+        uri += "&immutable=1"
+    return uri
 
 
 def _apply_pragma(conn: sqlite3.Connection, pragmas: dict[str, Any] | None = None) -> None:
@@ -129,13 +200,22 @@ class SQLiteStore:
     Parameters
     ----------
     db_path:
-        Path to the database file. Created if it does not exist. The
-        resolved basename is checked against :data:`FORBIDDEN_DB_NAME`
-        before any file is opened.
+        Path to the database file. Created if it does not exist (in
+        the default writable access mode — a read-only access mode
+        never creates the file). The resolved basename is checked
+        against :data:`FORBIDDEN_DB_NAME` before any file is opened.
     pragmas:
         Optional PRAGMA overrides. Keys not in this dict fall back to
         the module-level default. Pass an empty dict to keep the
-        default profile unchanged.
+        default profile unchanged. In a read-only access mode the
+        ``journal_mode`` key is skipped entirely (it is a
+        database-header write; see the deployment-semantics notes in
+        the module docstring).
+    access_mode:
+        One of :data:`ACCESS_MODES` (Phase 6.6R4). Defaults to
+        :data:`ACCESS_WRITABLE` — fully backward compatible. An
+        unknown value raises :class:`ValueError` before any file is
+        opened (validated at construction).
 
     Dialect notes (Phase 6.3)
     -------------------------
@@ -157,26 +237,60 @@ class SQLiteStore:
         self,
         db_path: str | os.PathLike[str],
         pragmas: dict[str, Any] | None = None,
+        *,
+        access_mode: str = ACCESS_WRITABLE,
     ) -> None:
+        if access_mode not in ACCESS_MODES:
+            raise ValueError(
+                f"unknown SQLite access mode {access_mode!r}; "
+                f"expected one of {list(ACCESS_MODES)}"
+            )
+        self._access_mode: str = access_mode
         self._resolved_path: str = _check_path(db_path)
         self._pragmas: dict[str, Any] = dict(_DEFAULT_PRAGMAS)
         if pragmas:
             self._pragmas.update(pragmas)
+        if access_mode != ACCESS_WRITABLE:
+            # journal_mode is a database-header WRITE: a read-only
+            # open must not attempt it (and a WAL-header artifact must
+            # stay exactly as the producer finalized it). The
+            # artifact's header journal mode is left untouched.
+            self._pragmas.pop("journal_mode", None)
         # ``isolation_level=None`` means we control transactions
         # explicitly (we want BEGIN IMMEDIATE, not the default
         # deferred). ``detect_types`` left at default — we serialize
         # datetimes as ISO strings ourselves.
-        self._conn: sqlite3.Connection = sqlite3.connect(
-            self._resolved_path,
-            isolation_level=None,
-            timeout=30.0,
-        )
+        if access_mode == ACCESS_WRITABLE:
+            self._conn: sqlite3.Connection = sqlite3.connect(
+                self._resolved_path,
+                isolation_level=None,
+                timeout=30.0,
+            )
+        else:
+            # Read-only deployment open (Phase 6.6R4): a ``file:`` URI
+            # with mode=ro (+ immutable=1 for the published-snapshot
+            # contract). sqlite3 never creates the file through this
+            # URI, and for ``immutable=1`` SQLite skips locking and
+            # WAL/shm sidecar state entirely.
+            self._conn = sqlite3.connect(
+                _read_only_open_uri(
+                    self._resolved_path, immutable=(access_mode == ACCESS_IMMUTABLE)
+                ),
+                uri=True,
+                isolation_level=None,
+                timeout=30.0,
+            )
         # Row factory gives us dict-like access; keeps repo code
         # readable.
         self._conn.row_factory = sqlite3.Row
         _apply_pragma(self._conn, self._pragmas)
 
     # ----- introspection ---------------------------------------------------
+
+    @property
+    def access_mode(self) -> str:
+        """The access mode this store was opened with (post-validation)."""
+        return self._access_mode
 
     @property
     def path(self) -> str:
@@ -205,10 +319,15 @@ class SQLiteStore:
             return {
                 "backend": "sqlite",
                 "path": self._resolved_path,
+                "access_mode": self._access_mode,
                 "journal_mode": str(self.pragma("journal_mode")),
             }
         except sqlite3.Error:  # pragma: no cover - diagnostics only
-            return {"backend": "sqlite", "path": self._resolved_path}
+            return {
+                "backend": "sqlite",
+                "path": self._resolved_path,
+                "access_mode": self._access_mode,
+            }
 
     # ----- query / mutate --------------------------------------------------
 
@@ -359,6 +478,10 @@ def integrity_check(db_path: str | os.PathLike[str]) -> str:
 
 __all__ = [
     "FORBIDDEN_DB_NAME",
+    "ACCESS_WRITABLE",
+    "ACCESS_READONLY",
+    "ACCESS_IMMUTABLE",
+    "ACCESS_MODES",
     "SQLiteStore",
     "PathGuardError",
     "TransactionError",

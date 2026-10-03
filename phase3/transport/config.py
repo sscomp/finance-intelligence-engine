@@ -17,6 +17,15 @@ FIE_LOG_LEVEL       Python logging level name        "INFO"
 FIE_REQUEST_TIMEOUT seconds per HTTP connection       "60"
 FIE_DATABASE_URL    persistence target (Phase 6.3)   portable SQLite default
 FIE_SERVICE_ENV     runtime profile (diagnostic)     "local"
+FIE_SQLITE_ACCESS_MODE  SQLite deployment open mode  "writable"
+                    (Phase 6.6R4): "writable" (historical
+                    read-write producer/batch profile),
+                    "readonly" (mode=ro reader; needs writable
+                    sidecar space for WAL artifacts) or
+                    "immutable_snapshot" (declared read-only
+                    container deployment: DB-only artifact,
+                    never modified while the reader lives —
+                    ADR-013)
 =================== ================================ ================================
 
 Precedence (documented + tested): explicit argument > environment > safe
@@ -43,6 +52,8 @@ __all__ = [
     "FIE_AUTH_MODE",
     "FIE_LOG_LEVEL",
     "FIE_REQUEST_TIMEOUT",
+    "FIE_SQLITE_ACCESS_MODE",
+    "VALID_ACCESS_MODES",
 ]
 
 FIE_HTTP_HOST = "FIE_HTTP_HOST"
@@ -50,6 +61,20 @@ FIE_HTTP_PORT = "FIE_HTTP_PORT"
 FIE_AUTH_MODE = "FIE_AUTH_MODE"
 FIE_LOG_LEVEL = "FIE_LOG_LEVEL"
 FIE_REQUEST_TIMEOUT = "FIE_REQUEST_TIMEOUT"
+
+#: SQLite deployment access mode (Phase 6.6R4): writable | readonly |
+#: immutable_snapshot. ``writable`` (default) is the historical
+#: behavior; ``immutable_snapshot`` is the declared read-only
+#: container deployment contract (``-v <dir>:/data:ro``; ADR-013).
+FIE_SQLITE_ACCESS_MODE = "FIE_SQLITE_ACCESS_MODE"
+
+#: The SQLite deployment access-mode vocabulary (Phase 6.6R4) as accepted
+#: by this transport contract. Must stay identical to
+#: ``phase3.persistence.sqlite.ACCESS_MODES`` — the identity is pinned by
+#: ``tests/phase3/transport/test_66r4_readonly_sqlite.py`` (the transport
+#: layer imports no persistence seam beyond ``backend``, so the
+#: vocabulary is mirrored here and cross-pinned by test).
+VALID_ACCESS_MODES = ("writable", "readonly", "immutable_snapshot")
 
 #: the complete Phase 6.6 transport env surface (documentation/tests)
 TRANSPORT_ENV_VARS = (
@@ -62,6 +87,7 @@ TRANSPORT_ENV_VARS = (
     FIE_REQUEST_TIMEOUT,
     "FIE_DATABASE_URL",
     "FIE_SERVICE_ENV",
+    FIE_SQLITE_ACCESS_MODE,
 )
 
 _VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
@@ -78,6 +104,7 @@ class TransportConfig:
     auth_principal: str = "service-consumer"
     log_level: str = "INFO"
     request_timeout: float = 60.0
+    sqlite_access_mode: str = "writable"  # writable | readonly | immutable_snapshot
     runtime: dict[str, Any] = field(default_factory=dict)
     db_spec: str | None = field(default=None, repr=False)  # raw DSN, never serialised
 
@@ -89,6 +116,7 @@ class TransportConfig:
             "auth_mode": self.auth_mode,
             "log_level": self.log_level,
             "request_timeout": self.request_timeout,
+            "sqlite_access_mode": self.sqlite_access_mode,
             "runtime": self.runtime,
         }
 
@@ -102,6 +130,7 @@ def load_transport_config(
     auth_token: str | None = None,
     log_level: str | None = None,
     request_timeout: float | None = None,
+    sqlite_access_mode: str | None = None,
 ) -> TransportConfig:
     """Resolve the transport contract (arg > env > safe default)."""
     host = (host or os.environ.get(FIE_HTTP_HOST, "127.0.0.1")).strip()
@@ -127,6 +156,15 @@ def load_transport_config(
     )
     if request_timeout <= 0:
         request_timeout = 60.0
+    sqlite_access_mode = (
+        sqlite_access_mode if sqlite_access_mode is not None
+        else os.environ.get(FIE_SQLITE_ACCESS_MODE, "writable")
+    )
+    sqlite_access_mode = (sqlite_access_mode or "writable").strip().lower()
+    if sqlite_access_mode not in VALID_ACCESS_MODES:
+        # safe default on invalid env (same fallback style as the
+        # other Phase 6.6 knobs — tested in the transport suite)
+        sqlite_access_mode = "writable"
     return TransportConfig(
         host=host,
         port=port,
@@ -134,6 +172,7 @@ def load_transport_config(
         auth_token=token or "",
         log_level=log_level,
         request_timeout=request_timeout,
+        sqlite_access_mode=sqlite_access_mode,
         runtime=load_runtime_config(explicit_db).to_dict(),
         db_spec=explicit_db,
     )

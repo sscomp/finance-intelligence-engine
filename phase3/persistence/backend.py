@@ -34,12 +34,22 @@ from dataclasses import dataclass
 from typing import Any
 
 from phase3.paths import database_url
+from phase3.persistence.sqlite import (
+    ACCESS_IMMUTABLE,
+    ACCESS_MODES,
+    ACCESS_READONLY,
+    ACCESS_WRITABLE,
+)
 
 __all__ = [
     "DatabaseSpec",
     "BACKEND_SQLITE",
     "BACKEND_POSTGRES",
     "PG_URL_PREFIXES",
+    "ACCESS_WRITABLE",
+    "ACCESS_READONLY",
+    "ACCESS_IMMUTABLE",
+    "ACCESS_MODES",
     "sanitize_db_url",
     "resolve_spec",
     "open_store",
@@ -134,18 +144,34 @@ def _spec_from(value: str, source: str) -> DatabaseSpec:
     )
 
 
-def open_store(spec: DatabaseSpec) -> Any:
+def open_store(spec: DatabaseSpec, *, access_mode: str | None = None) -> Any:
     """Open the :class:`~phase3.persistence.contracts.DatabaseStore` for ``spec``.
 
     Returns an open (unclosed) store; the caller owns its lifecycle.
     PostgreSQL requires the optional ``psycopg`` dependency — a clear
     ImportError is raised when it is missing so operators can
     ``pip install 'finance-intelligence-engine[postgres]'``.
+
+    ``access_mode`` (Phase 6.6R4) selects the SQLite deployment open
+    semantics (:data:`~phase3.persistence.backend.ACCESS_WRITABLE` /
+    :data:`ACCESS_READONLY` / :data:`ACCESS_IMMUTABLE`, declared in the
+    SQLite seam and re-exported here); ``None`` keeps
+    the historical writable default. A non-default access mode against a
+    PostgreSQL DSN is rejected — its read-only counterpart is
+    ``set_query_only()`` (``SET default_transaction_read_only = on``),
+    applied by the service boundary independently of deployment open
+    semantics.
     """
     if spec.backend == BACKEND_POSTGRES:
+        if access_mode is not None and access_mode != ACCESS_WRITABLE:
+            raise ValueError(
+                "open_store: access_mode is a SQLite deployment contract; "
+                f"{spec.backend!r} specs only accept the writable default "
+                "(read-only enforcement is set_query_only())"
+            )
         from phase3.persistence.postgres import PostgresStore
 
         return PostgresStore(spec.dsn)
     from phase3.persistence.sqlite import SQLiteStore
 
-    return SQLiteStore(spec.dsn)  # type: ignore[return-value]
+    return SQLiteStore(spec.dsn, access_mode=access_mode or ACCESS_WRITABLE)

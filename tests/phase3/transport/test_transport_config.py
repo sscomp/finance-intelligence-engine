@@ -174,6 +174,8 @@ class TestLogSafety(unittest.TestCase):
                 "FIE_AUTH_TOKEN", "FIE_AUTH_PRINCIPAL",
                 FIE_LOG_LEVEL, FIE_REQUEST_TIMEOUT,
                 "FIE_DATABASE_URL", "FIE_SERVICE_ENV",
+                # Phase 6.6R4: SQLite deployment access mode (ADR-013)
+                "FIE_SQLITE_ACCESS_MODE",
             },
         )
 

@@ -73,6 +73,7 @@ SQLite / PostgreSQL（僅持久層 seams；無 SQL 在傳輸層）
 | `FIE_LOG_LEVEL` | `INFO` | DEBUG/INFO/WARNING/ERROR |
 | `FIE_REQUEST_TIMEOUT` | `60` | 每連線逾時（秒） |
 | `FIE_DATABASE_URL` | 可攜 SQLite 預設 | 持久層目標（Phase 6.3 契約） |
+| `FIE_SQLITE_ACCESS_MODE` | `writable` | SQLite 部署存取模式（6.6R4/ADR-013）：`writable`（生產者/批次歷史行為）、`readonly`（`mode=ro` 讀取；WAL 工件需可寫 sidecar 空間）、`immutable_snapshot`（宣告的唯讀容器部署：僅主 `.db` 工件、讀者存活期間工件不得變動） |
 
 ## 5. 健康與就緒 (§10)
 
@@ -80,6 +81,11 @@ SQLite / PostgreSQL（僅持久層 seams；無 SQL 在傳輸層）
 * `/readyz`：服務初始化 + 持久層可達（包裝 `get_health`）。
   不要求任何 live Yahoo/TWSE/RSS 抓取；stale/degraded 狀態
   以 `freshness` 元資料誠實呈現（§8）。
+* `/readyz` 與查詢路徑使用**同一宣告的存取模式**（6.6R4/ADR-013）：
+  `FIE_SQLITE_ACCESS_MODE` 決定 SQLite 部署開啟語意，就緒探測與
+  領域查詢共享同一連線語意（唯讀部署以 `immutable_snapshot` 開啟
+  DB-only 工件；不存在的工件不會被自動建立；就緒錯誤如實回報
+  503，訊息經 6.6R1 消毒 — 內部例外/SQL 細節不入回應體）。
 
 ## 6. 遙測 (§11)
 
@@ -133,16 +139,31 @@ curl -s http://127.0.0.1:8787/readyz | head -c 300
 
 ## 9. 容器（§13，參考構建）
 
-### 9.1 一般構建（標準公開 CA 信任 — Mode A）
+### 9.1 一般構建與唯讀部署（標準公開 CA 信任 — Mode A）
 
 ```bash
 docker build -t fie-reference-runtime:local .
 docker run --rm -p 127.0.0.1:8787:8787 \
   -e FIE_DATABASE_URL=/data/intelligence.db \
+  -e FIE_SQLITE_ACCESS_MODE=immutable_snapshot \
   -v <host-data-dir>:/data:ro \
   fie-reference-runtime:local
 curl -s http://127.0.0.1:8787/healthz
+curl -s http://127.0.0.1:8787/readyz
 ```
+
+* **SQLite 部署工件契約（6.6R4/ADR-013）**：所部署的是*已定案的*
+  主 `intelligence.db` 工件（單檔）；`immutable_snapshot` 模式下
+  執行時以 `file:<path>?mode=ro&immutable=1` 開啟 —— 任何
+  `-wal`/`-shm`/`-journal` sidecar **既不要求也不被建立**；唯讀
+  掛載（`:ro`）即為宣告的參考部署拓撲。
+* 部署工件由生產者（批次/CLI 寫入路徑）在乾淨關閉下定案：SQLite
+  於最後一條連線乾淨關閉時檢查點並移除 sidecar；不要部署帶有殘留
+  sidecar 的目錄（生產者中途當掉的情境不構成有效工件)。
+* 若操作者提供**可寫**的資料目錄且需在服務存活期間供應即時更新，
+  則不宣告 immutable 語意：可顯式選 `readonly`（WAL 工件需可寫
+  sidecar 空間）或保留預設 `writable`。預設值維持歷史行為
+  （`writable`），全部有測試（`test_66r4_readonly_sqlite.py`）。
 
 * 非 root（uid/gid 10001）、明確埠 8787、HEALTHCHECK 接
   `/healthz`、無內嵌憑證/生產資料/主機特定掛載；基礎映像摘要
@@ -203,6 +224,14 @@ fie-http-server &                                 # 自任意 CWD 重複 §12 �
 A3 venv/DB、開發快取、Hermes 狀態。）
 
 ## 11. 安全假設與限制（§19）
+
+* SQLite 部署生命週期（6.6R4/ADR-013）：`immutable_snapshot` 模式
+  的讀者假設工件在其存活期間**永不變動**（SQLite `immutable=1`
+  省略鎖定與 WAL/shm）；執行時不得修改該工件（寫入路徑不存在
+  於服務/傳輸面），操作者也不得在讀者存活期間替換/更新檔案 —
+  需要即時更新時請使用 `readonly` 或 `writable` 模式與可寫
+  sidecar 空間。`readonly` 模式對 WAL 工件要求可寫的
+  sidecar 目錄（顯式、可攜的要求，測試覆蓋該差異）。
 
 * 生產身份提供者**不**在本階段提供；token 模式為單一共用憑證。
 * 參考執行時預設僅回環綁定；公網部署需操作者明確設定
