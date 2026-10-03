@@ -376,7 +376,7 @@ PYTHONPATH=. python -m unittest tests.phase3.test_portfolio_allocation
 - **可移植性 (Phase 6.1)**：測試不假設任何 checkout 位置、使用者名稱或 venv 路徑。與主機相關的資料測試（production `macro_history.db` bridge 整合、外部 Hermes 排程器 R3 驗證）在該主機資料不存在時會明確 skip（附原因），不會失敗。
 
 > 上列測試數量為特定時間點的 snapshot，非永久宣告。實際數量隨開發進展會變動。
-> Phase 6.1 驗證（2026-10-03）：全部測試 1945 tests、0 failed、0 errors（59 justified skips，見 Phase 6.1 報告）。
+> Phase 6.1 驗證（2026-10-03）：全部測試 1951 tests、0 failed、0 errors（59 justified skips，見 Phase 6.1 報告）。
 
 ### 時區政策 (Phase 6.1)
 
