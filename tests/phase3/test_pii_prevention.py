@@ -76,6 +76,40 @@ distinguishes three explicit scan states:
   ``PII_SCAN_INTERNAL_ERROR``; overall incomplete state
   ``PII_SCAN_INCOMPLETE`` with ``gate_result=FAIL``.
 
+R7 diagnostic-path redaction contract (defect R6-SEC-01):
+
+> A fail-closed decision is necessary but not sufficient: the
+> diagnostics that EXPLAIN it must not re-disclose the prohibited
+> value. Fail closed **and** stay silent about the unsafe value.
+
+R6 independently demonstrated that with an in-scope file whose
+*path itself* carries a prohibited identifier (e.g. an email-shaped
+basename that disappears between enumeration and read), the correct
+``FAIL`` decision used to be accompanied by diagnostics echoing the
+raw path — in the structured ``scan_errors``/``findings`` records, in
+``json.dumps`` output, and in the compatibility wrapper text of
+:class:`PIIScanIncompleteError` (``path=...``). R7 closes that
+channel with one canonical policy (:func:`_path_diag`) applied at
+the single point where diagnostic path records are constructed:
+
+* every path component is classified by the SAME detector rules the
+  scanner applies to file content — a component carrying a
+  prohibited identifier/secret shape is never fit for output;
+* prohibited components are dropped whole (replaced by
+  ``<redacted>``): no partial echo, suffix carving, or local-part
+  surgery that could re-assemble the value; clean components stay,
+  so repository-relative paths remain human-correlatable;
+* every record additionally carries ``path_id`` — a stable,
+  domain-separated ``sha256`` digest of the full path string — so
+  redacted paths remain correlatable across runs without disclosing
+  the value (see :func:`_path_id` for the threat model);
+* the policy itself fails SAFE: if the sanitizer (or the classifier
+  on a component, or the digest) raises for any reason, the path is
+  emitted completely opaque and correlation degrades gracefully —
+  a sanitizer failure can never cause raw-path emission, and it
+  never causes a file to be skipped (the scan state still fails
+  closed).
+
 Documented, narrow exemptions (kept in repo, reviewable, with reasons):
 
 * message-id left context: numbers directly preceded by a *message id*
@@ -102,7 +136,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -312,12 +348,114 @@ class PIIScanIncompleteError(RuntimeError):
     scanned. The overall gate result is FAIL — never a clean-equivalent."""
 
 
-def _safe_path(path: Path) -> str:
-    """Repository-relative path when possible (no file contents)."""
+# --- R7: canonical safe-path diagnostic policy (R6-SEC-01) -------------
+# The single rule for EVERY diagnostic surface that carries a path:
+# structured records, JSON dumps, wrapper text and exception messages.
+# Path records are built only through `_path_diag`, so all surfaces
+# inherit identical redaction (no sanitize-one-field-leak-another gap).
+
+# Whole-component replacement marker. Deliberately distinct from the
+# content snippet mask `REDACT`. No suffix/extension carving and no
+# local-part surgery of a flagged component: the value must not be
+# re-assemblable from whatever is emitted.
+_PATH_REDACTED = "<redacted>"
+# Correlation digest domain separator (see _path_id threat model).
+_PATH_ID_TAG = "fie-pii-gate/path-id/v1\0"
+
+
+def _path_id(path: Path) -> str:
+    """Stable, domain-separated correlation digest of a full path.
+
+    ``sha256(digest-tag || path-string)``, truncated to 16 hex chars.
+    Threat model for publishing these digests in diagnostics: the path
+    string is preimage-resistant so the id leaks nothing about names or
+    structure; the attacker can only re-compute ids for path strings
+    they already possess — i.e. guessing is limited to replaying known
+    candidate paths, never extracting unknown ones. The id must never
+    be presented alongside any raw path material (records carry one
+    construction or the other), and the domain tag prevents cross-use
+    of path ids as content fingerprints or of fingerprints as path ids.
+
+    Encoding uses ``surrogatepass`` so undecodable byte-level names
+    (see `_tracked_files`) still produce a stable deterministic id.
+    """
+    raw = _PATH_ID_TAG.encode("utf-8") + str(path).encode(
+        "utf-8", "surrogatepass")
+    return "sha256:" + hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _location_scope(path: Path) -> str:
+    """``repository`` when inside the tracked working tree, else ``external``."""
     try:
-        return str(path.relative_to(REPO_ROOT))
+        path.relative_to(REPO_ROOT)
+        return "repository"
     except ValueError:
-        return str(path)
+        return "external"
+
+
+def _path_diag(path: Path) -> dict[str, str]:
+    """Canonical safe-path diagnostics for one enumerated path (R7).
+
+    One policy for all surfaces that carry a path (Task B of the R7
+    work order):
+
+    * **identity**: repository-relative string preferred (correlation
+      without host clutter), full string otherwise; identity is split
+      on path-component boundaries;
+    * **classification**: every component runs through the SAME
+      detector rules the scanner applies to file content
+      (:func:`_scan_line`); a component whose text carries a
+      prohibited identifier/secret shape is not fit for output,
+      whatever its role in the path (basename, parent, or deeper);
+    * **emission**: flagged components are replaced WHOLE by
+      ``<redacted>``; clean components are kept so a safe
+      repository-relative path stays readable and correlatable;
+    * **correlation**: every record also carries ``path_id``
+      (:func:`_path_id`) so operators can match redacted failures
+      across runs without disclosing the value;
+    * **failure-safe**: if any step of this policy (including the
+      per-component classifier or the digest) raises, the emitted
+      path degrades to the fully opaque form and the id to an
+      explicit-unavailable token — a sanitizer error can NEVER emit
+      raw path material, and it never skips the scanned file (the
+      caller's scan state keeps failing closed independently).
+    """
+    record: dict[str, str] = {
+        "path": _PATH_REDACTED,
+        "path_id": "<path_id_unavailable>",
+        "location_scope": "external",
+    }
+    try:
+        record["location_scope"] = _location_scope(path)
+    except Exception:  # noqa: BLE001 — scope hint is best-effort
+        pass
+    try:
+        if record["location_scope"] == "repository":
+            parts = list(path.relative_to(REPO_ROOT).parts)
+        else:
+            parts = list(path.parts)
+    except Exception:  # noqa: BLE001 — cannot state structure => opaque
+        parts = None
+    if parts:
+        cleaned: list[str] = []
+        for part in parts:
+            try:
+                flagged = bool(_scan_line(part))
+            except Exception:  # noqa: BLE001 — an unclassifiable
+                # component is never fit for output: redact it whole.
+                flagged = True
+            cleaned.append(_PATH_REDACTED if flagged else part)
+        try:
+            record["path"] = str(Path(*cleaned))
+        except Exception:  # noqa: BLE001 — reconstruction failure =>
+            # opaque form only (never the pre-redaction string)
+            record["path"] = _PATH_REDACTED
+    try:
+        record["path_id"] = _path_id(path)
+    except Exception:  # noqa: BLE001 — losing correlation is
+        # acceptable; echoing the path instead is not.
+        pass
+    return record
 
 
 def collect_scan_report(files: list[Path]) -> dict[str, object]:
@@ -340,14 +478,14 @@ def collect_scan_report(files: list[Path]) -> dict[str, object]:
             text = path.read_text(encoding="utf-8")  # strict: F4 fail closed
         except UnicodeDecodeError as exc:  # F4 — decode contract failure
             errors.append({
-                "path": _safe_path(path),
+                **_path_diag(path),  # R7 — one canonical path policy
                 "reason_code": "PII_SCAN_DECODE_ERROR",
                 "error_class": type(exc).__name__,
             })
             continue
         except OSError as exc:  # F1/F2/F3 — incompleteness, not cleanliness
             errors.append({
-                "path": _safe_path(path),
+                **_path_diag(path),  # R7 — one canonical path policy
                 "reason_code": "PII_SCAN_READ_ERROR",
                 "error_class": type(exc).__name__,
             })
@@ -356,14 +494,14 @@ def collect_scan_report(files: list[Path]) -> dict[str, object]:
             found_rows = _scan_text(text)  # F5 — internal failure fails closed
         except Exception as exc:  # noqa: BLE001 — converted to FAIL, never passed
             errors.append({
-                "path": _safe_path(path),
+                **_path_diag(path),  # R7 — one canonical path policy
                 "reason_code": "PII_SCAN_INTERNAL_ERROR",
                 "error_class": type(exc).__name__,
             })
             continue
         for lineno, category, fp in found_rows:
             raw.append({
-                "path": _safe_path(path),
+                **_path_diag(path),  # R7 — findings paths are redacted too
                 "line": lineno,
                 "category": category,
                 "fingerprint": fp,
@@ -387,12 +525,17 @@ def collect_scan_report(files: list[Path]) -> dict[str, object]:
 
 
 def _incomplete_message(report: dict[str, object]) -> str:
-    """Safe structured failure text — reason codes + error classes only."""
+    """Safe structured failure text — reason codes + error classes +
+    redacted paths + correlation ids only (R7: the wrapper face of the
+    failure must inherit the same canonical path policy as the JSON
+    records; `path_id` keeps failures correlatable across runs)."""
     lines = ["PII_SCAN_INCOMPLETE: gate_result=FAIL "
              f"unscanned_files={len(report['scan_errors'])}"]
     for err in report["scan_errors"]:  # type: ignore[union-attr]
         lines.append(f"  reason_code={err['reason_code']} "
-                     f"error_class={err['error_class']} path={err['path']}")
+                     f"error_class={err['error_class']} "
+                     f"location_scope={err['location_scope']} "
+                     f"path={err['path']} path_id={err['path_id']}")
     return "\n".join(lines)
 
 
@@ -413,7 +556,15 @@ def collect_findings(files: list[Path]) -> list[dict[str, object]]:
 def _tracked_files() -> list[Path]:
     out = subprocess.run(["git", "ls-files", "-z"], cwd=REPO_ROOT,
                          capture_output=True, check=True)
-    names = out.stdout.decode("utf-8", "replace").split("\0")
+    # §9 (R7) — bijective filename decode: `surrogateescape` maps every
+    # distinct byte-level Git name to a DISTINCT str and back, so
+    # replacement decoding cannot alias two tracked files onto one
+    # path identity (the wrong-file/bypass shape is excluded
+    # structurally, not case by case). A surrogate-bearing path still
+    # resolves at the OS layer; its bytes are then subject to the same
+    # strict-UTF-8 read contract as every other in-scope file, so this
+    # cannot silently widen what counts as scannable content.
+    names = out.stdout.decode("utf-8", "surrogateescape").split("\0")
     return [REPO_ROOT / name for name in names if name]
 
 
@@ -450,6 +601,13 @@ SYNTH_PREFIX_HOST = "syn" + "thetic-mail.invalid"
 SYNTH_CONTACT_LOCAL = "call" + "center.agent"
 SYNTH_REMOTE_ADDR = SYNTH_CONTACT_LOCAL + "@" + SYNTH_RELAY_DOMAIN
 SYNTH_PREFIX_ADDR = SYNTH_CONTACT_LOCAL + "@" + SYNTH_PREFIX_HOST
+# R7 diagnostic-path fixtures: must be a value the detector FLAGS (the
+# reserved example domains are exempt, so they cannot exercise the
+# redaction policy) — an attacker-style relay address assembled from
+# fragments, never a literal in tracked source.
+SYNTH_R7_LOCAL = "r7-" + "operator"
+SYNTH_R7_DOMAIN = "relay." + "attacker" + ".invalid"
+SYNTH_R7_ADDR = SYNTH_R7_LOCAL + "@" + SYNTH_R7_DOMAIN
 
 
 class TestPIIGateDetector(unittest.TestCase):
@@ -528,6 +686,7 @@ class TestAdversarialMatrix(unittest.TestCase):
         # Exercise the real production path: content on disk →
         # collect_findings (the same reader the tracked-tree scan uses).
         with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
             probe = Path(tmp) / "payload.txt"
             probe.write_text(content, encoding="utf-8")
             return collect_findings([probe])
@@ -683,6 +842,7 @@ class TestAdversarialMatrix(unittest.TestCase):
         import tempfile
         payload = 'deliver: "chat' + '_id": ' + SYNTH_CHAT + "\n"
         with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
             tmp_path = Path(tmp)
             doc_dir = tmp_path / "notes" / "docs"
             test_dir = tmp_path / "suite" / "test_sub"
@@ -804,6 +964,7 @@ class TestR5FailClosedScanCompleteness(unittest.TestCase):
 
     def test_T1_file_not_found_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
             fixture = Path(tmp) / "carrier.md"
             fixture.write_text(self._payload(), encoding="utf-8")
             self._readable_finding(fixture)  # positive control (baseline T7)
@@ -819,6 +980,7 @@ class TestR5FailClosedScanCompleteness(unittest.TestCase):
 
     def test_T2_permission_error_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
             fixture = Path(tmp) / "carrier.md"
             fixture.write_text(self._payload(), encoding="utf-8")
             self._readable_finding(fixture)
@@ -868,6 +1030,7 @@ class TestR5FailClosedScanCompleteness(unittest.TestCase):
 
     def test_T3_generic_oserror_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
             fixture = Path(tmp) / "carrier.md"
             fixture.write_text(self._payload(), encoding="utf-8")
             self._readable_finding(fixture)
@@ -884,6 +1047,7 @@ class TestR5FailClosedScanCompleteness(unittest.TestCase):
 
     def test_T4_decode_failure_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
             fixture = Path(tmp) / "carrier.md"
             # non-UTF-8 bytes carrying the same prohibited payload shape:
             # the old errors="replace" contract silently decoded this to
@@ -902,6 +1066,7 @@ class TestR5FailClosedScanCompleteness(unittest.TestCase):
 
     def test_T5_scanner_internal_error_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
             fixture = Path(tmp) / "carrier.md"
             fixture.write_text(self._payload(), encoding="utf-8")
             self._readable_finding(fixture)
@@ -925,6 +1090,7 @@ class TestR5FailClosedScanCompleteness(unittest.TestCase):
 
     def test_T7_readable_prohibited_fixture_fails_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
             fixture = Path(tmp) / "carrier.md"
             fixture.write_text(self._payload(), encoding="utf-8")
             report = self._readable_finding(fixture)
@@ -939,6 +1105,7 @@ class TestR5FailClosedScanCompleteness(unittest.TestCase):
         content = ("owner: team@sub.example.test docs https://docs.example.org/x\n"
                    "dsn: postgresql://user:pass@db.internal:5432/fie_db\n")
         with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
             fixture = Path(tmp) / "approved_fixture.md"
             fixture.write_text(content, encoding="utf-8")
             report = collect_scan_report([fixture])
@@ -980,5 +1147,569 @@ class TestRepoCleanOfOI07A(unittest.TestCase):
         self.assertIn("chat_id", snippet)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestR7DiagnosticPathRedaction(unittest.TestCase):
+    """Permanent regression suite for defect R6-SEC-01 (R7 §6.E).
+
+    Baseline (repair SHA 70c7bed): the fail-closed DECISION was correct,
+    but the diagnostics explaining it — structured ``scan_errors`` /
+    ``findings`` records, their JSON serialization, and the
+    compatibility wrapper text of :class:`PIIScanIncompleteError` —
+    echoed the raw path of an in-scope file whenever a prohibited
+    identifier appeared in a path component (basename, parent
+    directory, or external absolute path).
+
+    Every test here asserts BOTH required halves:
+
+    * the security decision is correct (fail closed on scan
+      incompleteness, real findings preserved), AND
+    * the raw prohibited path token is absent from EVERY observable
+      output surface (structured records, JSON dumps, wrapper text,
+      exception text, nested string fields).
+
+    Fixtures: synthetic, fragment-assembled; the address family is a
+    detector-FLAGGED attacker-style relay address (reserved example
+    domains are exempt and therefore cannot exercise redaction).
+    """
+
+    maxDiff = None
+
+    # fragment-assembled prohibited path token
+    _TOKEN = SYNTH_R7_ADDR
+    _BASENAME = SYNTH_R7_ADDR + ".md"
+    _PAYLOAD = ('deliver: "chat' + '_id": ' + SYNTH_CHAT + "\npage "
+                + SYNTH_CONTACT_LOCAL + "@" + SYNTH_RELAY_DOMAIN + "\n")
+    _CLEAN_CONTENT = "plain operational content\n"
+    _PII_CONTENT_VALUES = (SYNTH_CHAT, SYNTH_REMOTE_ADDR,
+                           SYNTH_CONTACT_LOCAL)
+
+    # ------------------------------------------------------------ helpers
+
+    def _all_strings(self, obj: object) -> list[str]:
+        """Every string reachable in a report (records, fields, nested)."""
+        if isinstance(obj, str):
+            return [obj]
+        if isinstance(obj, dict):
+            return [s for v in obj.values() for s in self._all_strings(v)]
+        if isinstance(obj, (list, tuple)):
+            return [s for v in obj for s in self._all_strings(v)]
+        return [str(obj)]
+
+    def _assert_no_token_anywhere(self, *surfaces: object) -> None:
+        """I2 + I4: the prohibited path token must be absent from every
+        string reachable in every given output surface (records, nested
+        fields, wrapper text, exception text, dumps)."""
+        for surface in surfaces:
+            for text in self._all_strings(surface):
+                self.assertNotIn(self._TOKEN, text,
+                                 "raw prohibited path material reached an "
+                                 f"observable diagnostic surface: {text!r}")
+
+    def _wrapper_text(self, files: list[Path]) -> str:
+        """The compatibility face: the raised fail-closed exception text."""
+        try:
+            collect_findings(files)
+        except PIIScanIncompleteError as exc:
+            return str(exc)
+        self.fail("unreadable fixture did NOT fail closed through the "
+                  "compatibility entrypoint")
+
+    def _pii_name_file(self, tmp: Path) -> Path:
+        return tmp / self._BASENAME
+
+    def _assert_fail_closed_shape(self, report: dict[str, object],
+                                  reason_code: str = "PII_SCAN_READ_ERROR",
+                                  ) -> dict[str, str]:
+        """Decision half of the invariant; returns the single error record."""
+        self.assertEqual("SCAN_INCOMPLETE", report["state"])
+        self.assertEqual("FAIL", report["gate_result"],
+                         "redaction must never soften the failing decision")
+        errors = report["scan_errors"]  # type: ignore[union-attr]
+        self.assertEqual(1, len(errors))  # type: ignore[arg-type]
+        record = errors[0]  # type: ignore[index]
+        self.assertEqual(reason_code, record["reason_code"])
+        return record  # type: ignore[return-value]
+
+    def _correlation_shape(self, record: dict[str, str],
+                           want_scope: str = "external") -> None:
+        """I3: redaction must not destroy correlation."""
+        # flagged component dropped whole; clean components stay
+        self.assertIn("<redacted>", record["path"])
+        self.assertEqual(want_scope, record["location_scope"])
+        pid = record["path_id"]
+        self.assertTrue(pid.startswith("sha256:") and len(pid) == len(
+            "sha256:") + 16,
+            f"path_id must be a 16-hex digest, got {pid!r}")
+        self.assertNotIn(self._TOKEN, pid)
+
+    # --- 1/5. PII in basename + FileNotFoundError ------------------------
+    # --- 10. structured JSON output ---------------------------------------
+
+    def test_R01_basename_filenotfound_redacted_json_and_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = self._pii_name_file(tmp)
+            fixture.write_text(self._CLEAN_CONTENT, encoding="utf-8")
+            enumerated = [fixture]
+            fixture.unlink()  # disappears between enumeration and read
+            report = collect_scan_report(enumerated)
+            record = self._assert_fail_closed_shape(report)
+            self.assertEqual("FileNotFoundError", record["error_class"])
+            self._correlation_shape(record)
+            dumped = json.dumps(report, ensure_ascii=False)
+            self._assert_no_token_anywhere(report, dumped,
+                                           self._wrapper_text(enumerated))
+
+    # --- 6. genuine PermissionError ---------------------------------------
+
+    def test_R02_basename_permissionerror_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = self._pii_name_file(tmp)
+            fixture.write_text(self._CLEAN_CONTENT, encoding="utf-8")
+            privileged_env = False
+            fixture.chmod(0)
+            try:
+                report = collect_scan_report([fixture])
+                if report["scan_complete"]:
+                    privileged_env = True  # permission bits ignored (root)
+                else:
+                    record = self._assert_fail_closed_shape(report)
+                    self.assertEqual("PermissionError", record["error_class"])
+                    self._correlation_shape(record)
+                    self._assert_no_token_anywhere(
+                        report, json.dumps(report, ensure_ascii=False),
+                        self._wrapper_text([fixture]))
+            finally:
+                fixture.chmod(0o644)
+            if privileged_env:
+                exc = PermissionError(13, "simulated-locked read seam")
+                with self._read_failure_seam(fixture, exc):
+                    report = collect_scan_report([fixture])
+                    record = self._assert_fail_closed_shape(report)
+                    self.assertEqual("PermissionError", record["error_class"])
+                    self._correlation_shape(record)
+                    self._assert_no_token_anywhere(
+                        report, json.dumps(report, ensure_ascii=False),
+                        self._wrapper_text([fixture]))
+
+    # seam shared with the R5 suite's T-tests (same shape, local scope)
+    def _read_failure_seam(self, fixture: Path, exc: Exception):
+        original = Path.read_text
+
+        def raiser(path_self: Path, *args: object, **kwargs: object):
+            if path_self == fixture:
+                raise exc
+            return original(path_self, *args, **kwargs)  # type: ignore[arg-type]
+
+        return mock.patch.object(Path, "read_text", new=raiser)
+
+    # --- 2. PII in parent directory ---------------------------------------
+
+    def test_R03_parent_dir_pii_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            pii_dir = tmp / self._TOKEN
+            pii_dir.mkdir()
+            # (a) unreadable file under the pii-named directory
+            inner = pii_dir / "notes.md"
+            inner.write_text(self._CLEAN_CONTENT, encoding="utf-8")
+            inner.chmod(0)
+            try:
+                report = collect_scan_report([inner])
+                if not report["scan_complete"]:
+                    record = self._assert_fail_closed_shape(report)
+                    self._correlation_shape(record)
+                    self._assert_no_token_anywhere(
+                        report, json.dumps(report, ensure_ascii=False),
+                        self._wrapper_text([inner]))
+            finally:
+                inner.chmod(0o644)
+            # (b) readable file under the pii-named directory: the
+            # findings[].path surface must be redacted just as strictly
+            inner.write_text(self._PAYLOAD, encoding="utf-8")
+            report = collect_scan_report([inner])
+            self.assertEqual("FAIL", report["gate_result"],
+                             "prohibited content must still be reported")
+            self.assertGreaterEqual(report["unapproved_pii_count"], 1)  # type: ignore[operator]
+            finding = report["findings"][0]  # type: ignore[index]
+            self.assertIn("<redacted>", finding["path"])
+            self._correlation_shape(finding)
+            self._assert_no_token_anywhere(
+                report, json.dumps(report, ensure_ascii=False))
+
+    # --- 3. PII in absolute external path (scope + structure) -------------
+
+    def test_R03b_external_absolute_path_scope_declared(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = self._pii_name_file(tmp)  # absolute external path
+            fixture.write_text(self._CLEAN_CONTENT, encoding="utf-8")
+            enumerated = [fixture]
+            fixture.unlink()
+            report = collect_scan_report(enumerated)
+            record = self._assert_fail_closed_shape(report)
+            self.assertEqual("external", record["location_scope"])
+            # the emitted string keeps only unflagged structural
+            # components and the whole opaque marker for the flagged one
+            self.assertNotIn(self._TOKEN, record["path"])
+            self.assertIn("<redacted>", record["path"])
+
+    # --- 4. safe repository-relative path stays correlatable --------------
+
+    def test_R04_safe_repo_relative_path_is_retained(self) -> None:
+        # I3 forbids solving the defect by deleting all diagnostic
+        # identity: a path with NO prohibited component inside the
+        # working tree keeps its readable relative form + stable id.
+        with mock.patch(f"{__name__}.REPO_ROOT", tempfile.mkdtemp()) as tmp_s:
+            tmp = Path(tmp_s)
+            fixture = tmp / "carrier_clean.md"
+            fixture.write_text(self._PAYLOAD, encoding="utf-8")
+            report = collect_scan_report([fixture])
+        self.assertEqual("FAIL", report["gate_result"])
+        finding = report["findings"]  # type: ignore[index]
+        self.assertGreaterEqual(len(finding), 1)
+        self.assertEqual("carrier_clean.md",
+                         finding[0]["path"])  # type: ignore[index]
+        self.assertEqual("repository",
+                         finding[0]["location_scope"])  # type: ignore[index]
+        self._assert_no_token_anywhere(
+            report, json.dumps(report, ensure_ascii=False))
+
+    # --- 7. generic OSError ------------------------------------------------
+
+    def test_R05_generic_oserror_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = self._pii_name_file(tmp)
+            fixture.write_text(self._CLEAN_CONTENT, encoding="utf-8")
+            with self._read_failure_seam(
+                    fixture, OSError(5, "simulated generic I/O failure")):
+                report = collect_scan_report([fixture])
+                record = self._assert_fail_closed_shape(report)
+                self.assertEqual("OSError", record["error_class"])
+                self._correlation_shape(record)
+                self._assert_no_token_anywhere(
+                    report, json.dumps(report, ensure_ascii=False),
+                    self._wrapper_text([fixture]))
+
+    # --- 8. decode failure --------------------------------------------------
+
+    def test_R06_decode_failure_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = self._pii_name_file(tmp)
+            fixture.write_bytes(("text " + "x" * 10 + "\n").encode("utf-8")
+                                + b"\xff\xfe\x00payload\n")
+            report = collect_scan_report([fixture])
+            record = self._assert_fail_closed_shape(
+                report, reason_code="PII_SCAN_DECODE_ERROR")
+            self.assertEqual("UnicodeDecodeError", record["error_class"])
+            self._correlation_shape(record)
+            self._assert_no_token_anywhere(
+                report, json.dumps(report, ensure_ascii=False),
+                self._wrapper_text([fixture]))
+
+    # --- 9. scanner internal error ------------------------------------------
+
+    def test_R07_internal_error_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = self._pii_name_file(tmp)
+            fixture.write_text(self._CLEAN_CONTENT, encoding="utf-8")
+            with mock.patch(f"{__name__}._scan_text",
+                            side_effect=RuntimeError(
+                                "simulated classification fault")):
+                report = collect_scan_report([fixture])
+                record = self._assert_fail_closed_shape(
+                    report, reason_code="PII_SCAN_INTERNAL_ERROR")
+                self.assertEqual("RuntimeError", record["error_class"])
+                self._correlation_shape(record)
+                self._assert_no_token_anywhere(
+                    report, json.dumps(report, ensure_ascii=False),
+                    self._wrapper_text([fixture]))
+
+    # --- 13. mixed prohibited content + unreadable file ---------------------
+
+    def test_R10_mixed_readable_prohibited_and_unreadable_pii_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            # readable carrier: prohibited CONTENT, safe basename
+            readable = tmp / "carrier_plain.md"
+            readable.write_text(self._PAYLOAD, encoding="utf-8")
+            # unreadable carrier: prohibited identity in its path
+            hidden = self._pii_name_file(tmp)
+            hidden.write_text(self._CLEAN_CONTENT, encoding="utf-8")
+            hidden.unlink()
+            report = collect_scan_report([readable, hidden])
+            self.assertEqual("SCAN_INCOMPLETE", report["state"])
+            self.assertEqual("FAIL", report["gate_result"])
+            self.assertGreaterEqual(report["unapproved_pii_count"], 1)  # type: ignore[operator]
+            # readable finding: safe path correlated, content not dumped
+            f0 = report["findings"][0]  # type: ignore[index]
+            self.assertEqual(str(readable), f0["path"])
+            for value in self._PII_CONTENT_VALUES:
+                self.assertNotIn(value, json.dumps(report,
+                                                   ensure_ascii=False))
+            # unreadable record: redacted identity
+            errors = report["scan_errors"]  # type: ignore[union-attr]
+            self.assertEqual(1, len(errors))  # type: ignore[arg-type]
+            self.assertIn("<redacted>", errors[0]["path"])  # type: ignore[index]
+            self._assert_no_token_anywhere(
+                report, json.dumps(report, ensure_ascii=False),
+                self._wrapper_text([readable, hidden]))
+
+    # --- 11. compatibility wrapper output ------------------------------------
+
+    def test_R09_wrapper_text_uses_same_policy_as_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = self._pii_name_file(tmp)
+            fixture.write_text(self._CLEAN_CONTENT, encoding="utf-8")
+            fixture.unlink()
+            report = collect_scan_report([fixture])
+            wrapper = self._wrapper_text([fixture])
+            record = report["scan_errors"][0]  # type: ignore[index]
+            # the wrapper line and the JSON record must carry the SAME
+            # redacted path + the same correlation id (I4 consistency)
+            self.assertIn(f"path={record['path']}", wrapper)
+            self.assertIn(f"path_id={record['path_id']}", wrapper)
+            self.assertNotIn(self._TOKEN, wrapper)
+            self.assertIn("PII_SCAN_INCOMPLETE", wrapper)
+            self.assertIn("gate_result=FAIL", wrapper)
+
+    # --- 12. nested reason/message/details leakage (I4) ----------------------
+
+    def test_R11_all_nested_fields_and_dumps_are_token_free(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = self._pii_name_file(tmp)
+            fixture.write_bytes(b"\xff\xfe\x00broken\n")
+            report = collect_scan_report([fixture])
+            message = str(PIIScanIncompleteError(str(report)))
+            incomplete = _incomplete_message(report)
+            # every string reachable anywhere: record fields (reason /
+            # error_class / path / path_id / location_scope), nested
+            # dumps in both ASCII-escaping modes, exception renderings,
+            # and the wrapper formatter output — no partial echo
+            # survived anywhere
+            for dump in (json.dumps(report, ensure_ascii=False),
+                         json.dumps(report, ensure_ascii=True),
+                         repr(report), message, incomplete,
+                         _redact_snippet(json.dumps(report,
+                                                    ensure_ascii=False))):
+                self.assertNotIn(self._TOKEN, dump)
+            for text in self._all_strings(report):
+                self.assertNotIn(self._TOKEN, text)
+            # and the entrypoint exception built from the report
+            try:
+                collect_findings([fixture])
+                self.fail("expected PIIScanIncompleteError")
+            except PIIScanIncompleteError as exc:
+                self.assertNotIn(self._TOKEN, str(exc))
+
+    # --- 14. sanitizer failure / defensive fallback (fail safe) -------------
+
+    def test_R12_classifier_failure_redacts_whole_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = self._pii_name_file(tmp)
+            fixture.write_text(self._CLEAN_CONTENT, encoding="utf-8")
+            fixture.unlink()
+            with mock.patch(f"{__name__}._scan_line",
+                            side_effect=RuntimeError(
+                                "simulated policy-side classifier fault")):
+                report = collect_scan_report([fixture])
+            # the policy must fail SAFE: the raw path never escapes even
+            # when the sanitizer itself is broken, and the file is not
+            # skipped — the scan state still fails closed
+            record = report["scan_errors"][0]  # type: ignore[index]
+            self.assertIn("<redacted>", record["path"])
+            self.assertNotIn(self._TOKEN, record["path"])
+            self.assertEqual("PII_SCAN_READ_ERROR", record["reason_code"])
+            self.assertEqual("FAIL", report["gate_result"])
+            self._assert_no_token_anywhere(
+                report, json.dumps(report, ensure_ascii=False),
+                self._wrapper_text([fixture]))
+
+    def test_R12b_digest_failure_degrades_without_disclosure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = self._pii_name_file(tmp)
+            fixture.write_text(self._CLEAN_CONTENT, encoding="utf-8")
+            fixture.unlink()
+            with mock.patch(f"{__name__}._path_id",
+                            side_effect=RuntimeError("digest fault")):
+                report = collect_scan_report([fixture])
+            record = report["scan_errors"][0]  # type: ignore[index]
+            self.assertIn("<redacted>", record["path"])
+            self.assertEqual("<path_id_unavailable>", record["path_id"])
+            self.assertEqual("FAIL", report["gate_result"])
+            self._assert_no_token_anywhere(
+                report, json.dumps(report, ensure_ascii=False),
+                self._wrapper_text([fixture]))
+
+    def test_R12c_unclassifiable_component_is_not_emitted(self) -> None:
+        # belt-and-braces: even a component the classifier cannot judge
+        # (raised mid-scan) is dropped whole — never emitted raw
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = tmp / self._TOKEN / "notes.md"
+            fixture.parent.mkdir()
+            fixture.write_text(self._CLEAN_CONTENT, encoding="utf-8")
+            fixture.unlink()  # unreadable after enumeration -> error record
+            # only the PARENT component classification is broken
+            real_scan_line = _scan_line
+
+            def picky(line: str):
+                if line == self._TOKEN:
+                    raise RuntimeError("simulated component fault")
+                return real_scan_line(line)
+
+            with mock.patch(f"{__name__}._scan_line", side_effect=picky):
+                report = collect_scan_report([fixture])
+            errors = report["scan_errors"]  # type: ignore[union-attr]
+            self.assertEqual(1, len(errors))  # type: ignore[arg-type]
+            record = errors[0]  # type: ignore[index]
+            # the flagged/unverifiable component is gone; the readable
+            # basename of an in-scope-but-unreadable file may remain,
+            # but the prohibited directory identity itself cannot
+            self.assertNotIn(self._TOKEN, record["path"])
+            self._assert_no_token_anywhere(
+                report, json.dumps(report, ensure_ascii=False),
+                self._wrapper_text([fixture]))
+
+    # --- 15. deterministic correlation identity ------------------------------
+
+    def test_R14_path_id_is_deterministic_and_value_free(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = self._pii_name_file(tmp)
+            fixture.write_text(self._CLEAN_CONTENT, encoding="utf-8")
+            fixture.unlink()
+            other = tmp / "other" / self._BASENAME
+            other.parent.mkdir()
+            other.write_text(self._CLEAN_CONTENT, encoding="utf-8")
+            other.unlink()
+            ids = [collect_scan_report([fixture])["scan_errors"][0][  # type: ignore[index]
+                       "path_id"],
+                   collect_scan_report([fixture])["scan_errors"][0][  # type: ignore[index]
+                       "path_id"]]
+            other_id = collect_scan_report([other])[  # type: ignore[index]
+                "scan_errors"][0]["path_id"]  # type: ignore[index]
+            # stable: the same path correlates to the same id across runs
+            self.assertEqual(ids[0], ids[1])
+            # discriminating: different paths never share an id
+            self.assertNotEqual(ids[0], other_id)
+            # digest-shaped and value-free
+            for pid in (*ids, other_id):
+                self.assertRegex(pid, r"^sha256:[0-9a-f]{16}$")
+                self.assertNotIn(self._TOKEN, pid)
+                self.assertNotIn(tmp.name, pid)
+
+    # --- 16. no false PASS after redaction ------------------------------------
+
+    def test_R15_redaction_never_softens_decisions(self) -> None:
+        # (a) redaction of an unreadable pii path keeps FAIL/INCOMPLETE
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = self._pii_name_file(tmp)
+            fixture.write_text(self._CLEAN_CONTENT, encoding="utf-8")
+            fixture.unlink()
+            report = collect_scan_report([fixture])
+            self.assertEqual("FAIL", report["gate_result"])
+            self.assertFalse(report["scan_complete"])  # type: ignore[arg-type]
+        # (b) a readable pii-named carrier still reports its prohibited
+        # content — redaction changes the diagnostics, not the verdict
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = self._pii_name_file(tmp)
+            fixture.write_text(self._PAYLOAD, encoding="utf-8")
+            report = collect_scan_report([fixture])
+            self.assertEqual("FAIL", report["gate_result"])
+            self.assertEqual({"telegram_chat_id", "personal_email"},
+                             {f["category"] for f in  # type: ignore[union-attr]
+                              report["findings"]})  # type: ignore[union-attr]
+            self._assert_no_token_anywhere(
+                report, json.dumps(report, ensure_ascii=False))
+        # (c) a CLEAN tree still passes — redaction must not invert
+        # the decision into an unconditional FAIL either
+        clean_report = collect_scan_report(_tracked_files())
+        self.assertEqual("PASS", clean_report["gate_result"])
+        self.assertEqual(0, clean_report["unapproved_pii_count"])  # type: ignore[arg-type]
+
+
+class TestR7GitFilenameDecodeIdentity(unittest.TestCase):
+    """§9 bounded analysis regression: replacement decoding of Git
+    tracked-file names must not alias distinct byte-level names onto
+    one path identity.
+
+    Baseline (repair SHA 70c7bed): `git ls-files -z` output was decoded
+    with errors="replace", so a tracked name carrying an invalid UTF-8
+    byte enumerated as the SAME string as a tracked name carrying the
+    U+FFFD character itself. Deterministic consequence (defect proven by
+    the R7 §9 analysis): the invalid-byte name's CONTENT was never read;
+    if the U+FFFD twin is clean, the gate reported SCAN_COMPLETE and
+    PASS while prohibited content sat in the unscanned file — a false
+    PASS bypass. The enumerated identity must be bijective instead
+    (`surrogateescape`): distinct raw names stay distinct, OS-level
+    opens still resolve, and per-file content then follows the ordinary
+    strict-UTF-8 contract.
+    """
+
+    maxDiff = None
+
+    def _scratch_tracked_repo(self, files: dict[bytes, bytes]) -> Path:
+        scratch = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(scratch, ignore_errors=True))
+        for raw_name, content in files.items():
+            target = os.path.join(os.fsencode(scratch), raw_name)
+            with open(target, "wb") as fh:
+                fh.write(content)
+        subprocess.run(["git", "init", "-q"], cwd=scratch,
+                       capture_output=True, check=True)
+        subprocess.run(["git", "add", "-f", "-A", "."], cwd=scratch,
+                       capture_output=True, check=True)
+        return scratch
+
+    _PROHIBITED = ('deliver: "chat' + '_id": ' + SYNTH_CHAT + "\n"
+                   + "page " + SYNTH_CONTACT_LOCAL + "@" + SYNTH_RELAY_DOMAIN
+                   + "\n").encode("utf-8")
+
+    def test_names_with_invalid_utf8_bytes_are_scanned_not_aliased(self) -> None:
+        scratch = self._scratch_tracked_repo({
+            # byte-level distinct names that replacement-decoding would
+            # collapse into one string
+            b"carrier\x80.md": self._PROHIBITED,          # invalid UTF-8
+            ("carrier\N{REPLACEMENT CHARACTER}" + ".md"
+             ).encode("utf-8"): b"clean\n",               # literal U+FFFD
+        })
+        with mock.patch(f"{__name__}.REPO_ROOT", scratch):
+            enumerated = _tracked_files()
+        # identity is bijective: two tracked names -> two distinct paths
+        relative = sorted(str(p.relative_to(scratch)) for p in enumerated)
+        self.assertEqual(2, len(relative))
+        self.assertEqual(2, len(set(relative)))
+        # and the REAL file contents are now reachable and scanned
+        with mock.patch(f"{__name__}.REPO_ROOT", scratch):
+            report = collect_scan_report(_tracked_files())
+            self.assertIs(report["scan_complete"], True)
+            self.assertGreaterEqual(report["unapproved_pii_count"], 1)  # type: ignore[operator]
+            self.assertEqual("FAIL", report["gate_result"])
+            categories = {f["category"]  # type: ignore[union-attr]
+                          for f in report["findings"]}  # type: ignore[union-attr]
+            self.assertIn("telegram_chat_id", categories)
+
+    def test_invalid_utf8_name_single_file_is_scanned_fail_closed(self) -> None:
+        # singleton case: pre-fix this name decoded to a nonexistent
+        # replacement-char path and vanished into a read error; the
+        # bijective decode now reads the real bytes — the content
+        # contract then rules as usual (clean here -> PASS)
+        scratch = self._scratch_tracked_repo({
+            b"carrier\x80.md": b"clean content\n",
+        })
+        with mock.patch(f"{__name__}.REPO_ROOT", scratch):
+            enumerated = _tracked_files()
+            self.assertEqual(1, len(enumerated))
+            report = collect_scan_report(enumerated)
+        self.assertIs(report["scan_complete"], True)
+        self.assertEqual("PASS", report["gate_result"])
