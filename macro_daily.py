@@ -302,8 +302,13 @@ def main():
         
         # 保存 JSON 供 debug
         now = get_taipei_time()
-        log_dir = f"/home/ubuntu/macro-report/logs"
+        # Phase 6.1 portability: log dir via central boundary (FIE_DATA_DIR > repo layout)
         import os
+        try:
+            from db import get_log_dir as _log_dir
+            log_dir = _log_dir()
+        except ImportError:
+            log_dir = os.path.join(os.environ.get("FIE_DATA_DIR", os.getcwd()), "logs")
         os.makedirs(log_dir, exist_ok=True)
         log_file = f"{log_dir}/{now.strftime('%Y-%m-%d')}.json"
         with open(log_file, "w", encoding="utf-8") as f:

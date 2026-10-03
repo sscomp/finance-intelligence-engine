@@ -58,9 +58,9 @@ Usage examples:
 
 If PyYAML is not installed, .yaml manifests are silently skipped and
 only .json manifests are loaded. The default config dir is
-`/home/ubuntu/macro-report/config/reports`, but `--config-dir` can
-override for testing. The default metadata dir is
-`/home/ubuntu/macro-report/metadata`, overridable via `--metadata-dir`.
+`<repository>/config/reports` (see phase3.paths / FIE_PROJECT_ROOT), but
+`--config-dir` can override for testing. The default metadata dir
+remains opt-in via `--metadata-dir` (no-persist by default).
 """
 from __future__ import annotations
 
@@ -75,13 +75,23 @@ from reports.hermes.store import LocalStore
 from reports.registry import Registry
 
 
+# Phase 6.1 portability: default locations derive from the repository that
+# contains this file (never a username-specific home directory). CLI flags
+# --config-dir / --metadata-dir remain the explicit overrides.
+def _project_root() -> str:
+    here = os.path.dirname(os.path.abspath(__file__))  # <repo>/run_report.py
+    return here
+
+
 # Path constants. These default to the production locations but can
 # be overridden for tests via CLI flags.
-DEFAULT_CONFIG_DIR = "/home/ubuntu/macro-report/config/reports"
+DEFAULT_CONFIG_DIR = os.path.join(
+    _project_root(), "config", "reports"
+)
 # Default metadata dir is the empty string, which means "do NOT
 # persist task / artifact metadata". Operators who want persistence
 # (e.g. for ad-hoc inspection after a manual run) should pass
-# --metadata-dir /home/ubuntu/macro-report/metadata explicitly.
+# --metadata-dir <repository>/metadata explicitly.
 #
 # Why the default is no-persist: the CLI's primary use is dry-run
 # validation and ad-hoc dispatch. Most invocations do NOT need a

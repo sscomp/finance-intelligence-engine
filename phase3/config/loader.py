@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,12 @@ from phase3.datamodel import (
 
 
 # Default config root, overridable via env or explicit arg.
-DEFAULT_CONFIG_ROOT = Path("/home/ubuntu/macro-report/config/phase3")
+# Phase 6.1 portability: derived from the central runtime path boundary
+# (FIE_CONFIG_DIR > project root) instead of the historical hard-coded
+# /home/ubuntu/macro-report path. In a source checkout this resolves to
+# <repo>/config/phase3.
+_DEFAULT_ROOT = Path(os.environ.get("FIE_CONFIG_DIR") or Path(__file__).resolve().parents[2])
+DEFAULT_CONFIG_ROOT = _DEFAULT_ROOT / "config" / "phase3"
 
 
 def _try_import_yaml() -> Any:

@@ -25,8 +25,20 @@ from datetime import datetime, timedelta, timezone
 from reports.common.format import format_net_shares  # noqa: E402,F401
 
 TZ_TAIPEI = timezone(timedelta(hours=8))
-CONFIG_PATH = "/home/ubuntu/macro-report/taiwan50_config.json"
-LOG_DIR = "/home/ubuntu/macro-report/logs"
+
+# Phase 6.1 portability: paths via the central configuration boundary
+# (FIE_CONFIG_DIR / FIE_DATA_DIR) instead of the hard-coded
+# /home/ubuntu/macro-report layout.
+try:
+    from phase3.paths import config_dir as _fie_config_dir, data_dir as _fie_data_dir
+except ImportError:  # pragma: no cover - phase3 不在 sys.path 時退回 CWD 版面
+    def _fie_config_dir():
+        return os.path.join(os.environ.get("FIE_CONFIG_DIR", os.getcwd()))
+    def _fie_data_dir():
+        return os.path.join(os.environ.get("FIE_DATA_DIR", os.getcwd()))
+
+CONFIG_PATH = os.path.join(_fie_config_dir(), "taiwan50_config.json")
+LOG_DIR = os.path.join(_fie_data_dir(), "logs")
 
 def get_taipei_now():
     return datetime.now(TZ_TAIPEI)

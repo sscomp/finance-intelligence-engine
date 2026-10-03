@@ -11,9 +11,8 @@ Subcommands:
 This CLI is for Phase 3A scaffold validation and developer demos only.
 It does NOT touch production data sources, cron, or any Telegram sender.
 
-Run:
-  PYTHONPATH=/home/ubuntu/macro-report \\
-    /home/ubuntu/macro-venv/bin/python /home/ubuntu/macro-report/phase3/cli.py score-macro
+Run (from the repository root, any Python ≥3.11 with dependencies installed):
+  python -m phase3.cli score-macro
 """
 from __future__ import annotations
 
@@ -43,6 +42,7 @@ from phase3.graph import (
     NodeType,
 )
 from phase3.persistence.sqlite import FORBIDDEN_DB_NAME
+from phase3.paths import macro_history_db_path
 from phase3.scoring import CompanyScorer, IndustryScorer, MacroScorer
 from phase3.scoring.explain import explain_score
 from phase3.signals import SignalAggregator, SignalEngine
@@ -3173,9 +3173,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Source class to backfill.",
     )
     p24.add_argument(
-        "--source-db", default="/home/ubuntu/macro-report/macro_history.db",
+        "--source-db",
+        default=str(macro_history_db_path()),
         help="Source database path for gap detection (read-only). "
-             "Default: production macro_history.db (read-only).",
+             "Default: the reference macro_history.db resolved by the "
+             "central path boundary (FIE_DB_PATH > FIE_DATA_DIR > project "
+             "root; read-only).",
     )
     p24.add_argument(
         "--target-db", required=True,

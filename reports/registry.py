@@ -46,7 +46,7 @@ Manifest format (config/reports/<name>.yaml):
       type: stdout
     archive:
       enabled: false
-      log_dir: /home/ubuntu/macro-report/logs
+      log_dir: ${FIE_DATA_DIR}/logs        # portable: via FIE_DATA_DIR, not a host path
 """
 from __future__ import annotations
 

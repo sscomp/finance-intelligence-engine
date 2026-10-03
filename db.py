@@ -13,11 +13,38 @@
   get_foreign_streak(code, days=20)                # 查連續買超天數
 """
 
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-DB_PATH = "/home/ubuntu/macro-report/macro_history.db"
+try:
+    from phase3.paths import macro_history_db_path, data_dir
+except ImportError:  # db.py 可獨立於 phase3 使用（無 phase3 於 sys.path 時）
+    macro_history_db_path = None
+    data_dir = None
+
 TZ_TAIPEI = timezone(timedelta(hours=8))
+
+# Phase 6.1 portability: production DB path is now derived from the central
+# configuration boundary (FIE_DB_PATH > FIE_DATA_DIR > project root) instead
+# of the historical hard-coded /home/ubuntu/macro-report absolute path.
+# The DB_PATH module attribute is kept (callers/tests patch it) — the default
+# is computed by the same rule for every importer.
+if macro_history_db_path is not None:
+    _DEFAULT_DB_PATH = str(macro_history_db_path())
+else:
+    _data_base = os.environ.get("FIE_DATA_DIR") or os.getcwd()
+    _DEFAULT_DB_PATH = os.path.join(_data_base, "macro_history.db")
+
+DB_PATH = _DEFAULT_DB_PATH
+
+
+def get_log_dir():
+    """Runtime log directory (FIE_DATA_DIR/logs); falls back to CWD."""
+    if data_dir is not None:
+        return str(data_dir() / "logs")
+    _data_base = os.environ.get("FIE_DATA_DIR") or os.getcwd()
+    return os.path.join(_data_base, "logs")
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)

@@ -21,7 +21,8 @@ the same Protocol; for now, callers can use :class:`ScoreRepositorySink`
 (append-only, reuses :class:`phase3.persistence.score_repo.ScoreRepository`)
 or pass ``dry_run=True`` to skip persistence entirely.
 
-Design constraints (from /home/ubuntu/Abacus/Finance/Phase3_Master_Status_Investment_Intelligence_Engine_20260710.md
+Design constraints (from the Phase 3 master status document "Investment
+Intelligence Engine" 2026-07-10,
 §5 + §10):
 
 * Reuse existing :class:`SignalLoader`, :class:`InputBuilder`, scorer

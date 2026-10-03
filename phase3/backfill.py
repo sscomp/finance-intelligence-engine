@@ -36,12 +36,19 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Sequence
 
+from phase3.paths import config_dir, macro_history_db_path
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 PRODUCTION_DB_NAME = "macro_history.db"
-PRODUCTION_DB_PATH = "/home/ubuntu/macro-report/macro_history.db"
+# Phase 6.1 portability: the reference production history DB path is now
+# derived from the central runtime path boundary (FIE_DB_PATH > FIE_DATA_DIR >
+# project root) instead of the hard-coded /home/ubuntu/macro-report path.
+# Guards still resolve and compare against this reference (and refuse the
+# reserved basename macro_history.db regardless of its directory).
+PRODUCTION_DB_PATH = str(macro_history_db_path())
 
 # Source class identifiers (governance §3.1)
 SOURCE_MACRO_DAILY = "macro_daily"
@@ -1077,7 +1084,7 @@ def fetch_institutional_range(
     # Load config if codes not provided
     if target_codes is None:
         import json as _json
-        config_path = "/home/ubuntu/macro-report/taiwan50_config.json"
+        config_path = str(config_dir() / "taiwan50_config.json")
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 config = _json.load(f)
