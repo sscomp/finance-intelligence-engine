@@ -138,16 +138,24 @@ _RESERVED_DB_NAMES: frozenset[str] = frozenset({"macro_history.db"})
 
 
 def _validate_db_path(db_path: str | None) -> str | None:
-    """Return the resolved db_path or raise :class:`PipelineAPIError`.
+    """Return the resolved db_path/backend-spec or raise :class:`PipelineAPIError`.
 
     ``None`` (or empty string) is returned unchanged — the caller
     may want the dry-run path which never touches a DB. For non-None
-    inputs we delegate to the existing
-    :func:`phase3.persistence.sqlite._check_path` so the same
-    guards the CLI uses (basename match against
-    ``macro_history.db``) apply here.
+    inputs:
+
+    * a PostgreSQL DSN (``postgres(ql)://...``, Phase 6.3 parity
+      backend) is returned unchanged — there is no path to guard;
+    * anything else is treated as a SQLite file path and delegated to
+      the existing :func:`phase3.persistence.sqlite._check_path` so
+      the same guards the CLI uses (basename match against
+      ``macro_history.db``) apply here.
     """
     if not db_path:
+        return db_path
+    if db_path.strip().lower().startswith(
+        ("postgres://", "postgresql://")
+    ):
         return db_path
     try:
         return _check_path(db_path)
@@ -159,19 +167,27 @@ def _validate_db_path(db_path: str | None) -> str | None:
         ) from exc
 
 
-def _open_store(db_path: str) -> SQLiteStore:
-    """Open a :class:`SQLiteStore` at ``db_path`` and apply the v1
-    schema if the file is empty.
+def _open_store(db_path: str) -> Any:
+    """Open the right backend store at ``db_path`` and apply the v1 schema.
+
+    Phase 6.3: dispatches by backend spec (``backend.resolve_spec``):
+    a ``postgres://`` DSN opens :class:`PostgresStore` with the PG
+    schema twin; otherwise a :class:`SQLiteStore` at the given path
+    (precedence: explicit argument wins over the portable default).
 
     Schema application is idempotent — re-running it on a
     pre-existing DB is a no-op. We use the existing
-    :class:`MigrationManager` instead of the SQLite store's
-    auto-apply so we can report applied migrations in a uniform
-    shape.
+    :class:`MigrationManager` so we can report applied migrations in
+    a uniform shape.
     """
-    store = SQLiteStore(db_path)
+    from phase3.persistence.backend import open_store, resolve_spec
+    from phase3.persistence.migrations import default_migrations_for
+    from phase3.persistence.migrations import MigrationManager
+
+    spec = resolve_spec(db_path)
+    store = open_store(spec)
     try:
-        mgr = MigrationManager(store, [build_v1_schema()])
+        mgr = MigrationManager(store, default_migrations_for(store))
         mgr.apply()
     except Exception:
         store.close()
@@ -245,6 +261,13 @@ def _build_graph_store(
             message=str(exc),
             error_class="PathGuardError",
         ) from exc
+    if resolved.strip().lower().startswith(
+        ("postgres://", "postgresql://")
+    ):
+        # Phase 6.3: PostgreSQL parity backend (disposable/synthetic).
+        from phase3.graph.pg_store import PostgresGraphStore
+
+        return PostgresGraphStore(resolved, auto_migrate=auto_migrate)
     return _SQLiteGraphStore(resolved, auto_migrate=auto_migrate)
 
 
@@ -255,7 +278,7 @@ def _build_default_components(
     run_id: str | None = None,
     run_mode: str = "live",
     dry_run: bool = False,
-) -> tuple[SQLiteStore, ScoringPipeline, InMemoryGraphStore, ScoreRepository, SignalRepository]:
+) -> tuple[Any, ScoringPipeline, InMemoryGraphStore, ScoreRepository, SignalRepository]:
     """Wire up the standard components for a real run.
 
     Returns ``(store, scoring_pipeline, in_memory_graph, score_repo,

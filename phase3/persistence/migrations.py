@@ -21,11 +21,10 @@ Design
 from __future__ import annotations
 
 import hashlib
-import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from phase3.persistence.sqlite import SQLiteStore, TransactionError
+from phase3.persistence.contracts import DatabaseStore
 from phase3.persistence.timeutil import utc_now_iso
 
 
@@ -118,7 +117,8 @@ class MigrationManager:
     Parameters
     ----------
     store:
-        Open :class:`SQLiteStore`. The manager does not own its
+        Open :class:`~phase3.persistence.contracts.DatabaseStore`
+        (SQLite or PostgreSQL). The manager does not own its
         lifecycle.
     migrations:
         Iterable of :class:`Migration`. They are sorted by ``version``
@@ -128,7 +128,7 @@ class MigrationManager:
 
     def __init__(
         self,
-        store: SQLiteStore,
+        store: DatabaseStore,
         migrations: Iterable[Migration],
     ) -> None:
         self._store = store
@@ -176,10 +176,16 @@ class MigrationManager:
         """Create the ``schema_migrations`` table if missing.
 
         Idempotent. Called automatically by :meth:`apply` so callers
-        rarely need this directly.
+        rarely need this directly. The DDL comes from the store's
+        ``registry_ddl()`` seam (Phase 6.3: SQLite and PostgreSQL
+        registries carry the same logical shape but backend-correct
+        SQL); stores that predate the seam fall back to the SQLite
+        DDL below.
         """
+        registry_ddl = getattr(self._store, "registry_ddl", None)
+        sql = registry_ddl() if callable(registry_ddl) else _REGISTRY_DDL
         with self._store.transaction():
-            self._store.execute(_REGISTRY_DDL)
+            self._store.executescript(sql)
 
     # ----- apply -----------------------------------------------------------
 
@@ -234,7 +240,7 @@ class MigrationManager:
                         """,
                         (mig.version, mig.name, mig.checksum, utc_now_iso()),
                     )
-            except (sqlite3.Error, TransactionError) as exc:
+            except Exception as exc:  # noqa: BLE001 - any DB error marks the failure
                 # Record the failure so a future apply() can retry.
                 # We open a *new* transaction — the failed one is
                 # already rolled back by the context manager.
@@ -249,7 +255,7 @@ class MigrationManager:
 
     # ----- internals -------------------------------------------------------
 
-    def _fetch_row(self, version: int) -> sqlite3.Row | None:
+    def _fetch_row(self, version: int) -> Any | None:
         cur = self._store.execute(
             "SELECT version, name, checksum, applied_at, error "
             "FROM schema_migrations WHERE version = %s",
@@ -278,11 +284,28 @@ class MigrationManager:
                     """,
                     (mig.version, mig.name, mig.checksum, utc_now_iso(), error_repr),
                 )
-        except sqlite3.Error:
+        except Exception:  # noqa: BLE001 - any backend: best-effort recording
             # If we cannot even write the failure, the registry is
             # probably corrupt — the caller will see the original
             # MigrationError anyway.
             pass
+
+
+def default_migrations_for(store: Any) -> list[Any]:
+    """Return the backend's v1 :class:`Migration` list.
+
+    SQLite → :mod:`phase3.persistence.schema_v1`; PostgreSQL →
+    :mod:`phase3.persistence.schema_pg` (the twin DDL, Phase 6.3).
+    Used by every store-factory that applies the initial schema so
+    backend selection lives in exactly one place.
+    """
+    if getattr(store, "backend", "sqlite") == "postgres":
+        from phase3.persistence import schema_pg
+
+        return [schema_pg.build()]
+    from phase3.persistence import schema_v1
+
+    return [schema_v1.build()]
 
 
 __all__ = ["Migration", "MigrationError", "MigrationManager"]

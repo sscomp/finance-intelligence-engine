@@ -34,7 +34,7 @@ from phase3.datamodel.graph import (
     make_graph_edge_id,
 )
 from phase3.persistence.graph_repo import EdgeRow, GraphRepository, NodeRow
-from phase3.persistence.migrations import MigrationManager
+from phase3.persistence.migrations import MigrationManager, default_migrations_for
 from phase3.persistence.sqlite import SQLiteStore
 from phase3.persistence import schema_v1
 
@@ -49,55 +49,66 @@ DEFAULT_DB_PATH: str = os.path.join(
 )
 
 
-class SQLiteGraphStore:
-    """SQLite-backed :class:`GraphStore` for Phase 3B.
+class SqlGraphStore:
+    """Backend-agnostic SQL-backed :class:`GraphStore` core (Phase 6.3).
+
+    All behaviour is built on a
+    :class:`~phase3.persistence.contracts.DatabaseStore` (``self._store``)
+    plus a :class:`~phase3.persistence.graph_repo.GraphRepository`
+    (``self._repo``). Subclasses pick the backend:
+
+    * :class:`SQLiteGraphStore` — local/dev/test (SQLite retained per
+      ADR-C03; the Phase 3B default).
+    * :class:`~phase3.graph.pg_store.PostgresGraphStore` — the
+      disposable/synthetic PostgreSQL parity backend.
 
     Parameters
     ----------
-    db_path:
-        Where to store the database. Pass a temp path in tests. The
-        default is :data:`DEFAULT_DB_PATH`, which is a file under
-        ``phase3/data/`` that the path guard allows.
+    store:
+        Open :class:`~phase3.persistence.contracts.DatabaseStore`.
+        The graph store is the lifecycle owner here (``close()``
+        closes the underlying store).
     auto_migrate:
-        If True (default), :meth:`ensure_schema` runs at
-        construction so first use Just Works. Set False in tests that
-        want to drive migration explicitly.
+        If True (default), :meth:`ensure_schema` runs at construction
+        so first use Just Works. Set False in tests that want to
+        drive migration explicitly.
     """
 
-    def __init__(
-        self,
-        db_path: str | os.PathLike[str] = DEFAULT_DB_PATH,
-        auto_migrate: bool = True,
-    ) -> None:
-        self._store = SQLiteStore(db_path)
-        self._repo = GraphRepository(self._store)
+    def __init__(self, store: Any, auto_migrate: bool = True) -> None:
+        self._store = store
+        self._repo = GraphRepository(store)
         if auto_migrate:
             self.ensure_schema()
 
     # ----- lifecycle -------------------------------------------------------
 
     def ensure_schema(self) -> tuple[list[Any], int]:
-        """Run the v1 migration. Idempotent.
+        """Run the v1 migration for this backend. Idempotent.
 
         Returns ``(newly_applied, current_version)``; ``newly_applied``
         is empty when the schema is already up to date.
         """
-        mgr = MigrationManager(self._store, [schema_v1.build()])
+        migs = default_migrations_for(self._store)
+        mgr = MigrationManager(self._store, migs)
         applied = mgr.apply()
         return applied, mgr.current_version()
 
-    @property
-    def path(self) -> str:
-        """Resolved path to the database file."""
-        return self._store.path
+    def close(self) -> None:
+        self._store.close()
+
+    def __enter__(self) -> "SqlGraphStore":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
 
     def set_query_only(self) -> None:
-        """Flip the underlying connection to read-only (Phase 6.3 seam).
-
-        Delegates to :meth:`SQLiteStore.set_query_only` so read-only
-        CLI paths stop digging at ``store._store._conn``.
-        """
+        """Flip the underlying connection to read-only (Phase 6.3
+        seam; ``PRAGMA query_only`` on SQLite,
+        ``default_transaction_read_only`` on PostgreSQL)."""
         self._store.set_query_only()
+
+    # ----- nodes -----------------------------------------------------------
 
     def close(self) -> None:
         self._store.close()
@@ -292,4 +303,34 @@ def _edge_from_row(row: EdgeRow) -> GraphEdge:
     )
 
 
-__all__ = ["SQLiteGraphStore", "DEFAULT_DB_PATH"]
+
+
+class SQLiteGraphStore(SqlGraphStore):
+    """SQLite-backed :class:`GraphStore` for Phase 3B.
+
+    Parameters
+    ----------
+    db_path:
+        Where to store the database. Pass a temp path in tests. The
+        default is :data:`DEFAULT_DB_PATH`, which is a file under
+        ``phase3/data/`` that the path guard allows.
+    auto_migrate:
+        If True (default), :meth:`ensure_schema` runs at
+        construction so first use Just Works. Set False in tests that
+        want to drive migration explicitly.
+    """
+
+    def __init__(
+        self,
+        db_path: str | os.PathLike[str] = DEFAULT_DB_PATH,
+        auto_migrate: bool = True,
+    ) -> None:
+        super().__init__(SQLiteStore(db_path), auto_migrate=auto_migrate)
+
+    @property
+    def path(self) -> str:
+        """Resolved path to the database file."""
+        return self._store.path
+
+
+__all__ = ["SQLiteGraphStore", "SqlGraphStore", "DEFAULT_DB_PATH"]
