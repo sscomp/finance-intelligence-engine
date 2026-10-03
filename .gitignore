@@ -57,3 +57,7 @@ metadata/reports/artifacts/
 
 # macOS Finder noise
 ._*
+
+# Python packaging artifacts (Phase 6.1: clean-env install build products)
+build/
+dist/

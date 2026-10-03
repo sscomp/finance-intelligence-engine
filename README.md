@@ -213,7 +213,7 @@ M8 是 Phase 5 路線圖的營運驗收里程碑，要求連續 7 天執行 `por
 - SQLite 3（系統內建）
 - 網路連線（yfinance API、TWSE API、RSS feeds）
 
-### 設定步驟
+### 設定步驟（Phase 6.1 之後：宣告式相依 + 可移植路徑）
 
 ```bash
 # 1. Clone 專案
@@ -224,14 +224,31 @@ cd finance-intelligence-engine
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 3. 安裝相依套件
-pip install yfinance requests pyyaml
+# 3. 依 pyproject.toml 宣告安裝（相依為 PyYAML、yfinance；pandas 僅測試需要）
+pip install -e .
+#   測試環境（含 pandas）：
+pip install -e ".[test]"
 
-# 4. 驗證 CLI 可用
+# 4. 驗證 CLI 可用（或使用已安裝的 console script：fie-cli）
 python -m phase3.cli --help
 ```
 
-> 本專案沒有 `requirements.txt` 或 `pyproject.toml`。上述相依套件為實際使用的外部套件。`phase3/` 子套件為純標準庫實作，不需要額外安裝。
+> Phase 6.1 起本專案以 `pyproject.toml` 宣告相依與套件邊界（無 `requests`；
+> legacy fetch 家族 `phase3/` 引擎用標準庫，網路取數用 yfinance）。所有執行
+> 時間路徑可由環境變數覆寫——在任意 checkout 位置與任意資料目錄執行皆可：
+>
+> | 環境變數 | 用途 | 預設 |
+> |---|---|---|
+> | `FIE_PROJECT_ROOT` | 專案根 | 由 `phase3/paths.py` 自動探測 |
+> | `FIE_DATA_DIR` | 可寫資料目錄（含 DB 預設位置、logs） | 專案根 |
+> | `FIE_CONFIG_DIR` | 設定目錄 | 專案根 |
+> | `FIE_ARTIFACT_DIR` | 報告 artifact 輸出 | `<專案根>/metadata/reports/artifacts` |
+> | `FIE_DB_PATH` | 歷史資料庫 `macro_history.db` 位置 | `<FIE_DATA_DIR>/macro_history.db` |
+> | `FIE_PYTHON` | wrapper 使用的直譯器 | `python3` |
+> | `FIE_TELEGRAM_CHAT_ID` / `FIE_TELEGRAM_SECONDARY_CHAT_ID` | 派送 chat ID（個人資料，不落盤） | 無 |
+>
+> Phase 3B store (`intelligence.db`) 預設仍為 `phase3/data/intelligence.db`，可用
+> 各 pipeline 子命令的 `--db-path` 覆寫。
 
 ---
 
@@ -356,8 +373,27 @@ PYTHONPATH=. python -m unittest tests.phase3.test_portfolio_allocation
 - **安全防護測試**：獨立的安全防護測試套件驗證生產 DB 不被修改、路徑守護（macro_history.db refusal）、以及投資組合的安全限制（TD7/TD8）
 - **Shadow-Run 確定性**：Pipeline artifact 的重放結果必須 byte-identical（modulo `generated_at`）
 - **測試 snapshot**：截至最後驗證（2026-08-26），Phase 3 套件 1787 tests PASS，全部測試 1961 tests PASS（2 skipped）
+- **可移植性 (Phase 6.1)**：測試不假設任何 checkout 位置、使用者名稱或 venv 路徑。與主機相關的資料測試（production `macro_history.db` bridge 整合、外部 Hermes 排程器 R3 驗證）在該主機資料不存在時會明確 skip（附原因），不會失敗。
 
 > 上列測試數量為特定時間點的 snapshot，非永久宣告。實際數量隨開發進展會變動。
+> Phase 6.1 驗證（2026-10-03）：全部測試 1945 tests、0 failed、0 errors（59 justified skips，見 Phase 6.1 報告）。
+
+### 時區政策 (Phase 6.1)
+
+信號時間戳一律以 timezone-aware UTC 儲存與比較；naive 輸入（舊資料列、裸日期字串）視為 UTC，並在兩個邊界統一正規化——寫入邊界（adapter `_parse_*`）與讀取邊界（`phase3/pipeline/signal_loader.py`）。
+
+### Golden 管線驗證命令
+
+```bash
+# 初始化臨時 DB → 載入 fixture 信號 → 三腿（Macro + Industry + Company）管線
+PHASE3B_ENABLED=1 python -m phase3.cli init-db --db-path /tmp/gold/golden.db --force
+PHASE3B_ENABLED=1 python -m phase3.cli ingest-signals --db-path /tmp/gold/golden.db \
+    --source fixture --input tests/phase3/fixtures/fixture_company_industry_2026-07-08.json
+PHASE3B_ENABLED=1 python -m phase3.cli pipeline-run --date 2026-07-08 \
+    --db-path /tmp/gold/golden.db --persist --json --company 2330 --industry AI \
+    --output /tmp/gold/golden.json
+# 除 run_id / 時間戳 / duration 外，同輸入重跑必須 byte-identical（確定性契約）。
+```
 
 ---
 
