@@ -40,6 +40,10 @@ test = [
     "pytest>=8",
     "pandas>=2,<4",
 ]
+# Phase 6.3: optional PostgreSQL parity backend (disposable/synthetic use).
+postgres = [
+    "psycopg[binary]>=3.2",
+]
 
 [project.scripts]
 # Additive convenience entrypoint; `python -m phase3.cli` remains the

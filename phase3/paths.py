@@ -34,9 +34,15 @@ Environment variables
     production file when it lies outside the project root, not for overriding
     ad-hoc test DB paths (use ``--db-path`` for that).
 
-Out of scope here (per Phase 6.1 §14): PostgreSQL/DB URL configuration. The
-``FIE_DB_PATH`` variable is a path, not a connection string; a URL/DSN form is
-future persistence-migration work.
+``FIE_DATABASE_URL`` (Phase 6.3)
+    Persistence backend selector for the Phase 3B store. Unset or
+    empty → SQLite at the portable default / ``--db-path`` path
+    (unchanged Phase 6.1 behaviour). ``postgres(ql)://user:pass@host:port/db``
+    → the PostgreSQL parity backend (psycopg3 DSN). URLs are never
+    logged raw: use
+    :func:`phase3.persistence.backend.sanitize_db_url` before printing.
+    Precedence for the Phase 3B store: explicit API/CLI argument >
+    ``FIE_DATABASE_URL`` > portable default (SQLite).
 """
 
 from __future__ import annotations
@@ -50,11 +56,13 @@ __all__ = [
     "ENV_CONFIG_DIR",
     "ENV_ARTIFACT_DIR",
     "ENV_DB_PATH",
+    "ENV_DATABASE_URL",
     "project_root",
     "data_dir",
     "config_dir",
     "artifact_dir",
     "macro_history_db_path",
+    "database_url",
 ]
 
 ENV_PROJECT_ROOT = "FIE_PROJECT_ROOT"
@@ -62,6 +70,7 @@ ENV_DATA_DIR = "FIE_DATA_DIR"
 ENV_CONFIG_DIR = "FIE_CONFIG_DIR"
 ENV_ARTIFACT_DIR = "FIE_ARTIFACT_DIR"
 ENV_DB_PATH = "FIE_DB_PATH"
+ENV_DATABASE_URL = "FIE_DATABASE_URL"
 
 def _discover_repo_root(start: Path) -> Path:
     """Discover the project root containing the ``phase3`` package.
@@ -126,3 +135,15 @@ def macro_history_db_path() -> Path:
     if override:
         return Path(override)
     return data_dir() / "macro_history.db"
+
+
+def database_url() -> str | None:
+    """Return the Phase 3B backend selector URL (``FIE_DATABASE_URL``).
+
+    ``None`` when unset/empty — callers then use the portable SQLite
+    default. Never log the returned value directly; PostgreSQL URLs
+    may embed a password (mask with
+    :func:`phase3.persistence.backend.sanitize_db_url`).
+    """
+    value = os.environ.get(ENV_DATABASE_URL)
+    return value if value else None
