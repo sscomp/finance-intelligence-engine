@@ -40,6 +40,10 @@ HTTP_STATUS_BY_CODE: dict[str, int] = {
     "STALE_DATA": 409,
     "DATA_UNAVAILABLE": 503,
     "DEPENDENCY_UNAVAILABLE": 503,
+    # Phase 6.7B-R3 (HP-07/06 / OI-08): deterministic fail-closed schema
+    # compatibility verdict — readiness is not ready, and 503 (like the
+    # other unavailability codes) never exposes a driver exception.
+    "SCHEMA_INCOMPATIBLE": 503,
     "INTERNAL_ERROR": 500,
 }
 

@@ -274,7 +274,11 @@ class TestErrorTaxonomyAndContext(_ScoredCase):
         self.assertEqual(
             {c.value for c in ServiceErrorCode},
             {"INVALID_REQUEST", "NOT_FOUND", "STALE_DATA", "DATA_UNAVAILABLE",
-             "DEPENDENCY_UNAVAILABLE", "INTERNAL_ERROR"},
+             "DEPENDENCY_UNAVAILABLE",
+             # Phase 6.7B-R3: deterministic fail-closed schema
+             # compatibility verdict for readiness (HP-07/06 / OI-08).
+             "SCHEMA_INCOMPATIBLE",
+             "INTERNAL_ERROR"},
         )
 
     def test_invalid_request_paths(self) -> None:

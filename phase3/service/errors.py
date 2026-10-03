@@ -60,6 +60,11 @@ class ServiceErrorCode(str, Enum):
     STALE_DATA = "STALE_DATA"
     DATA_UNAVAILABLE = "DATA_UNAVAILABLE"
     DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE"
+    #: Phase 6.7B-R3 (HP-07/06 / OI-08): the persistence layer is
+    #: reachable but its schema metadata is absent/stale/incompatible —
+    #: readiness fails CLOSED with this stable, transport-neutral code
+    #: (never a raw driver exception).
+    SCHEMA_INCOMPATIBLE = "SCHEMA_INCOMPATIBLE"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 

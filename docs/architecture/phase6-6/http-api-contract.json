@@ -32,7 +32,7 @@
           "401": {"$ref": "#/components/responses/Error401"},
           "405": {"$ref": "#/components/responses/Error405"},
           "500": {"$ref": "#/components/responses/Error500"},
-          "503": {"description": "dispatch error envelope (kind=health): DEGRADED/DATA_UNAVAILABLE/DEPENDENCY_UNAVAILABLE — persistence unreachable; sanitised message", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
+          "503": {"description": "dispatch error envelope (kind=health): DEGRADED/DATA_UNAVAILABLE/DEPENDENCY_UNAVAILABLE — persistence unreachable; SCHEMA_INCOMPATIBLE — schema metadata missing/stale/foreign (Phase 6.7B-R3 fail-closed compatibility gate); sanitised message", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
         }
       }
     },
@@ -45,7 +45,7 @@
           "401": {"$ref": "#/components/responses/Error401"},
           "405": {"$ref": "#/components/responses/Error405"},
           "500": {"$ref": "#/components/responses/Error500"},
-          "503": {"description": "dispatch error envelope (kind=health): DEPENDENCY_UNAVAILABLE — persistence unreachable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
+          "503": {"description": "dispatch error envelope (kind=health): DEPENDENCY_UNAVAILABLE — persistence unreachable; SCHEMA_INCOMPATIBLE — schema compatibility gate failed (Phase 6.7B-R3)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
         }
       }
     },
@@ -208,7 +208,7 @@
             "type": "object",
             "required": ["code", "message"],
             "properties": {
-              "code": {"type": "string", "enum": ["INVALID_REQUEST", "UNAUTHENTICATED", "FORBIDDEN", "NOT_FOUND", "STALE_DATA", "DATA_UNAVAILABLE", "DEPENDENCY_UNAVAILABLE", "INTERNAL_ERROR"]},
+              "code": {"type": "string", "enum": ["INVALID_REQUEST", "UNAUTHENTICATED", "FORBIDDEN", "NOT_FOUND", "STALE_DATA", "DATA_UNAVAILABLE", "DEPENDENCY_UNAVAILABLE", "SCHEMA_INCOMPATIBLE", "INTERNAL_ERROR"]},
               "message": {"type": "string", "description": "sanitised — never contains stack traces, SQL, DSNs, paths, internal representations or secrets (§7)"},
               "details": {"type": "object"}
             }
@@ -247,6 +247,21 @@
       "every alternate path representation that normalises to /healthz serves liveness only; no representation can classify a protected endpoint as a probe"
     ]
   },
+  "x-readiness-schema-gate": {
+    "description": "Phase 6.7B-R3 (HP-07/06 / OI-08 repair) — /readyz (and /v1/health) run a deterministic fail-closed schema compatibility gate over the authoritative schema_migrations registry before answering ready. A reachable-but-unmigrated, stale, foreign (future-version), malformed, checksum-divergent, migrated-with-error or partially-missing database answers 503 SCHEMA_INCOMPATIBLE with envelope details.reason carrying the stable gate code — never a driver exception, DSN or SQL text. Unreadable metadata (outage) answers 503 DEPENDENCY_UNAVAILABLE. Liveness (/healthz, ADR-018) is unaffected: it stays DB-independent.",
+    "failure-codes": [
+      "REGISTRY_TABLE_MISSING",
+      "VERSION_RECORD_ABSENT",
+      "SCHEMA_STALE",
+      "SCHEMA_FUTURE_VERSION",
+      "SCHEMA_MALFORMED",
+      "SCHEMA_CHECKSUM_MISMATCH",
+      "SCHEMA_MIGRATION_FAILED",
+      "REQUIRED_OBJECTS_MISSING"
+    ],
+    "http-status": 503,
+    "error-code": "SCHEMA_INCOMPATIBLE"
+  },
   "x-http-status-mapping": {
     "description": "phase3.transport.errors.HTTP_STATUS_BY_CODE (§7); DEGRADED is a freshness state and is served with HTTP 200 + metadata",
     "INVALID_REQUEST": 400,
@@ -256,6 +271,7 @@
     "STALE_DATA": 409,
     "DATA_UNAVAILABLE": 503,
     "DEPENDENCY_UNAVAILABLE": 503,
+    "SCHEMA_INCOMPATIBLE": 503,
     "INTERNAL_ERROR": 500
   },
   "x-transport-invariants": [

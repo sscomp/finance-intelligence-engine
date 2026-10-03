@@ -24,8 +24,12 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from phase3.persistence.contracts import DatabaseStore
-from phase3.persistence.migrations import MigrationManager
 from phase3.persistence.score_repo import ScoreRepository, ScoreSnapshotRecord
+from phase3.persistence.schema_gate import (
+    SchemaGateUnavailable,
+    SchemaIncompatible,
+    check_schema_compatibility,
+)
 from phase3.persistence.signal_repo import SignalRepository
 from phase3.service import contracts as C
 from phase3.service.errors import (
@@ -37,6 +41,31 @@ from phase3.service import freshness as _freshness
 from phase3.service.timeutil import utc_now_iso
 
 __all__ = ["IntelligenceService", "DefaultIntelligenceService"]
+
+
+def _readiness_schema_gate(store: DatabaseStore) -> dict[str, Any]:
+    """Deterministic fail-closed schema verdict for readiness (R3).
+
+    Translates the persistence-layer gate into the stable service
+    taxonomy: incompatible metadata → ``SCHEMA_INCOMPATIBLE`` (503),
+    unreadable metadata → ``DEPENDENCY_UNAVAILABLE`` (503). Both carry
+    sanitized details only — the gate's stable code, never a raw
+    driver exception, DSN or query text.
+    """
+    try:
+        return check_schema_compatibility(store)
+    except SchemaIncompatible as exc:
+        raise ServiceError(
+            ServiceErrorCode.SCHEMA_INCOMPATIBLE,
+            "persistent store schema is not compatible with this application",
+            {"reason": exc.code, "detail": exc.detail},
+        ) from exc
+    except SchemaGateUnavailable as exc:
+        raise ServiceError(
+            ServiceErrorCode.DEPENDENCY_UNAVAILABLE,
+            "persistence layer is not readable",
+            {"reason": "schema metadata is not readable"},
+        ) from exc
 
 
 class IntelligenceService(Protocol):
@@ -145,7 +174,25 @@ class DefaultIntelligenceService:
     # -- health -----------------------------------------------------------
 
     def get_health(self, ctx: C.RequestContext | None = None) -> C.HealthReport:
-        """Readiness across the persistence abstraction, not its innards."""
+        """Readiness across the persistence abstraction, not its innards.
+
+        Phase 6.7B-R3 (HP-07/06 / OI-08): readiness is now strictly
+        schema-gated and fail closed. The historical best-effort version
+        probe (warn-and-continue with ``status="ok"`` on unreadable or
+        missing ``schema_migrations`` metadata) allowed a reachable but
+        EMPTY / STALE / FOREIGN-schema database to answer ready — that
+        false-ready path is this work order's defect. The gate now:
+
+        * raises SCHEMA_INCOMPATIBLE (deterministic, stable code, 503)
+          when the schema registry is missing/failed/stale/future/
+          malformed/divergent-with-expected or required application
+          objects are absent;
+        * raises DEPENDENCY_UNAVAILABLE (503, sanitized) when the
+          metadata itself is unreadable (DB outage);
+
+        while the reported ``schema_current_version``/payload shape stays
+        what the accepted Phase 6.5/6.7A contracts pin.
+        """
         warnings: list[str] = []
         try:
             counts = {
@@ -158,12 +205,10 @@ class DefaultIntelligenceService:
                 "persistence layer is not readable",
                 {"reason": sanitize_for_error(str(exc))},
             ) from exc
-        try:
-            mgr = MigrationManager(self._store, [])
-            current = int(mgr.current_version())
-        except Exception:  # noqa: BLE001 - version probe is best-effort
-            warnings.append("schema version could not be determined")
-            current = None
+
+        current: int | None
+        gate = _readiness_schema_gate(self._store)
+        current = int(gate["current_version"])
         return C.HealthReport(
             status="ok",
             backend_kind=self._store.backend,
