@@ -32,6 +32,15 @@ cd -- "${PROJECT_ROOT}" || {
     exit 5
 }
 
+# --- 2026-10-04 (incident closure WO): fail-closed rehearsal DB-target guard ---
+# Resolve the intelligence-store seed target BEFORE any write (including
+# Step 1); mirrors run.sh. Uses the existing FIE_SERVICE_ENV execution-mode
+# contract: unset|local|production -> accepted production fallback default
+# (D5, unchanged); test|staging -> rehearsal-class: explicit, validated,
+# production-forbidden (exit 78, FAIL_CLOSED_REHEARSAL_DB_TARGET_REQUIRED).
+. "${REPO_ROOT}/scripts/rehearsal_db_guard.sh"
+fie_wrapper_seed_db_guard "/home/ubuntu/macro-report/metadata/intelligence_store.db"
+
 # Step 1: existing industry-weekly generation. Failure must fail the script.
 "${PYTHON_BIN}" "${PROJECT_ROOT}/industry_weekly.py" 2>&1
 INDUSTRY_RC=$?
@@ -104,11 +113,19 @@ fi
 # real scores (not 0.0 defaults).  Uses a per-run temp intelligence DB so
 # macro_history.db stays read-only.  --persist is required because the
 # seed step writes signals into the target DB before scoring.
-SEED_DB="${FIE_INTELLIGENCE_DB:-/home/ubuntu/macro-report/metadata/intelligence_store.db}"
-mkdir -p -- "$(dirname -- "${SEED_DB}")" || {
-    echo "run_weekly.sh: failed to mkdir for seed DB" >&2
-    exit 4
-}
+# SEED_DB is resolved fail-closed above by the rehearsal DB-target guard
+# (production mode keeps the accepted D5 fallback default). DSN targets
+# skip the filesystem mkdir (backend specifier, not a path) — same case
+# rule as run.sh (WO C2 backend awareness).
+case "$(printf '%s' "${SEED_DB}" | tr '[:upper:]' '[:lower:]')" in
+    postgres://*|postgresql://*) ;;
+    *)
+        mkdir -p -- "$(dirname -- "${SEED_DB}")" || {
+            echo "run_weekly.sh: failed to mkdir for seed DB" >&2
+            exit 4
+        }
+        ;;
+esac
 # --freshness-check (Workstream H): classification is warnings-only (stderr/JSON
 # warnings; no exit-code change) so a stale/unreachable source is VISIBLE in the
 # artifact and operator output instead of silently looking fresh.

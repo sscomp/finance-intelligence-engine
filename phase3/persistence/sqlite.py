@@ -247,6 +247,19 @@ class SQLiteStore:
             )
         self._access_mode: str = access_mode
         self._resolved_path: str = _check_path(db_path)
+        if access_mode == ACCESS_WRITABLE:
+            # 2026-10-04 incident closure: fail-closed rehearsal DB-target
+            # guard. A rehearsal/test process (FIE_SERVICE_ENV test|staging)
+            # must never open a WRITABLE store that resolves to the live
+            # Production intelligence store (canonical path / same-inode
+            # match). This seam is the single funnel every Phase 3B write
+            # path goes through (seed, persist, init-db, graph, migration),
+            # so the guard fires BEFORE any DB write — including the
+            # 2026-10-04 incident class (rehearsal harness fallback to the
+            # production seed DB). See phase3/persistence/rehearsal_guard.py.
+            from phase3.persistence.rehearsal_guard import assert_writable_target
+
+            assert_writable_target(self._resolved_path, component="SQLiteStore")
         self._pragmas: dict[str, Any] = dict(_DEFAULT_PRAGMAS)
         if pragmas:
             self._pragmas.update(pragmas)

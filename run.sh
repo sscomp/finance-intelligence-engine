@@ -31,6 +31,18 @@ cd -- "${PROJECT_ROOT}" || {
     exit 5
 }
 
+# --- 2026-10-04 (incident closure WO): fail-closed rehearsal DB-target guard ---
+# Resolve the intelligence-store seed target BEFORE any write (including
+# Step 1). Uses the existing FIE_SERVICE_ENV execution-mode contract
+# (phase3/service/runtime_config.py, ADR-017): unset|local|production ->
+# accepted production fallback default (decision D5, unchanged); test|staging
+# -> rehearsal-class: the target must be explicit (FIE_INTELLIGENCE_DB),
+# malformed/missing/misnamed-only values are refused, and a target resolving
+# to the live Production intelligence store is refused — exit 78 with
+# FAIL_CLOSED_REHEARSAL_DB_TARGET_REQUIRED before anything is written.
+. "${REPO_ROOT}/scripts/rehearsal_db_guard.sh"
+fie_wrapper_seed_db_guard "/home/ubuntu/macro-report/metadata/intelligence_store.db"
+
 # Step 1: existing morning-brief generation. Failure must fail the script.
 "${PYTHON_BIN}" "${PROJECT_ROOT}/macro_daily.py" 2>&1
 MACRO_RC=$?
@@ -109,7 +121,8 @@ fi
 # the accumulating intelligence instead of a per-run /tmp DB.
 # seed-from-history uses upserts (idempotent); macro_history.db stays
 # read-only throughout.
-SEED_DB="${FIE_INTELLIGENCE_DB:-/home/ubuntu/macro-report/metadata/intelligence_store.db}"
+# SEED_DB is resolved fail-closed above by the rehearsal DB-target guard
+# (production mode keeps the accepted D5 fallback default).
 # WO C2 backend awareness: a postgres:// SEED_DB is a backend DSN, not a
 # filesystem path — materializing/dereferencing it here is meaningless.
 case "$(printf '%s' "${SEED_DB}" | tr '[:upper:]' '[:lower:]')" in
