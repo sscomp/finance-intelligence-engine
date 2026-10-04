@@ -37,7 +37,9 @@ set -u  # fail on unset vars; do NOT set -e — we propagate each step's exit co
 #                      FIE_PYTHON=/path/to/venv/bin/python)
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="${FIE_PROJECT_ROOT:-$REPO_ROOT}"
-PYTHON_BIN="${FIE_PYTHON:-python3}"
+# 2026-10-04 (Abacus 6.7B cutover): pin the provisioned production venv —
+# the invoking Hermes agent shell does not activate it (see run.sh).
+PYTHON_BIN="${FIE_PYTHON:-/home/ubuntu/macro-venv/bin/python3}"
 cd -- "${PROJECT_ROOT}" || {
     echo "run_monthly.sh: failed to cd to ${PROJECT_ROOT}" >&2
     exit 5
@@ -118,7 +120,7 @@ fi
 # real scores (not 0.0 defaults).  Uses a per-run temp intelligence DB so
 # macro_history.db stays read-only.  --persist is required because the
 # seed step writes signals into the target DB before scoring.
-SEED_DB="${TMPDIR:-/tmp}/macro-report-intelligence/${ARTIFACT_DATE}-monthly-intelligence.db"
+SEED_DB="${FIE_INTELLIGENCE_DB:-/home/ubuntu/macro-report/metadata/intelligence_store.db}"
 mkdir -p -- "$(dirname -- "${SEED_DB}")" || {
     echo "run_monthly.sh: failed to mkdir for seed DB" >&2
     exit 4

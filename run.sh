@@ -22,7 +22,10 @@ set -u  # fail on unset vars; do NOT set -e — we propagate each step's exit co
 #                      FIE_PYTHON=/path/to/venv/bin/python)
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="${FIE_PROJECT_ROOT:-$REPO_ROOT}"
-PYTHON_BIN="${FIE_PYTHON:-python3}"
+# 2026-10-04 (Abacus 6.7B cutover): the invoking Hermes agent shells do not
+# activate the venv, so "python3" resolves to the bare system interpreter
+# without yfinance/PyYAML. Default to the provisioned production venv instead.
+PYTHON_BIN="${FIE_PYTHON:-/home/ubuntu/macro-venv/bin/python3}"
 cd -- "${PROJECT_ROOT}" || {
     echo "run.sh: failed to cd to ${PROJECT_ROOT}" >&2
     exit 5
@@ -98,10 +101,15 @@ fi
 
 # --- FIE 2026-08-10: real-score bridge wiring ---
 # Seed the signal_log from macro_history.db so pipeline-export produces
-# real scores (not 0.0 defaults).  Uses a per-run temp intelligence DB so
-# macro_history.db stays read-only.  --persist is required because the
+# real scores (not 0.0 defaults).  --persist is required because the
 # seed step writes signals into the target DB before scoring.
-SEED_DB="${TMPDIR:-/tmp}/macro-report-intelligence/${ARTIFACT_DATE}-intelligence.db"
+# 2026-10-04 (Abacus 6.7B cutover, WO D5): SEED_DB now points at the
+# PERSISTENT Phase 3B intelligence store (schema v1, created by the
+# accepted `init-db` mechanism), so the daily FIE 6.7B HTTP API serves
+# the accumulating intelligence instead of a per-run /tmp DB.
+# seed-from-history uses upserts (idempotent); macro_history.db stays
+# read-only throughout.
+SEED_DB="${FIE_INTELLIGENCE_DB:-/home/ubuntu/macro-report/metadata/intelligence_store.db}"
 mkdir -p -- "$(dirname -- "${SEED_DB}")" || {
     echo "run.sh: failed to mkdir for seed DB" >&2
     exit 4
