@@ -208,7 +208,7 @@
             "type": "object",
             "required": ["code", "message"],
             "properties": {
-              "code": {"type": "string", "enum": ["INVALID_REQUEST", "UNAUTHENTICATED", "FORBIDDEN", "NOT_FOUND", "STALE_DATA", "DATA_UNAVAILABLE", "DEPENDENCY_UNAVAILABLE", "SCHEMA_INCOMPATIBLE", "INTERNAL_ERROR"]},
+              "code": {"type": "string", "enum": ["INVALID_REQUEST", "UNAUTHENTICATED", "FORBIDDEN", "NOT_FOUND", "STALE_DATA", "DATA_UNAVAILABLE", "DEPENDENCY_UNAVAILABLE", "SCHEMA_INCOMPATIBLE", "OPERATION_TIMEOUT", "INTERNAL_ERROR"]},
               "message": {"type": "string", "description": "sanitised — never contains stack traces, SQL, DSNs, paths, internal representations or secrets (§7)"},
               "details": {"type": "object"}
             }
@@ -262,6 +262,12 @@
     "http-status": 503,
     "error-code": "SCHEMA_INCOMPATIBLE"
   },
+  "x-dispatch-timeout-contract": {
+    "description": "Phase 6.7B-R4 — bounded request/dispatch timeout. FIE_REQUEST_TIMEOUT (one vocabulary: parseable, finite, strictly positive seconds; non-numeric/zero/negative/inf/nan refuse deterministically at configuration resolution, ADR-017) bounds BOTH the handler connection-read window AND the bounded dispatch wait for domain operations on the single persistence-worker thread. On expiry the transport answers 503 OPERATION_TIMEOUT with details.reason=DISPATCH_DEADLINE_EXCEEDED; the abandoned read-only operation is never implicitly re-executed. Dependency windows are bounded separately (PostgreSQL connect_timeout 10s + statement_timeout 60s; SQLite busy_timeout 5s) — a dependency timeout inside the window is DEPENDENCY_UNAVAILABLE (bounded-window semantics, same unavailability family, never INTERNAL_ERROR).",
+    "operation-timeout-code": "OPERATION_TIMEOUT",
+    "operation-timeout-reason": "DISPATCH_DEADLINE_EXCEEDED",
+    "http-status": 503
+  },
   "x-http-status-mapping": {
     "description": "phase3.transport.errors.HTTP_STATUS_BY_CODE (§7); DEGRADED is a freshness state and is served with HTTP 200 + metadata",
     "INVALID_REQUEST": 400,
@@ -272,6 +278,7 @@
     "DATA_UNAVAILABLE": 503,
     "DEPENDENCY_UNAVAILABLE": 503,
     "SCHEMA_INCOMPATIBLE": 503,
+    "OPERATION_TIMEOUT": 503,
     "INTERNAL_ERROR": 500
   },
   "x-transport-invariants": [

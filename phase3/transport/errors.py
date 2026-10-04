@@ -44,6 +44,11 @@ HTTP_STATUS_BY_CODE: dict[str, int] = {
     # compatibility verdict — readiness is not ready, and 503 (like the
     # other unavailability codes) never exposes a driver exception.
     "SCHEMA_INCOMPATIBLE": 503,
+    # Phase 6.7B-R4: the request operation did not finish inside its
+    # bounded dispatch window. Same unavailability family (a retrying
+    # GET may succeed later); the abandoned read-only operation is
+    # never re-executed.
+    "OPERATION_TIMEOUT": 503,
     "INTERNAL_ERROR": 500,
 }
 

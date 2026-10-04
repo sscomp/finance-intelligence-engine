@@ -402,12 +402,17 @@ class TestRefusalVocabulary(unittest.TestCase):
     """The refusal category surface is stable and closed."""
 
     def test_codes_stable_and_machine_testable(self) -> None:
+        # Phase 6.7B-R4 (ADR-017 §7 ownership): INVALID_LOG_FORMAT is
+        # the one code added after R1 — the FIE_LOG_FORMAT observability
+        # knob was deliberately determinized by R4, closing its last
+        # silent fallback (documented in ADR-017 §7 / ADR-019).
         self.assertEqual(set(REFUSAL_CODES), {
             "UNKNOWN_SERVICE_ENV", "UNKNOWN_AUTH_MODE",
             "AUTH_MODE_FORBIDDEN_IN_PRODUCTION", "AUTH_CREDENTIAL_MISSING",
             "DATABASE_URL_MISSING", "DATABASE_URL_INVALID",
             "UNKNOWN_ACCESS_MODE", "INVALID_HTTP_PORT",
             "INVALID_LOG_LEVEL", "INVALID_REQUEST_TIMEOUT",
+            "INVALID_LOG_FORMAT",
         })
 
     def test_error_message_never_carries_the_value(self) -> None:

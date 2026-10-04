@@ -149,6 +149,10 @@ REFUSAL_CODES = (
     "INVALID_HTTP_PORT",
     "INVALID_LOG_LEVEL",
     "INVALID_REQUEST_TIMEOUT",
+    # Phase 6.7B-R4 (ADR-017 §7 ownership): the observability format
+    # knob is determinized like every other knob — its last silent
+    # fallback is closed.
+    "INVALID_LOG_FORMAT",
 )
 
 #: the complete Phase 6.6 transport env surface (documentation/tests)

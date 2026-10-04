@@ -160,7 +160,15 @@ def load_runtime_config(
         )
     log_format = os.environ.get(FIE_LOG_FORMAT, "structured").strip().lower()
     if log_format not in _VALID_LOG_FORMATS:
-        log_format = "structured"
+        # Phase 6.7B-R4 (ADR-017 §7 ownership): the last silent-config
+        # fallback is closed. An explicitly supplied invalid
+        # FIE_LOG_FORMAT refuses deterministically like every other
+        # knob — it never silently becomes "structured".
+        raise ConfigurationError(
+            "INVALID_LOG_FORMAT",
+            "FIE_LOG_FORMAT invalid; expected one of structured|plain; "
+            "value withheld",
+        )
     return ServiceRuntimeConfig(
         # database_spec: only the sanitized form is ever materialized
         database_spec=spec.sanitized(),

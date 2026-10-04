@@ -154,12 +154,37 @@ class _OneThreadExecutor:
             except BaseException as exc:  # noqa: BLE001 - forwarded verbatim
                 out.put((False, exc))
 
-    def call(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+    def call(
+        self, fn: Any, *args: Any, timeout: float | None = None, **kwargs: Any
+    ) -> Any:
+        """Run ``fn`` on the worker thread and wait for its result.
+
+        ``timeout`` (Phase 6.7B-R4) bounds the WAIT — never the
+        operation itself (a running call cannot be safely killed). When
+        the window expires the request raises the stable
+        ``OPERATION_TIMEOUT`` classification immediately; the abandoned
+        read-only operation keeps occupying the worker until it returns
+        or is bounded by its dependency (statement/busy timeouts) — it
+        is NEVER re-executed by the store or the transport, and the
+        client never gets a replayed result.
+        """
         import queue
 
         out: "queue.SimpleQueue[tuple]" = queue.SimpleQueue()
         self._queue.put((fn, args, kwargs, out))
-        ok, value = out.get()
+        try:
+            if timeout is None:
+                ok, value = out.get()
+            else:
+                ok, value = out.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise ServiceError(
+                ServiceErrorCode.OPERATION_TIMEOUT,
+                "operation did not complete inside the bounded dispatch "
+                "window; the read-only operation was abandoned, never "
+                "re-executed",
+                {"reason": "DISPATCH_DEADLINE_EXCEEDED"},
+            ) from exc
         if ok:
             return value
         raise value
@@ -175,25 +200,42 @@ class _ThreadAffineService:
         self.__dict__["_executor"] = executor
         self.__dict__["_factory"] = factory
         self.__dict__["_target"] = None
+        #: Phase 6.7B-R4: bounded dispatch window (seconds) applied to
+        #: every service call through this proxy; ``None`` (transport
+        #: embedders that never configure a deadline) keeps the
+        #: unbounded wait. The composition root (``make_http_server``)
+        #: binds it to the accepted ``FIE_REQUEST_TIMEOUT`` knob — the
+        #: SAME deadline that bounds connection reads, no new knob.
+        self.__dict__["_dispatch_timeout"] = None
 
     def _resolve(self) -> Any:
         # The store (and therefore the service) is *created* on the
         # worker thread so connection affinity matches its use.
         if self.__dict__["_target"] is None:
             self.__dict__["_target"] = self.__dict__["_executor"].call(
-                self.__dict__["_factory"]
+                self.__dict__["_factory"],
+                timeout=self.__dict__["_dispatch_timeout"],
             )
         return self.__dict__["_target"]
 
     def __getattr__(self, name: str) -> Any:  # dispatched read operations
         def _call(*args: Any, **kwargs: Any) -> Any:
             return self._executor.call(
-                getattr(self._resolve(), name), *args, **kwargs
+                getattr(self._resolve(), name),
+                *args,
+                timeout=self.__dict__["_dispatch_timeout"],
+                **kwargs,
             )
 
         return _call
 
     def close(self) -> None:
+        # Idempotent (Phase 6.7B-R4): a second close MUST NOT queue work
+        # behind the stop sentinel — the worker is already gone, and a
+        # ``call`` enqueued after ``None`` would wait forever.
+        if self.__dict__.get("_closed"):
+            return
+        self.__dict__["_closed"] = True
         target = self.__dict__["_target"]
         if target is not None:
             try:
@@ -242,6 +284,16 @@ class FIEReferenceRuntime:
             self.service.close()
         except Exception:  # noqa: BLE001
             pass
+
+    def set_dispatch_timeout(self, timeout: float | None) -> None:
+        """Bind the bounded dispatch window (Phase 6.7B-R4, seconds).
+
+        Called by the composition root (``make_http_server``) with the
+        accepted ``FIE_REQUEST_TIMEOUT`` value; ``None`` restores the
+        unbounded wait (transport embedders that configure no deadline).
+        Idempotent; applies to all subsequently proxied calls.
+        """
+        self.service.__dict__["_dispatch_timeout"] = timeout
 
 
 def _json(body: bytes, status: int, request_id: str) -> tuple[bytes, int, dict[str, str]]:
@@ -480,6 +532,14 @@ class _TransportHandler(BaseHTTPRequestHandler):
         error = envelope.get("error")
         if isinstance(error, dict):
             record["error_code"] = error.get("code")
+            # Phase 6.7B-R4: stable readiness-failure reason (the
+            # schema-gate vocabulary / bounded-window marker) — detail
+            # is BY CONSTRUCTION classified (never driver text).
+            details = error.get("details")
+            if isinstance(details, dict) and isinstance(
+                details.get("reason"), str
+            ):
+                record["reason"] = details["reason"]
         # NOTE (§11): never log query strings, Authorization headers,
         # tokens, or payloads — only the fields assembled above.
         self.logger.info(json.dumps(record, sort_keys=True))
@@ -592,6 +652,13 @@ def make_http_server(
         config.auth_mode, token=config.auth_token,
         principal_id=config.auth_principal,
     )
+    # Phase 6.7B-R4: the accepted request-timeout knob is ALSO the
+    # bounded dispatch window for domain operations (same deadline
+    # vocabulary — no new knob, no duplicate mechanism). The handler
+    # socket timeout bounds connection reads; this bounds the
+    # persistence-worker wait, with the stable OPERATION_TIMEOUT
+    # classification when it expires.
+    runtime.set_dispatch_timeout(config.request_timeout)
     factory = _HandlerFactory(
         runtime, authenticator, logger, config.request_timeout
     )
@@ -652,6 +719,12 @@ def run_server(
     server = make_http_server(runtime, config)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    # Phase 6.7B-R4: startup event now names the resolved backend
+    # FAMILY (category only — never a DSN/path/host) so operators can
+    # confirm the intended persistence target was selected.
+    from phase3.persistence.backend import resolve_spec, is_pg_dsn
+
+    spec = resolve_spec(db_spec)
     logging.getLogger("fie.transport").info(
         json.dumps(
             {
@@ -659,6 +732,7 @@ def run_server(
                 "host": config.host,
                 "port": config.port,
                 "auth_mode": config.auth_mode,
+                "backend": "postgres" if is_pg_dsn(spec.original) else "sqlite",
                 "schema_version": _schema_version(),
             },
             sort_keys=True,
@@ -721,18 +795,44 @@ def main() -> int:
         )
         return 2
     stop = threading.Event()
+    shutdown_signal: list[str] = []
 
-    def _terminate(*_a: object) -> None:
+    def _terminate(sig: int, _frame: object) -> None:
+        shutdown_signal.append(signal.Signals(sig).name)
         stop.set()
 
     signal.signal(signal.SIGTERM, _terminate)
     signal.signal(signal.SIGINT, _terminate)
     stop.wait()
+    TRANSPORT_LOGGER.info(json.dumps(
+        {
+            "event": "shutdown_signal",
+            "signal": shutdown_signal[0] if shutdown_signal else "unknown",
+        },
+        sort_keys=True,
+    ))
+    # Bounded shutdown lifecycle (Phase 6.7B-R4): deterministic order —
+    # stop accepting connections, close the socket, then close the
+    # runtime (store + persistence worker) — instrumented with stable
+    # shutdown events so an operator can see WHY the process exited and
+    # that cleanup completed. ``shutdown()`` is bounded by the server's
+    # poll interval; pending in-flight reads complete or are bounded by
+    # the dispatch window — nothing is left waiting indefinitely.
+    started_shutdown = time.perf_counter()
     server.shutdown()
     server.server_close()
     runtime = getattr(server, "_fie_runtime", None)
     if runtime is not None:
         runtime.close()
+    TRANSPORT_LOGGER.info(json.dumps(
+        {
+            "event": "server_stopped",
+            "clean": True,
+            "signal": shutdown_signal[0] if shutdown_signal else "unknown",
+            "shutdown_ms": round((time.perf_counter() - started_shutdown) * 1000.0, 3),
+        },
+        sort_keys=True,
+    ))
     return 0
 
 if __name__ == "__main__":  # `python -m phase3.transport.http`

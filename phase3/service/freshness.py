@@ -24,6 +24,8 @@ timestamp for an entity. No network fetches happen here, ever
 """
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any, Protocol
 
 from phase3.freshness import (
@@ -47,6 +49,10 @@ __all__ = [
 ]
 
 SERVICE_FRESHNESS_STATES = ("FRESH", "DEGRADED", "STALE", "UNAVAILABLE")
+
+#: Server-side freshness-failure diagnostics (Phase 6.7B-R4) — the
+#: EXTERNAL envelope never carries the driver detail.
+_DEPENDENCY_LOGGER = logging.getLogger("fie.service")
 
 #: Existing FIE entity kinds → governance data classes (§5.2 policy).
 ENTITY_DATA_CLASS = {
@@ -99,10 +105,20 @@ def freshness_for(
     try:
         rows = signals.query(entity_type=kind, entity_id=entity_id, limit=100)
     except Exception as exc:  # noqa: BLE001
+        # Phase 6.7B-R4 (Architecture ruling §4.3): stable external
+        # classification + dependency KIND only — sanitized driver text
+        # no longer reaches the envelope (it can name internal
+        # topology); the sanitized detail stays in server-side logs.
+        _DEPENDENCY_LOGGER.warning(json.dumps(
+            {
+                "event": "freshness_dependency_failure",
+                "reason": sanitize_for_error(str(exc)),
+            },
+            sort_keys=True,
+        ))
         raise ServiceError(
             ServiceErrorCode.DEPENDENCY_UNAVAILABLE,
             "signal observations are not readable",
-            {"reason": sanitize_for_error(str(exc))},
         ) from exc
 
     as_of_date = as_of or today_utc()

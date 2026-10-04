@@ -278,6 +278,8 @@ class TestErrorTaxonomyAndContext(_ScoredCase):
              # Phase 6.7B-R3: deterministic fail-closed schema
              # compatibility verdict for readiness (HP-07/06 / OI-08).
              "SCHEMA_INCOMPATIBLE",
+             # Phase 6.7B-R4: bounded dispatch window expiry (ADR-019 §2).
+             "OPERATION_TIMEOUT",
              "INTERNAL_ERROR"},
         )
 

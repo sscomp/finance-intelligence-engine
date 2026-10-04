@@ -21,6 +21,8 @@ SQLite and PostgreSQL alike (contract-tested).
 """
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any, Protocol
 
 from phase3.persistence.contracts import DatabaseStore
@@ -41,6 +43,12 @@ from phase3.service import freshness as _freshness
 from phase3.service.timeutil import utc_now_iso
 
 __all__ = ["IntelligenceService", "DefaultIntelligenceService"]
+
+#: Server-side diagnostics for readiness dependency failures (Phase
+#: 6.7B-R4). Records the sanitized failure detail (URL/DSN/path-class
+#: redacted) for operators — the EXTERNAL envelope deliberately carries
+#: the stable classification + dependency kind only.
+_DEPENDENCY_LOGGER = logging.getLogger("fie.service")
 
 
 def _readiness_schema_gate(store: DatabaseStore) -> dict[str, Any]:
@@ -200,10 +208,24 @@ class DefaultIntelligenceService:
                 "scores": int(self._score_repo.count()),
             }
         except Exception as exc:  # noqa: BLE001
+            # Phase 6.7B-R4 (Architecture ruling §4.3): the EXTERNAL
+            # envelope carries the stable classification only — the
+            # dependency KIND (backend family, e.g. "postgres"), never
+            # driver text, which can name internal hosts/services/topology.
+            # The sanitized detail (DSN- and URL-masked) stays in
+            # SERVER-SIDE logs only.
+            _DEPENDENCY_LOGGER.warning(json.dumps(
+                {
+                    "event": "readiness_dependency_failure",
+                    "dependency": self._store.backend,
+                    "reason": sanitize_for_error(str(exc)),
+                },
+                sort_keys=True,
+            ))
             raise ServiceError(
                 ServiceErrorCode.DEPENDENCY_UNAVAILABLE,
                 "persistence layer is not readable",
-                {"reason": sanitize_for_error(str(exc))},
+                {"dependency": self._store.backend},
             ) from exc
 
         current: int | None

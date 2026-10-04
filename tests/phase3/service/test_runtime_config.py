@@ -64,10 +64,22 @@ class TestPrecedenceAndValidation(unittest.TestCase):
 
     def test_profile_and_log_format_fallbacks(self) -> None:
         os.environ[FIE_SERVICE_ENV] = "STAGING"
-        os.environ[FIE_LOG_FORMAT] = "bogus"
         cfg = load_runtime_config()
         self.assertEqual(cfg.service_env, "staging")
-        self.assertEqual(cfg.log_format, "structured")  # invalid → safe default
+        self.assertEqual(cfg.log_format, "structured")  # absent → safe default
+
+    def test_invalid_log_format_refuses(self) -> None:
+        # Phase 6.7B-R4 (ADR-017 §7 ownership): the last silent
+        # fallback is closed — an explicitly supplied invalid log
+        # format refuses deterministically, it never becomes
+        # "structured" (the pre-R4 behavior).
+        from phase3.service.runtime_config import ConfigurationError
+        os.environ[FIE_LOG_FORMAT] = "bogus"
+        with self.assertRaises(ConfigurationError) as cm:
+            load_runtime_config()
+        self.assertEqual(cm.exception.code, "INVALID_LOG_FORMAT")
+        # the value never travels through the diagnostic
+        self.assertNotIn("bogus", cm.exception.message)
 
     def test_invalid_service_env_refuses(self) -> None:
         # Phase 6.7B / ADR-017: an explicitly supplied invalid profile

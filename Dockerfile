@@ -21,7 +21,7 @@
 # digest at deploy time (`docker pull python:3.12-slim && docker images
 # --digests`); the digest is machine-specific and is deliberately NOT
 # baked into the tracked file so every host builds from its verified copy.
-FROM python:3.12-slim
+FROM python:3.12-slim AS runtime-base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -94,3 +94,41 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
 urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"FIE_HTTP_PORT\",\"8787\")}/healthz', timeout=4)"
 
 ENTRYPOINT ["python", "-m", "phase3.transport.http"]
+
+# ---- PostgreSQL-capable production artifact (Phase 6.7B-R4, ADR-019) ------
+#
+# Deterministic build TARGET of the same reference runtime with the
+# declared `[postgres]` runtime dependency (psycopg[binary]) baked in at
+# BUILD time — the packaging contract for `FIE_DATABASE_URL=postgres://...`
+# production-like deployments. An operator NEVER runs `pip install` inside
+# a running container:
+#
+#   docker build --target runtime-postgres -t fie-runtime-postgres:local .
+#
+# Both final stages run uid/gid 10001 (non-root), carry the identical
+# HEALTHCHECK/ENTRYPOINT and differ ONLY in the dependency set. The
+# cert bundle flag keeps the CA-trust mode semantics of the base stage
+# (Mode A: the standard bundle — same trust; Mode B: the augmented store
+# baked into the layer above — the enterprise CA stays trusted, the
+# public CAs are never dropped).
+FROM runtime-base AS runtime-postgres
+USER 0:0
+# The SAME trust-mode conditioning as the base stage's RUN: Mode A (no
+# secret) → pip validates against its own bundled public trust; Mode B →
+# against the (already augmented, additive) system bundle baked into the
+# runtime-base layer above. The secret is mounted per-RUN, so a Mode B
+# build of THIS target supplies it again and both stages stay identical.
+RUN --mount=type=secret,id=authorized_extra_ca \
+    set -eu; \
+    pip_cert=""; \
+    if [ -f /run/secrets/authorized_extra_ca ]; then \
+      pip_cert="--cert /etc/ssl/certs/ca-certificates.crt"; \
+    fi; \
+    python -m pip install --no-cache-dir $pip_cert "psycopg[binary]>=3.2,<4"
+USER 10001:10001
+
+# Default build target — UNCHANGED (PyYAML-only reference artifact).
+# Declared explicitly so the default `docker build` resolves to the
+# same image as before the R4 restructure (the LAST stage is what a
+# target-less build produces).
+FROM runtime-base AS runtime

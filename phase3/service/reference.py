@@ -36,7 +36,12 @@ import time
 from typing import Any, Callable
 
 from phase3.service import contracts as C
-from phase3.service.errors import ServiceError, ServiceErrorCode
+from phase3.service.errors import (
+    ServiceError,
+    ServiceErrorCode,
+    classify_dependency_error,
+    sanitize_for_error,
+)
 
 __all__ = ["dispatch", "ok_envelope", "error_envelope"]
 
@@ -44,6 +49,21 @@ __all__ = ["dispatch", "ok_envelope", "error_envelope"]
 #: JSON line per invocation — never payloads, secrets or stack traces.
 #: A future HTTP adapter MUST emit the same fields per request.
 REQUEST_LOGGER = logging.getLogger("fie.service")
+
+
+def _dependency_kind(exc: BaseException) -> str:
+    """Backend FAMILY of a raw driver exception (topology-safe).
+
+    Only the closed family vocabulary (``sqlite``/``postgres``) is ever
+    returned — a driver exception can NEVER transport a hostname, DSN
+    or service name into the envelope through this field.
+    """
+    module = type(exc).__module__.casefold()
+    if "sqlite" in module:
+        return "sqlite"
+    if "psycopg" in module or "postgres" in module:
+        return "postgres"
+    return ""
 
 
 def _observability_record(
@@ -97,20 +117,47 @@ def dispatch(
         except ServiceError as exc:
             envelope = error_envelope(exc, operation=operation, ctx=ctx)
         except Exception as exc:  # noqa: BLE001 - boundary must not leak stacks
-            # (6.6R1 DEFECT-A) the exception repr used to become the
-            # client-visible message; full diagnostics now stay in
-            # server-side logging and the envelope carries the stable
-            # generic message only — never arguments, locals or envs.
-            REQUEST_LOGGER.exception(
-                "service internal failure: operation=%s", operation
-            )
-            envelope = error_envelope(
-                ServiceError(
-                    ServiceErrorCode.INTERNAL_ERROR, "internal service failure"
-                ),
-                operation=operation,
-                ctx=ctx,
-            )
+            # Phase 6.7B-R4: a bounded dependency window that expired
+            # (statement/busy timeout) is a stable unavailability, not
+            # an internal failure — classify it before the catch-all.
+            if classify_dependency_error(exc):
+                kind = _dependency_kind(exc)
+                REQUEST_LOGGER.warning(json.dumps(
+                    {
+                        "event": "dependency_timeout",
+                        "operation": operation,
+                        "request_id": ctx.request_id if ctx else "",
+                        "dependency": kind,
+                        "reason": sanitize_for_error(str(exc)),
+                    },
+                    sort_keys=True,
+                ))
+                envelope = error_envelope(
+                    ServiceError(
+                        ServiceErrorCode.DEPENDENCY_UNAVAILABLE,
+                        "persistence dependency did not answer inside "
+                        "its bounded window",
+                        {"dependency": kind, "reason": "DEPENDENCY_TIMEOUT"},
+                    ),
+                    operation=operation,
+                    ctx=ctx,
+                )
+            else:
+                # (6.6R1 DEFECT-A) the exception repr used to become the
+                # client-visible message; full diagnostics now stay in
+                # server-side logging and the envelope carries the stable
+                # generic message only — never arguments, locals or envs.
+                REQUEST_LOGGER.exception(
+                    "service internal failure: operation=%s", operation
+                )
+                envelope = error_envelope(
+                    ServiceError(
+                        ServiceErrorCode.INTERNAL_ERROR,
+                        "internal service failure",
+                    ),
+                    operation=operation,
+                    ctx=ctx,
+                )
         return envelope
     finally:
         if REQUEST_LOGGER.isEnabledFor(logging.INFO):

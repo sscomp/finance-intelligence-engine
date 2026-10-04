@@ -19,9 +19,23 @@ DATA_UNAVAILABLE       no data at all exists for the requested
                        entity class itself has nothing to offer)
 DEPENDENCY_UNAVAILABLE the persistence backend (or another
                        dependency) is unreachable/unusable — the
-                       request might succeed later
+                       request might succeed later. Bounded
+                       dependency TIMEOUTS are deliberately the same
+                       class (Phase 6.7B-R4): a dependency that fails
+                       to answer inside its bounded window is
+                       unavailable to this request with identical
+                       retry semantics, so no second status/case is
+                       invented for it
 INTERNAL_ERROR         an unexpected failure inside FIE (never
                        leaks stack traces or environment data)
+
+Transport-only timeout code (Phase 6.7B-R4):
+
+OPERATION_TIMEOUT      the request's operation did not complete
+                       inside the transport's bounded dispatch
+                       window (``FIE_REQUEST_TIMEOUT``); the
+                       abandoned operation is read-only and is
+                       NEVER implicitly re-executed
 """
 from __future__ import annotations
 
@@ -29,7 +43,41 @@ import re
 from enum import Enum
 from typing import Any
 
-__all__ = ["ServiceErrorCode", "ServiceError", "sanitize_for_error"]
+__all__ = ["ServiceErrorCode", "ServiceError", "sanitize_for_error",
+           "classify_dependency_error"]
+
+# Bounded-window driver errors (Phase 6.7B-R4). These are the ONLY
+# driver shapes classified as dependency timeouts — everything else
+# keeps its existing class. PostgreSQL: statement_timeout cancellation
+# (sqlstate 57014 / psycopg QueryCanceled). SQLite: the 5-second
+# busy_timeout expiring (sqlite3 "database is locked"/"database is
+# busy") — the same bounded-window semantics on the other backend.
+_PG_TIMEOUT_SQLSTATES = frozenset({"57014"})
+_TIMEOUT_CLASS_NAMES = frozenset({"QueryCanceled"})
+_TIMEOUT_MESSAGE_RES = (
+    re.compile(r"\bdatabase is (?:locked|busy)\b"),
+)
+
+
+def classify_dependency_error(exc: BaseException) -> bool:
+    """True when ``exc`` is a bounded dependency-window expiry.
+
+    Narrowly scoped classification (Phase 6.7B-R4): the dependency
+    refused/failed to answer inside its own bounded window (a
+    statement_timeout / connect-timeout / busy_timeout expiry) — never
+    a session death, integrity fault or transport outage (those keep
+    their existing classes). Decides ONLY raw driver errors; anything
+    already wrapped in :class:`ServiceError` is left as raised.
+    """
+    if isinstance(exc, ServiceError):
+        return False
+    sqlstate = getattr(exc, "sqlstate", None)
+    if isinstance(sqlstate, str) and sqlstate in _PG_TIMEOUT_SQLSTATES:
+        return True
+    if type(exc).__name__ in _TIMEOUT_CLASS_NAMES:
+        return True
+    text = str(exc).casefold()
+    return any(pattern.search(text) is not None for pattern in _TIMEOUT_MESSAGE_RES)
 
 _DB_URL_RE = re.compile(
     r"\S*://\S+",  # any scheme://... string (credentials live in DSNs/URLs)
@@ -65,6 +113,10 @@ class ServiceErrorCode(str, Enum):
     #: readiness fails CLOSED with this stable, transport-neutral code
     #: (never a raw driver exception).
     SCHEMA_INCOMPATIBLE = "SCHEMA_INCOMPATIBLE"
+    #: Phase 6.7B-R4: the bounded dispatch window for a request
+    #: operation expired (transport-owned deadline). Read-only plane:
+    #: the abandoned operation is never retried or re-executed.
+    OPERATION_TIMEOUT = "OPERATION_TIMEOUT"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
