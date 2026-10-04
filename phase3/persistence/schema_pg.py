@@ -1,11 +1,18 @@
-"""Phase 3B schema v1 — PostgreSQL twin (Phase 6.3, disposable parity).
+"""Phase 3B schema v1 — PostgreSQL twin (production target per AD-1).
 
 This module is the backend twin of :mod:`phase3.persistence.schema_v1`.
 The *logical* schema (tables, columns, keys, unique constraints,
 append-only policy) is identical; only storage types and dialect
-differ. Per Phase 6.2 ADR-C03 this backend is **disposable/synthetic
-parity** — it exists to prove the persistence contracts port, not (in
-this phase) to become a production target.
+differ.
+
+Status: the original Phase 6.2 ADR-C03 "disposable/synthetic parity"
+qualification is SUPERSEDED by owner decision AD-1 of the PostgreSQL
+Production Readiness Remediation work order
+(ABACUS_FIE_6_7B_POSTGRESQL_PRODUCTION_READINESS_REMEDIATION_AND_CUTOVER_GATE,
+2026-10-04): TARGET_BACKEND=POSTGRESQL,
+ARCHITECTURE=H2_FULL_POSTGRESQL — PostgreSQL is a first-class
+production backend; this twin IS the PostgreSQL production schema.
+SQLite remains supported for rollback/testing.
 
 Differences from the SQLite twin
 --------------------------------

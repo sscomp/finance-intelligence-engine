@@ -1,10 +1,14 @@
 """PostgreSQL backend for the Phase 3B persistence layer (Phase 6.3).
 
-Status per Phase 6.2 ADR-003 / work order §3: **disposable/synthetic
-parity backend only**. Nothing in Phase 6.3 provisions a cloud
-database or migrates production data; this store exists so the same
-repositories, migrations and pipeline code can be exercised against
-PostgreSQL (development parity, contract tests, golden parity runs).
+Status: the original Phase 6.2 ADR-003 "disposable/synthetic parity
+backend only" qualification is SUPERSEDED by owner decision AD-1 of
+the PostgreSQL Production Readiness Remediation work order
+(ABACUS_FIE_6_7B_POSTGRESQL_PRODUCTION_READINESS_REMEDIATION_AND_CUTOVER_GATE,
+2026-10-04): TARGET_BACKEND=POSTGRESQL,
+ARCHITECTURE=H2_FULL_POSTGRESQL — this store is the production
+Phase 3B backend once the controlled cutover executes (cutover itself
+requires separate authorization). SQLite remains supported for
+rollback/testing.
 
 Surface parity with :class:`~phase3.persistence.sqlite.SQLiteStore`
 (both satisfy :class:`~phase3.persistence.contracts.DatabaseStore`):

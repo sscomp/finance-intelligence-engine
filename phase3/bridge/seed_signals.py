@@ -1,23 +1,65 @@
-"""Bridge: read production macro_history.db tables and seed Phase 3 signal_log.
+"""Bridge: read production macro-history tables and seed Phase 3 signal_log.
 
 This module bridges the gap between the production data tables
-(`macro_daily`, `stock_monthly`, `institutional_daily`) in
-`macro_history.db` and the Phase 3 `signal_log` table that the
-IntelligencePipeline reads via `SignalLoader`.
+(``macro_daily``, ``stock_monthly``, ``institutional_daily``) in the
+raw layer (``macro_history.db`` or its PostgreSQL twin) and the Phase 3
+``signal_log`` table that the IntelligencePipeline reads via
+``SignalLoader``.
 
-The bridge is a pure offline mapping — no network calls, no new
-data sources. It reads rows that production scripts (macro_daily.py,
-company_monthly.py, institutional.py) already fetched via yfinance
-and stored, converts them to the input format expected by the
-existing Phase 3 adapters (MacroAdapter, YFinanceAdapter, T86Adapter),
-and writes the resulting Signals into a target SQLite database's
-`signal_log` table via `SignalRepository.upsert_many`.
+The bridge is a pure offline mapping — no network calls, no new data
+sources. It reads rows that production scripts (macro_daily.py,
+company_monthly.py, institutional.py) already fetched via yfinance (or
+wrote to the PostgreSQL raw layer) and converts them to the input
+format expected by the existing Phase 3 adapters (MacroAdapter,
+YFinanceAdapter, T86Adapter), then writes the resulting Signals into
+the target store's ``signal_log`` table via
+``SignalRepository.upsert_many``.
+
+Backend awareness (WO C1 — PostgreSQL Production Readiness)
+-----------------------------------------------------------
+Both the **source** (raw layer) and the **target** (intelligence
+store) are backend-aware specifier strings:
+
+* a specifier starting with ``postgres://`` / ``postgresql://``
+  (case-insensitive) selects the PostgreSQL backend;
+* anything else selects the SQLite file path backend.
+
+A PostgreSQL DSN is therefore NEVER interpreted as a filesystem path:
+the target goes through :func:`phase3.persistence.backend.open_store`
+(the same selector the Phase 3B service surface uses), and the source
+is opened by the matching driver. Unsupported backends fail closed —
+they raise instead of silently producing an empty seed.
+
+Seed accounting (machine-verifiable)
+------------------------------------
+The returned accounting dict exposes (WO C1 requirements):
+
+``SOURCE_COUNT``
+    Per-source row counts as *selected* by the seeding predicate —
+    the explicit/auto-resolved date window and the requested code
+    filter. Selection (e.g. the macro window keeps the 5 most recent
+    macro rows when no date is given) is a documented domain filter,
+    not a rejection: the explained delta between SOURCE_COUNT and
+    SEEDED_COUNT comes from (a) field expansion (each source row can
+    yield one signal per mapped field) and (b) the date-window
+    selection above.
+``REJECTED_COUNT``
+    Field-value level rejections — the row was read but a mapped
+    value was absent/non-numeric (plus negative ``pe_ratio``, which
+    the domain intentionally skips). Per-source breakdown + total.
+``SEEDED_COUNT``
+    The number of :class:`~phase3.datamodel.signals.SignalRecord`
+    objects constructed and handed to ``SignalRepository.upsert_many``
+    (equals ``total``).
+
+``rc == 0`` alone must never be read as "the seed succeeded" — use the
+accounting (and the CLI ``--min-seed-total`` assertion).
 
 Usage:
     from phase3.bridge.seed_signals import seed_from_macro_history
     seed_from_macro_history(
-        source_db="macro_history.db",
-        target_db="intelligence.db",
+        source_db="macro_history.db",          # or a postgres DSN
+        target_db="intelligence.db",           # or a postgres DSN
     )
 
 The target_db must NOT be macro_history.db (guarded upstream).
@@ -25,6 +67,7 @@ The target_db must NOT be macro_history.db (guarded upstream).
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any
@@ -37,7 +80,79 @@ from phase3.freshness import (
     load_holidays,
 )
 from phase3.persistence.signal_repo import SignalRecord, SignalRepository
-from phase3.persistence.sqlite import SQLiteStore
+
+
+# ---------------------------------------------------------------------------
+# Backend-aware source/target plumbing (WO C1)
+# ---------------------------------------------------------------------------
+
+PG_URL_PREFIXES = ("postgres://", "postgresql://")
+
+
+def _is_pg_spec(specifier: str | None) -> bool:
+    """True when ``specifier`` selects the PostgreSQL backend."""
+    return bool(specifier) and str(specifier).strip().lower().startswith(PG_URL_PREFIXES)
+
+
+def _pg_source_sql(sql: str) -> str:
+    """Translate SQLite-style ``?`` placeholders to psycopg ``%s``.
+
+    The bridge SQL contains no literal ``?`` characters — every one of
+    them is a placeholder, so the translation is a plain replacement
+    (the same contract the persistence layer documents).
+    """
+    return sql.replace("?", "%s")
+
+
+class _SourceConnection:
+    """Backend-dispatched, read-only source connection wrapper.
+
+    ``execute(sql, params)`` returns a cursor-like object supporting
+    ``fetchone()`` / ``fetchall()`` and mapping-style rows for both
+    SQLite and PostgreSQL, so the ``_seed_*`` readers are unchanged.
+    """
+
+    def __init__(self, backend: str, conn: Any) -> None:
+        self.backend = backend
+        self._conn = conn
+
+    def execute(self, sql: str, params: tuple | list | None = None):
+        if self.backend == "postgres":
+            return self._conn.execute(
+                _pg_source_sql(sql), params if params else None
+            )
+        return self._conn.execute(sql, tuple(params) if params else ())
+
+    def close(self) -> None:
+        if self.backend == "postgres":
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001 - close is best-effort
+                pass
+            return
+        self._conn.close()
+
+
+def _open_source(source_db: str) -> _SourceConnection:
+    """Open the seed source with the backend its spec selects.
+
+    PostgreSQL DSNs are handed to :class:`PostgresStore` (bounded
+    connect/statement timeouts, no SQLite fallback — a failure raises
+    and the caller fails closed). SQLite specs open ``sqlite3.connect``
+    with mapping rows, exactly as before. Malformed/unsupported specs
+    are treated as SQLite paths by design (the same selection rule as
+    :data:`phase3.persistence.backend.PG_URL_PREFIXES`), whose failures
+    surface as the driver error — never as a silent empty seed.
+    """
+    if _is_pg_spec(source_db):
+        from phase3.persistence.postgres import PostgresStore
+
+        # Store is a DatabaseStore facade (execute/transaction/close);
+        # used purely as a read connection here.
+        return _SourceConnection("postgres", PostgresStore(source_db.strip()))
+    conn = sqlite3.connect(str(os.fspath(source_db)) if source_db else source_db)
+    conn.row_factory = sqlite3.Row
+    return _SourceConnection("sqlite", conn)
 
 
 # ---------------------------------------------------------------------------
@@ -92,13 +207,16 @@ def _macro_direction(signal_type: str, value: float) -> str:
 
 
 def _seed_macro_signals(
-    conn: sqlite3.Connection,
+    conn: Any,
     date_bucket: str | None = None,
     target_date_bucket: str | None = None,
     requested_date: str | None = None,
     holidays: set[str] | None = None,
-) -> list[SignalRecord]:
+) -> tuple[list[SignalRecord], int, int]:
     """Read macro_daily rows and convert to SignalRecord objects.
+
+    Returns ``(records, source_count, rejected_count)`` — the counts
+    that feed the machine-verifiable seed accounting (WO C1).
 
     When ``target_date_bucket`` is provided, all signals are stamped
     with that date_bucket (not the source row's date). This allows
@@ -119,6 +237,7 @@ def _seed_macro_signals(
 
     rows = cur.fetchall()
     records: list[SignalRecord] = []
+    rejected = 0
     for row in rows:
         row_dict = dict(row) if not isinstance(row, dict) else row
         date_str = str(row_dict["date"])
@@ -127,10 +246,12 @@ def _seed_macro_signals(
         for col, (signal_type, unit) in _MACRO_FIELD_MAP.items():
             val = row_dict.get(col)
             if val is None:
+                rejected += 1
                 continue
             try:
                 fval = float(val)
             except (TypeError, ValueError):
+                rejected += 1
                 continue
             sig_id = make_signal_id(source_id, "global", signal_type, effective_bucket)
             records.append(SignalRecord(
@@ -158,7 +279,7 @@ def _seed_macro_signals(
                 ),
                 raw_payload=dict(row_dict),
             ))
-    return records
+    return records, len(rows), rejected
 
 
 # ---------------------------------------------------------------------------
@@ -204,14 +325,16 @@ def _company_direction(signal_type: str, value: float) -> str:
 
 
 def _seed_company_signals(
-    conn: sqlite3.Connection,
+    conn: Any,
     codes: list[str] | None = None,
     date_bucket: str | None = None,
     target_date_bucket: str | None = None,
     requested_date: str | None = None,
     holidays: set[str] | None = None,
-) -> list[SignalRecord]:
+) -> tuple[list[SignalRecord], int, int]:
     """Read stock_monthly rows and convert to SignalRecord objects.
+
+    Returns ``(records, source_count, rejected_count)`` (WO C1).
 
     When ``target_date_bucket`` is provided, all signals are stamped
     with that date_bucket (not the source row's date).
@@ -241,6 +364,7 @@ def _seed_company_signals(
 
     rows = cur.fetchall()
     records: list[SignalRecord] = []
+    rejected = 0
     for row in rows:
         row_dict = dict(row) if not isinstance(row, dict) else row
         code = str(row_dict["code"])
@@ -250,13 +374,16 @@ def _seed_company_signals(
         for col, (signal_type, unit) in _COMPANY_FIELD_MAP.items():
             val = row_dict.get(col)
             if val is None:
+                rejected += 1
                 continue
             try:
                 fval = float(val)
             except (TypeError, ValueError):
+                rejected += 1
                 continue
             # Skip negative PE
             if signal_type == "pe_ratio" and fval <= 0:
+                rejected += 1
                 continue
             sig_id = make_signal_id(source_id, code, signal_type, effective_bucket)
             records.append(SignalRecord(
@@ -289,7 +416,7 @@ def _seed_company_signals(
                 ),
                 raw_payload=dict(row_dict),
             ))
-    return records
+    return records, len(rows), rejected
 
 
 # ---------------------------------------------------------------------------
@@ -311,14 +438,16 @@ def _inst_direction(value: float) -> str:
 
 
 def _seed_institutional_signals(
-    conn: sqlite3.Connection,
+    conn: Any,
     codes: list[str] | None = None,
     date_bucket: str | None = None,
     target_date_bucket: str | None = None,
     requested_date: str | None = None,
     holidays: set[str] | None = None,
-) -> list[SignalRecord]:
+) -> tuple[list[SignalRecord], int, int]:
     """Read institutional_daily rows and convert to SignalRecord objects.
+
+    Returns ``(records, source_count, rejected_count)`` (WO C1).
 
     When ``target_date_bucket`` is provided, all signals are stamped
     with that date_bucket (not the source row's date).
@@ -348,6 +477,7 @@ def _seed_institutional_signals(
 
     rows = cur.fetchall()
     records: list[SignalRecord] = []
+    rejected = 0
     for row in rows:
         row_dict = dict(row) if not isinstance(row, dict) else row
         code = str(row_dict["code"])
@@ -357,10 +487,12 @@ def _seed_institutional_signals(
         for col, signal_type in _INST_FIELD_MAP.items():
             val = row_dict.get(col)
             if val is None:
+                rejected += 1
                 continue
             try:
                 fval = float(val)
             except (TypeError, ValueError):
+                rejected += 1
                 continue
             sig_id = make_signal_id(source_id, code, signal_type, effective_bucket)
             records.append(SignalRecord(
@@ -392,7 +524,7 @@ def _seed_institutional_signals(
                 ),
                 raw_payload=dict(row_dict),
             ))
-    return records
+    return records, len(rows), rejected
 
 
 # ---------------------------------------------------------------------------
@@ -438,15 +570,19 @@ def _load_industry_mapping(config_path: str | None = None) -> dict[str, list[str
 
 
 def _seed_industry_signals(
-    conn: sqlite3.Connection,
+    conn: Any,
     industry_config_path: str | None = None,
     industry_ids: list[str] | None = None,
     date_bucket: str | None = None,
     target_date_bucket: str | None = None,
     requested_date: str | None = None,
     holidays: set[str] | None = None,
-) -> list[SignalRecord]:
+) -> tuple[list[SignalRecord], int, int]:
     """Aggregate institutional_daily into industry-level capital_flow signals.
+
+    Returns ``(records, source_count, rejected_count)`` where
+    ``source_count`` is the number of per-industry aggregates actually
+    processed (each emits two signals) (WO C1).
 
     For each industry defined in industry_config.json, sum foreign_net and
     prop_net across all constituent companies for the given date_bucket.
@@ -465,12 +601,13 @@ def _seed_industry_signals(
     """
     mapping = _load_industry_mapping(industry_config_path)
     if not mapping:
-        return []
+        return [], 0, 0
 
     if industry_ids:
         mapping = {k: v for k, v in mapping.items() if k in industry_ids}
 
     records: list[SignalRecord] = []
+    aggregates = 0
     for industry_id, codes in mapping.items():
         if not codes:
             continue
@@ -502,6 +639,7 @@ def _seed_industry_signals(
         row_count = row_dict.get("row_count", 0)
         if row_count == 0:
             continue
+        aggregates += 1
         if date_bucket:
             effective_date = date_bucket
         else:
@@ -552,7 +690,7 @@ def _seed_industry_signals(
                     "constituent_codes": codes,
                 },
             ))
-    return records
+    return records, aggregates, 0
 
 
 # ---------------------------------------------------------------------------
@@ -584,7 +722,7 @@ def resolve_as_of_dates(
     most recent data that existed on or before the requested date. This
     is deterministic and avoids blending arbitrary future data.
     """
-    conn = sqlite3.connect(source_db)
+    conn = _open_source(source_db)
     result: dict[str, str | None] = {}
     for table, key in [
         ("macro_daily", "macro_date"),
@@ -634,9 +772,10 @@ def seed_from_macro_history(
     Explicitly passed dates (macro_date, company_date,
     institutional_date) override the auto-resolved values.
 
-    Returns a dict with counts and the resolved dates:
+    Returns a machine-verifiable accounting dict:
     {macro: N, company: N, institutional: N, industry: N, total: N,
-     new_rows: N, resolved_dates: {...}}
+     new_rows: N, resolved_dates: {...},
+     SOURCE_COUNT: {...}, SEEDED_COUNT: N, REJECTED_COUNT: {...}}
     """
     # Auto-resolve dates if requested
     resolved_dates: dict[str, str | None] = {}
@@ -667,25 +806,26 @@ def seed_from_macro_history(
     # Load TWSE holiday calendar for freshness age calculation
     holidays = load_holidays()
 
-    src_conn = sqlite3.connect(source_db)
-    src_conn.row_factory = sqlite3.Row
+    src_conn = _open_source(source_db)
+    source_counts: dict[str, int] = {}
+    rejected_counts: dict[str, int] = {}
 
     # Collect all signal records
-    macro_records = _seed_macro_signals(
+    macro_records, macro_src, macro_rej = _seed_macro_signals(
         src_conn, date_bucket=macro_date, target_date_bucket=target_date_bucket,
         requested_date=requested_date, holidays=holidays,
     )
-    company_records = _seed_company_signals(
+    company_records, company_src, company_rej = _seed_company_signals(
         src_conn, codes=company_codes, date_bucket=company_date,
         target_date_bucket=target_date_bucket,
         requested_date=requested_date, holidays=holidays,
     )
-    inst_records = _seed_institutional_signals(
+    inst_records, inst_src, inst_rej = _seed_institutional_signals(
         src_conn, codes=institutional_codes, date_bucket=institutional_date,
         target_date_bucket=target_date_bucket,
         requested_date=requested_date, holidays=holidays,
     )
-    industry_records = _seed_industry_signals(
+    industry_records, industry_src, industry_rej = _seed_industry_signals(
         src_conn,
         industry_config_path=industry_config_path,
         industry_ids=industry_ids,
@@ -694,26 +834,47 @@ def seed_from_macro_history(
         requested_date=requested_date, holidays=holidays,
     )
     src_conn.close()
+    source_counts = {
+        "macro": macro_src,
+        "company": company_src,
+        "institutional": inst_src,
+        "industry_aggregate": industry_src,
+    }
+    rejected_counts = {
+        "macro": macro_rej,
+        "company": company_rej,
+        "institutional": inst_rej,
+        "industry_aggregate": industry_rej,
+    }
 
     all_records = macro_records + company_records + inst_records + industry_records
 
-    if not all_records:
-        return {
-            "macro": 0, "company": 0, "institutional": 0,
-            "industry": 0, "total": 0, "new_rows": 0,
-            "resolved_dates": resolved_dates,
-        }
+    # Open the target store and write signals. The store is opened (and
+    # its schema ensured) even when the seed is empty: an empty seed must
+    # still validate the target (backend reachability/schema) so the
+    # accounting can never be confused with an untested no-op (WO C1:
+    # fail-closed on unreachable/malformed target configuration).
+    from phase3.persistence.backend import resolve_spec, open_store
+    from phase3.persistence.migrations import MigrationManager, default_migrations_for
 
-    # Open target DB and write signals
-    store = SQLiteStore(target_db)
-    # Ensure schema exists (apply migration v1 if needed)
-    from phase3.persistence.migrations import MigrationManager
-    from phase3.persistence import schema_v1
-    mgr = MigrationManager(store, [schema_v1.build()])
+    spec = resolve_spec(target_db)
+    # open_store applies the selection rule for BOTH backends: SQLite
+    # targets keep the historical SQLiteStore construction (path guard,
+    # sqlite:// scheme handling); PostgreSQL DSNs go to PostgresStore.
+    # Unreachable/unsupported targets raise here — never a silent no-op.
+    store = open_store(spec)
+    mgr = MigrationManager(store, default_migrations_for(store))
     mgr.apply()
 
-    repo = SignalRepository(store)
-    new_count = repo.upsert_many(all_records)
+    new_count = 0
+    if all_records:
+        repo = SignalRepository(store)
+        new_count = repo.upsert_many(all_records)
+    else:
+        # Readiness probe of the (already valid) store so an unreachable
+        # or mis-specified target still fails closed even with nothing
+        # to seed.
+        store.execute("SELECT 1").fetchone()
     store.close()
 
     return {
@@ -724,7 +885,14 @@ def seed_from_macro_history(
         "total": len(all_records),
         "new_rows": new_count,
         "resolved_dates": resolved_dates,
+        "SOURCE_COUNT": source_counts,
+        "SOURCE_COUNT_TOTAL": sum(source_counts.values()),
+        "SEEDED_COUNT": len(all_records),
+        "REJECTED_COUNT": rejected_counts,
+        "REJECTED_COUNT_TOTAL": sum(rejected_counts.values()),
+        "backend_target": spec.backend,
+        "source_kind": "postgres" if _is_pg_spec(source_db) else "sqlite",
     }
 
 
-__all__ = ["seed_from_macro_history", "resolve_as_of_dates"]
+__all__ = ["seed_from_macro_history", "resolve_as_of_dates", "PG_URL_PREFIXES"]

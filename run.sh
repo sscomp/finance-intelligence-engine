@@ -110,10 +110,17 @@ fi
 # seed-from-history uses upserts (idempotent); macro_history.db stays
 # read-only throughout.
 SEED_DB="${FIE_INTELLIGENCE_DB:-/home/ubuntu/macro-report/metadata/intelligence_store.db}"
-mkdir -p -- "$(dirname -- "${SEED_DB}")" || {
-    echo "run.sh: failed to mkdir for seed DB" >&2
-    exit 4
-}
+# WO C2 backend awareness: a postgres:// SEED_DB is a backend DSN, not a
+# filesystem path — materializing/dereferencing it here is meaningless.
+case "$(printf '%s' "${SEED_DB}" | tr '[:upper:]' '[:lower:]')" in
+    postgres://*|postgresql://*) ;;
+    *)
+        mkdir -p -- "$(dirname -- "${SEED_DB}")" || {
+            echo "run.sh: failed to mkdir for seed DB" >&2
+            exit 4
+        }
+        ;;
+esac
 # --freshness-check (Workstream H): classification is warnings-only (stderr/JSON
 # warnings; no exit-code change) so a stale/unreachable source is VISIBLE in the
 # artifact and operator output instead of silently looking fresh.

@@ -122,6 +122,22 @@ def artifact_dir() -> Path:
     return project_root() / "metadata" / "reports" / "artifacts"
 
 
+def macro_history_db_spec() -> str:
+    """Return the raw-layer specifier (``FIE_DB_PATH`` > data dir) VERBATIM.
+
+    Unlike :func:`macro_history_db_path`, the override is NOT normalized
+    through ``Path``: a ``postgres://`` / ``postgresql://`` override is a
+    backend DSN, and ``Path`` would silently mangle it (``postgres://db``
+    -> ``postgres:/db`` — a different, broken specifier). Callers that
+    treat the value as a backend specifier (raw layer ``db.py``, seed
+    bridge, cutover tooling) must use this function.
+    """
+    override = os.environ.get(ENV_DB_PATH)
+    if override:
+        return override
+    return str(data_dir() / "macro_history.db")
+
+
 def macro_history_db_path() -> Path:
     """Return the production history DB path (``FIE_DB_PATH`` > data dir).
 

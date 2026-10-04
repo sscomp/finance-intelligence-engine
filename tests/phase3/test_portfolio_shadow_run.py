@@ -396,8 +396,12 @@ class TestPortfolioShadowRunAdditive(unittest.TestCase):
         # to dfa7cd71... (persistence backend dispatch: FIE_DATABASE_URL +
         # postgres:// DSN routing, graph store close hygiene — dispatch
         # only, cmd_shadow_run behavior unchanged; regression tests pass).
+        # FIE 6.7B Remediation UPDATE 2026-10-04: SHA updated from
+        # dfa7cd71... to 12de9d1e... (WO C1: backend-aware seed source
+        # default macro_history_db_spec + additive --min-seed-total
+        # floor; 0 deletions — cmd_shadow_run behavior unchanged).
         expected_post_m8_sha = (
-            "dfa7cd71e4f5ce8dd1c96680b2c9f4007bacfd35c93260ccf30d7f70404865fa"
+            "12de9d1e9476b708ad15af8791536fcef089a1b01046ddc1580c4e23410b2ad0"
         )
         self.assertEqual(actual_sha, expected_post_m8_sha,
                          "cli.py SHA should match post-M8 baseline")

@@ -36,7 +36,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Sequence
 
-from phase3.paths import config_dir, macro_history_db_path
+from phase3.paths import config_dir, macro_history_db_spec
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -48,7 +48,7 @@ PRODUCTION_DB_NAME = "macro_history.db"
 # project root) instead of the hard-coded /home/ubuntu/macro-report path.
 # Guards still resolve and compare against this reference (and refuse the
 # reserved basename macro_history.db regardless of its directory).
-PRODUCTION_DB_PATH = str(macro_history_db_path())
+PRODUCTION_DB_PATH = macro_history_db_spec()
 
 # Source class identifiers (governance §3.1)
 SOURCE_MACRO_DAILY = "macro_daily"
@@ -260,7 +260,22 @@ def is_production_db(db_path: str | Path) -> bool:
 
     Governance §8.8: Backfill MUST NOT write to macro_history.db in
     production. This function is the hard guard.
+
+    DSN-aware (WO C2): when production resolves to a ``postgres://``
+    specifier, ``Path`` normalization would mangle the comparison, so
+    DSN-vs-DSN equality is checked verbatim; a DSN candidate can also
+    never accidentally pass as the SQLite production file.
     """
+    p_str = str(db_path)
+    prod_str = str(PRODUCTION_DB_PATH)
+    prod_is_dsn = prod_str.strip().lower().startswith(
+        ("postgres://", "postgresql://"))
+    if prod_is_dsn:
+        return p_str.strip() == prod_str.strip()
+    if p_str.strip().lower().startswith(("postgres://", "postgresql://")):
+        # A DSN target while production is a SQLite file: never the
+        # production file itself (compare would be meaningless).
+        return False
     p = Path(db_path).resolve()
     prod = Path(PRODUCTION_DB_PATH).resolve()
     # Match by name (basename) or by absolute path

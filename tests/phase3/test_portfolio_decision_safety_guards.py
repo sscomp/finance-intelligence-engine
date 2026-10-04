@@ -180,7 +180,12 @@ M4_S2_BASELINE = {
 PHASE3_BASELINE = {
     "phase3/__init__.py": "3020382849864e92f78ae38b2c9cbd0e48419e3120e76786f905d43a5eafaeaa",
     "phase3/api.py": "acb4f679549aff69d171012d2906f3e9cb573ffead4b1e8d99e1704736ffb1d7",
-    "phase3/cli.py": "dfa7cd71e4f5ce8dd1c96680b2c9f4007bacfd35c93260ccf30d7f70404865fa",
+    # FIE 6.7B PostgreSQL Readiness Remediation UPDATE 2026-10-04:
+    # cli.py SHA updated from dfa7cd71... to 12de9d1e... (WO C1 additive
+    # remediation: backend-aware seed source default via
+    # phase3.paths.macro_history_db_spec + --min-seed-total accounting
+    # floor on pipeline-export; 0 deletions of existing behavior).
+    "phase3/cli.py": "12de9d1e9476b708ad15af8791536fcef089a1b01046ddc1580c4e23410b2ad0",
     "phase3/pipeline/scoring_pipeline.py": "b325b97eaae25be515b5a5aada35e28e530fa574836c714ba488108893a15e5a",
     "phase3/pipeline/intelligence_pipeline.py": "025af0e538572fc056a73a9dc8ef2686f7518fd95723525693726f1da6fe5570",
     "phase3/datamodel/scores.py": "cc934edd423b1cea8a51cd0554547546a5bc2a34bac169d0ba154332599a090c",

@@ -42,7 +42,7 @@ from phase3.graph import (
     NodeType,
 )
 from phase3.persistence.sqlite import FORBIDDEN_DB_NAME
-from phase3.paths import macro_history_db_path
+from phase3.paths import macro_history_db_spec
 from phase3.scoring import CompanyScorer, IndustryScorer, MacroScorer
 from phase3.scoring.explain import explain_score
 from phase3.signals import SignalAggregator, SignalEngine
@@ -1458,6 +1458,32 @@ def _emit_api_payload(
     return 0
 
 
+def _seed_accounting(seed_result: dict[str, Any]) -> dict[str, Any]:
+    """Extract the machine-verifiable seed accounting subset (WO C1).
+
+    Only the required three counters (plus their per-source
+    breakdowns), never resolved dates or DSN strings, so operators can
+    assert counts without printing anything sensitive.
+    """
+    src = seed_result.get("SOURCE_COUNT", {})
+    rej = seed_result.get("REJECTED_COUNT", {})
+    return {
+        "SOURCE_COUNT": src,
+        "SOURCE_COUNT_TOTAL": (
+            seed_result.get("SOURCE_COUNT_TOTAL")
+            if isinstance(seed_result.get("SOURCE_COUNT_TOTAL"), int)
+            else (sum(src.values()) if isinstance(src, dict) else 0)
+        ),
+        "SEEDED_COUNT": seed_result.get("SEEDED_COUNT", seed_result.get("total", 0)),
+        "REJECTED_COUNT": rej,
+        "REJECTED_COUNT_TOTAL": (
+            seed_result.get("REJECTED_COUNT_TOTAL")
+            if isinstance(seed_result.get("REJECTED_COUNT_TOTAL"), int)
+            else (sum(rej.values()) if isinstance(rej, dict) else 0)
+        ),
+    }
+
+
 def cmd_pipeline_run(args: argparse.Namespace) -> int:
     """Phase 3B Task 5 Run 4: run the end-to-end pipeline.
 
@@ -1490,7 +1516,8 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
             )
             return 2
         source_db = getattr(args, "source_db", None) or "macro_history.db"
-        if not os.path.exists(source_db):
+        from phase3.persistence.backend import is_pg_dsn
+        if not is_pg_dsn(source_db) and not os.path.exists(source_db):
             print(
                 f"--seed-from-history: source DB not found: {source_db}",
                 file=sys.stderr,
@@ -1500,6 +1527,7 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
         company_codes = list(getattr(args, "company", []) or [])
         industry_ids = list(getattr(args, "industry", []) or [])
         requested_date = getattr(args, "date", None)
+        min_seed_total = int(getattr(args, "min_seed_total", 0) or 0)
         try:
             from phase3.bridge.seed_signals import seed_from_macro_history
             seed_result = seed_from_macro_history(
@@ -1518,9 +1546,23 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
                 f"  institutional:  {seed_result['institutional']}\n"
                 f"  industry:      {seed_result['industry']}\n"
                 f"  total:         {seed_result['total']}\n"
-                f"  resolved_dates: {seed_result.get('resolved_dates', {})}",
+                f"  resolved_dates: {seed_result.get('resolved_dates', {})}\n"
+                f"  accounting: {json.dumps(_seed_accounting(seed_result), sort_keys=True)}",
                 file=sys.stderr,
             )
+            # A2 gate (WO C1): a zero/near-zero seed with an explicit
+            # operator floor must fail non-zero — rc=0 never defines a
+            # successful seed by itself. Default floor is 0 (no floor)
+            # to preserve historical CLI behavior.
+            if seed_result.get("total", 0) < min_seed_total:
+                print(
+                    f"--seed-from-history: seeded count "
+                    f"{seed_result.get('total', 0)} is below the "
+                    f"--min-seed-total floor {min_seed_total}. "
+                    f"Refusing to report success.",
+                    file=sys.stderr,
+                )
+                return 1
 
             # Freshness check (governance section 5.2, T-1)
             if getattr(args, "freshness_check", False):
@@ -1781,8 +1823,10 @@ def cmd_pipeline_export(args: argparse.Namespace) -> int:
             )
             return 2
         source_db = getattr(args, "source_db", None) or "macro_history.db"
-        # Verify source exists
-        if not os.path.exists(source_db):
+        from phase3.persistence.backend import is_pg_dsn
+        # Verify source exists (SQLite file spec only — a PostgreSQL DSN
+        # is not a filesystem path and must not be fs-probed)
+        if not is_pg_dsn(source_db) and not os.path.exists(source_db):
             print(
                 f"--seed-from-history: source DB not found: "
                 f"{source_db}",
@@ -1796,6 +1840,7 @@ def cmd_pipeline_export(args: argparse.Namespace) -> int:
         industry_ids = list(getattr(args, "industry", []) or [])
         # Auto-resolve dates from --date
         requested_date = getattr(args, "date", None)
+        min_seed_total = int(getattr(args, "min_seed_total", 0) or 0)
         try:
             from phase3.bridge.seed_signals import seed_from_macro_history
             seed_result = seed_from_macro_history(
@@ -1814,9 +1859,20 @@ def cmd_pipeline_export(args: argparse.Namespace) -> int:
                 f"  institutional:  {seed_result['institutional']}\n"
                 f"  industry:      {seed_result['industry']}\n"
                 f"  total:         {seed_result['total']}\n"
-                f"  resolved_dates: {seed_result.get('resolved_dates', {})}",
+                f"  resolved_dates: {seed_result.get('resolved_dates', {})}\n"
+                f"  accounting: {json.dumps(_seed_accounting(seed_result), sort_keys=True)}",
                 file=sys.stderr,
             )
+            # A2 gate (WO C1): seed-count floor, mirroring cmd_pipeline_run.
+            if seed_result.get("total", 0) < min_seed_total:
+                print(
+                    f"--seed-from-history: seeded count "
+                    f"{seed_result.get('total', 0)} is below the "
+                    f"--min-seed-total floor {min_seed_total}. "
+                    f"Refusing to report success.",
+                    file=sys.stderr,
+                )
+                return 1
 
             # Freshness check (governance section 5.2, T-1)
             if getattr(args, "freshness_check", False):
@@ -2619,6 +2675,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "latest-available date for each table.",
     )
     p13.add_argument(
+        "--min-seed-total", type=int, default=0,
+        help="With --seed-from-history: assert the seeded signal total "
+             "is >= N (A2 gate). The seed fails non-zero when it is "
+             "below the floor, so rc=0 alone never defines a successful "
+             "seed. Default 0 = no floor.",
+    )
+    p13.add_argument(
         "--freshness-check", action="store_true",
         help="Emit freshness/staleness warnings for each data class "
              "after seeding from history. Requires --seed-from-history.",
@@ -2797,6 +2860,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "latest-available date for each table. Requires "
              "--db-path (the target intelligence DB). The source "
              "macro_history.db is read-only.",
+    )
+    p17.add_argument(
+        "--min-seed-total", type=int, default=0,
+        help="With --seed-from-history: assert the seeded signal total "
+             "is >= N (A2 gate). The seed fails non-zero when it is "
+             "below the floor, so rc=0 alone never defines a successful "
+             "seed. Default 0 = no floor.",
     )
     p17.add_argument(
         "--source-db", default=None,
@@ -3208,7 +3278,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p24.add_argument(
         "--source-db",
-        default=str(macro_history_db_path()),
+        default=macro_history_db_spec(),
         help="Source database path for gap detection (read-only). "
              "Default: the reference macro_history.db resolved by the "
              "central path boundary (FIE_DB_PATH > FIE_DATA_DIR > project "
