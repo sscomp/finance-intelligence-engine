@@ -40,6 +40,19 @@ cd -- "${PROJECT_ROOT}" || {
 # malformed/missing/misnamed-only values are refused, and a target resolving
 # to the live Production intelligence store is refused — exit 78 with
 # FAIL_CLOSED_REHEARSAL_DB_TARGET_REQUIRED before anything is written.
+# --- 2026-10-04 Production cutover (SQLite -> PostgreSQL), WO §23 ---
+# The Production DB contract for this wrapper is now PostgreSQL: DSNs live in
+# the 0600 env file below (outside git); sourcing it sets FIE_DB_PATH (raw)
+# and FIE_INTELLIGENCE_DB (seed target) for the backend-aware paths (C1/C2).
+# The fail-closed guard below still resolves the seed target first.
+# Rollback (WO §21): remove/rename that env file, restore the SQLite service
+# env, restart the FIE service; the SQLite-era literal defaults below this
+# stanza become effective again.
+WRAPPER_ENV="${FIE_WRAPPER_ENV:-/home/ubuntu/fie-67b-upgrade/fie-wrapper-pg.env}"
+if [ -f "${WRAPPER_ENV}" ]; then
+    . "${WRAPPER_ENV}"
+fi
+
 . "${REPO_ROOT}/scripts/rehearsal_db_guard.sh"
 fie_wrapper_seed_db_guard "/home/ubuntu/macro-report/metadata/intelligence_store.db"
 
