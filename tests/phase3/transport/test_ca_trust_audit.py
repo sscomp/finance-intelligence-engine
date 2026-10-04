@@ -135,15 +135,20 @@ class TestDockerfileTrustContract(unittest.TestCase):
         self.assertNotRegex(DOCKERFILE, r"(?m)^ENV .*(SSL_CERT|REQUESTS_CA)")
 
     def test_mode_a_needs_no_ca_input(self) -> None:
-        # with no secret present the RUN must reach pip with NO custom
-        # trust argument ($pip_cert stays empty → plain public trust);
-        # --cert appears exactly once in executable lines, assigned only
-        # inside the Mode B conditional
-        self.assertEqual(_DOCKERFILE_CODE.count("--cert"), 1)
-        self.assertIn(
-            'pip_cert="--cert /etc/ssl/certs/ca-certificates.crt"',
-            _DOCKERFILE_CODE,
-        )
+        # with no secret present EVERY pip RUN must reach pip with NO
+        # custom trust argument ($pip_cert stays empty → plain public
+        # trust); --cert appears only as the conditional pip_cert=
+        # assignment, once per pip-install stage. Phase 6.7B-R4: the
+        # Dockerfile gained the runtime-postgres TARGET (ADR-019 §4) —
+        # the invariant now holds per stage, same conditional shape.
+        cert_lines = [
+            line.strip() for line in _DOCKERFILE_CODE.splitlines()
+            if "--cert" in line
+        ]
+        self.assertEqual(len(cert_lines), 2, cert_lines)
+        assignment = 'pip_cert="--cert /etc/ssl/certs/ca-certificates.crt"; \\'
+        for line in cert_lines:
+            self.assertEqual(line, assignment, "assigned ONLY inside the Mode B conditional")
         for unconditional in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
                               "PIP_CERT="):
             self.assertNotIn(unconditional, _DOCKERFILE_CODE)

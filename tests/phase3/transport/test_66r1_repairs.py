@@ -34,9 +34,12 @@ from tests.phase3.transport.runtime_harness import RuntimeHarness  # noqa: E402
 
 _JSON_CT = "application/json; charset=utf-8"
 
-# §5.A forbidden markers — internal persistence/exception detail
+# §5.A forbidden markers — internal persistence/exception detail.
+# Phase 6.7B-R4 (ADR-019 §1): the lowercase dependency FAMILY word
+# ("sqlite"/"postgres" as details.dependency) is now contractual — the
+# forbidden shapes are the driver/class/path/topology detail.
 _LEAK_MARKERS = (
-    "sqlite", "SQLite", "OperationalError", "no such table",
+    "SQLite", "OperationalError", "no such table",
     "no such column", "score_snapshot", "signal_log", "traceback",
     "Traceback", "/tmp/", ".db",
 )
@@ -117,8 +120,15 @@ class _ClientMixin:
             self.assertNotIn(marker, blob)
 
 
-class _UnmigratedDBBase(_ClientMixin):
-    """Base: runtime opened over a deliberately un-migrated empty .db."""
+class _UnmigratedDBBase(_ClientMixin, unittest.TestCase):
+    """Base: runtime opened over a deliberately un-migrated empty .db.
+
+    Phase 6.7B-R4 repair: the ``unittest.TestCase`` base was MISSING
+    since this file's creation — these five tests were silently invisible
+    to the canonical unittest-discovery runner (pytest picked them up
+    and they failed there). Revived and aligned with the current
+    accepted contracts (R3 schema gate, R4 ADR-019 §1 redaction).
+    """
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -168,9 +178,12 @@ class TestErrorSanitizationUnmigratedDB(_UnmigratedDBBase):
         self.assertEqual(env["error"]["message"], "internal service failure")
 
     def test_health_reason_sanitized(self) -> None:
+        # Phase 6.7B-R4 (ADR-019 §1): the readiness outage envelope
+        # carries ONLY the stable family classification — the sanitized
+        # driver reason moved to server-side logs exclusively.
         _, env, _ = self.get("/v1/health")
         self.assertEqual(env["error"]["code"], "DEPENDENCY_UNAVAILABLE")
-        self.assertNotIn("<redacted>", json.dumps(env["error"]))
+        self.assertEqual(env["error"]["details"], {"dependency": "sqlite"})
         self._assert_no_leak(env)
 
     def test_envelope_shape_stays_contractual(self) -> None:

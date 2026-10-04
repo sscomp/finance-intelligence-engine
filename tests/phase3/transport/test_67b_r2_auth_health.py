@@ -686,9 +686,14 @@ class TestReadinessFailureSemantics(unittest.TestCase):
                 self.assertEqual(env["error"]["code"],
                                  "DEPENDENCY_UNAVAILABLE")
                 blob = json.dumps(env, ensure_ascii=False)
-                for marker in ("no such table", "OperationalError", "sqlite",
-                               "/tmp/", R2_TOKEN):
+                # Phase 6.7B-R4 (ADR-019 §1): the envelope now carries the
+                # stable dependency FAMILY word ("sqlite") by contract —
+                # driver text, paths and the token still never appear.
+                for marker in ("no such table", "OperationalError",
+                               "unable to open", "/tmp/", R2_TOKEN):
                     self.assertNotIn(marker, blob)
+                self.assertEqual(env["error"]["details"],
+                                 {"dependency": "sqlite"})
                 # process remains alive and serving after the failure
                 status, env = _http_get(base, _HEALTHZ)
                 self.assertEqual(status, 200)

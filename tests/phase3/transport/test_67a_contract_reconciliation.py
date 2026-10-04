@@ -51,7 +51,10 @@ _JSON_CT = "application/json; charset=utf-8"
 _TOKEN = "tok-67a-contract-xyz"
 
 _LEAK_MARKERS = (
-    "sqlite", "SQLite", "OperationalError", "no such table",
+    # Phase 6.7B-R4 (ADR-019 §1): the lowercase dependency FAMILY word
+    # ("sqlite"/"postgres" in details.dependency) is contractual — the
+    # forbidden shapes are driver/class/path/topology detail.
+    "SQLite", "OperationalError", "no such table",
     "no such column", "score_snapshot", "signal_log", "traceback",
     "Traceback", "/tmp/", ".db", "postgres://", "postgresql://",
 )

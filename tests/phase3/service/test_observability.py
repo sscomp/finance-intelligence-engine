@@ -55,8 +55,11 @@ class ObservabilityCase(unittest.TestCase):
         return [json.loads(r.getMessage()) for r in self._captured]
 
     def test_ok_request_record_fields(self) -> None:
+        # as_of pinned explicitly — the default resolves to the wall
+        # clock, so pinning its output made this date-fragile (6.7B-R4).
         dispatch(self.service, "freshness",
-                 {"kind": "company", "entity_id": "2330"}, CTX)
+                 {"kind": "company", "entity_id": "2330",
+                  "as_of": "2026-10-03"}, CTX)
         [record] = [r for r in self.records()
                     if r["operation"] == "freshness"] or [{}]
         self.assertEqual(record["request_id"], "req-log")

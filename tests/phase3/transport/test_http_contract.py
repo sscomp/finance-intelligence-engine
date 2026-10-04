@@ -75,7 +75,13 @@ class TestIntelligenceEndpoints(RuntimeHarness):
         )
 
     def test_entity_intelligence(self) -> None:
-        status, env, _ = self.get("/v1/intelligence/entity/company/2330")
+        # as_of pinned explicitly: the default (absent) as_of resolves to
+        # the wall clock "today"; pinning that day made this test date-
+        # fragile (it silently depended on the fixture being authored the
+        # same day). Phase 6.7B-R4: same assertions, clock-independent.
+        status, env, _ = self.get(
+            "/v1/intelligence/entity/company/2330?as_of=2026-10-03"
+        )
         self.assertEqual(status, 200)
         _assert_envelope_common(self, env, "entity_intelligence")
         payload = env["payload"]
