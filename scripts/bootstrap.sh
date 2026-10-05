@@ -25,7 +25,7 @@ IFS=$'\n\t'
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 VENV="${FIE_VENV_DIR:-${REPO}/.venv}"
 MODE_TEST=0; MODE_PG=0
-for arg in "${@:-}"; do
+for arg in "$@"; do
     case "${arg}" in
         --with-test) MODE_TEST=1 ;;
         --with-postgres) MODE_PG=1 ;;
