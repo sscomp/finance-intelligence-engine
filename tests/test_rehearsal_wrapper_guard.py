@@ -43,7 +43,10 @@ WRAPPERS = ("run.sh", "run_weekly.sh", "run_monthly.sh")
 GUARD_CODE = "FAIL_CLOSED_REHEARSAL_DB_TARGET_REQUIRED"
 REFUSAL_RC = 78
 EXPECTED_PRODUCTION_DEFAULT = (
-    "/home/ubuntu/macro-report/metadata/intelligence_store.db")
+    # 2026-10-05 6.8C production hygiene: the accepted D5 production fallback
+    # default is now spelled PROJECT_ROOT-derived in the wrappers (identical
+    # on the operator host, portable elsewhere); the drift pin follows it.
+    "${PROJECT_ROOT}/metadata/intelligence_store.db")
 
 # --- 2026-10-05 G6 remediation fixtures -----------------------------------
 # All fixture "production" identities point at port 59999 on loopback —
@@ -89,7 +92,15 @@ def _make_stub_python(tmp: Path) -> str:
 
 
 def _wrapper_default(wrapper: str) -> str:
-    """Extract the accepted production fallback default from the wrapper."""
+    """Extract the accepted production fallback default from the wrapper.
+
+    6.8C: the wrapper default is spelled PROJECT_ROOT-derived
+    ("${PROJECT_ROOT}/metadata/intelligence_store.db") — the RAW literal,
+    suitable for the drift pin (test_production_default_preserved). For
+    runtime use (symlinking, fingerprinting, passing as an explicit
+    target) use _expanded_default, which resolves it the same way the
+    wrapper does.
+    """
     text = (REPO / wrapper).read_text()
     m = re.search(
         r'fie_wrapper_seed_db_guard\s+"([^"]+)"', text)
@@ -100,6 +111,14 @@ def _wrapper_default(wrapper: str) -> str:
     if m:
         return m.group(1).strip()
     raise AssertionError(f"{wrapper}: could not parse production default")
+
+
+def _expanded_default(wrapper: str, root: Path | None = None) -> Path:
+    """Runtime-resolved production default: expand ${PROJECT_ROOT} exactly
+    as the wrapper does. Default root = repo root (the real wrapper run's
+    PROJECT_ROOT); pass a temp root for hermetic resolver-level tests."""
+    raw = _wrapper_default(wrapper)
+    return Path(raw.replace("${PROJECT_ROOT}", str(REPO if root is None else root)))
 
 
 def _run_wrapper(wrapper: str, env_overrides: dict) -> subprocess.CompletedProcess:
@@ -162,7 +181,7 @@ class WrapperNegativeTests(unittest.TestCase):
     def _assert_refused(self, wrapper: str, overrides: dict,
                         *, expect_code=GUARD_CODE,
                         assert_target_absent=True):
-        prod = Path(_wrapper_default(wrapper))
+        prod = _expanded_default(wrapper)
         prod_sha_before = _sha256(prod)
         sidecars = {}
         for suffix in ("-wal", "-shm"):
@@ -240,13 +259,13 @@ class WrapperNegativeTests(unittest.TestCase):
             self._assert_refused(wrapper, {
                 "FIE_SERVICE_ENV": "test",
                 "FIE_WRAPPER_ENV": empty_env,
-                "FIE_INTELLIGENCE_DB": _wrapper_default(wrapper)},
+                "FIE_INTELLIGENCE_DB": str(_expanded_default(wrapper))},
                 assert_target_absent=False)
 
     def test_6_symlink_to_production_rejected(self):
         empty_env = _fixture_wrapper_env(self.tmp)
         wrapper = "run.sh"
-        prod = Path(_wrapper_default(wrapper))
+        prod = _expanded_default(wrapper)
         link = self.tmp / "alias-to-prod.db"
         link.symlink_to(prod)
         self._assert_refused(wrapper, {
@@ -259,7 +278,7 @@ class WrapperNegativeTests(unittest.TestCase):
         # The production default EXISTS and is reachable, yet rehearsal test
         # mode with no explicit target still refuses the fallback.
         wrapper = "run.sh"
-        prod = Path(_wrapper_default(wrapper))
+        prod = _expanded_default(wrapper)
         self.assertTrue(prod.exists(), "production store expected present")
         self._assert_refused(wrapper, {
             "FIE_SERVICE_ENV": "test",
@@ -334,7 +353,7 @@ class WrapperNegativeTests(unittest.TestCase):
         # wrapper proceeds to Step 1 (stubbed interpreter: sentinel +
         # exit 42), the guard never fires, and the live production store
         # stays byte-identical (no write on the accepted path either).
-        prod = Path(_wrapper_default("run.sh"))
+        prod = _expanded_default("run.sh")
         before = _sha256(prod)
         self.assertIsNotNone(before)
         for wrapper in WRAPPERS:
@@ -408,7 +427,9 @@ echo "SEED_DB=${{SEED_DB}}"
         return p.returncode, p.stdout, p.stderr
 
     def test_production_mode_fallback_unchanged(self):
-        prod_default = _wrapper_default("run.sh")
+        # _resolve() runs the guard with PROJECT_ROOT=self.tmp (hermetic);
+        # the accepted fallback default is therefore the tmp-derived store.
+        prod_default = str(_expanded_default("run.sh", root=self.tmp))
         rc, out, err = self._resolve({"FIE_SERVICE_ENV": "production"},
                                      prod_default)
         self.assertEqual(rc, 0, err)

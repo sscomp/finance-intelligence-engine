@@ -278,6 +278,20 @@ class ProductionIdentityTests(unittest.TestCase):
         self.assertEqual(ctx.exception.reason,
                          "FAIL_CLOSED_PRODUCTION_IDENTITY_UNAVAILABLE")
 
+    def test_dsnfree_contract_fail_closed(self) -> None:
+        # 6.8C Task G: a readable contract file with no DB contract values
+        # (DSN-free) must also fail closed — it proves nothing about the
+        # Production identity (unknown != safe; docstring guarantee).
+        from phase3.runtime_contract import load_production_identities
+        empty = os.path.join(self.dir, "dsn_free_contract.env")
+        with open(empty, "w", encoding="utf-8") as fh:
+            fh.write("export FIE_TELEGRAM_CHAT_ID='0'\n")
+            fh.write("# comments and non-DB keys only\n")
+        with self.assertRaises(FailClosedTarget) as ctx:
+            load_production_identities({}, [empty])
+        self.assertEqual(ctx.exception.reason,
+                         "FAIL_CLOSED_PRODUCTION_IDENTITY_UNAVAILABLE")
+
 
 class RehearsalSafetyTests(unittest.TestCase):
     def setUp(self) -> None:

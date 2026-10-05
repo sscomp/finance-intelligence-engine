@@ -537,6 +537,18 @@ def load_production_identities(
             "no production contract file could be read; cannot prove a "
             "target non-Production (unknown != safe; value withheld)",
         )
+    # 2026-10-05 (6.8C Task G): a readable contract set that yields ZERO
+    # production identities (DSN-free file(s)) proves nothing either — the
+    # docstring guarantee "missing/unreadable/DSN-free contract set is
+    # fail-closed" is now enforced, not only claimed. Never accept a
+    # rehearsal target on unprovable Production identity.
+    if not fingerprints and not sqlite_paths:
+        raise FailClosedTarget(
+            "FAIL_CLOSED_PRODUCTION_IDENTITY_UNAVAILABLE",
+            "readable contract file(s) carried no DB target contract "
+            "(DSN-free); cannot prove a target non-Production "
+            "(unknown != safe; value withheld)",
+        )
     return ProductionIdentity(
         fingerprints=frozenset(fingerprints),
         postgres_identity_texts=frozenset(pg_texts),

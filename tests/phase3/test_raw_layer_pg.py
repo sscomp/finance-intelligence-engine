@@ -34,17 +34,39 @@ sys.path.insert(0, str(REPO_ROOT))
 import db  # repo-root raw layer module
 
 
+def _test_pg_endpoint() -> tuple[str, int]:
+    """Host/port (or socket dir, port) of the disposable test PG cluster.
+
+    6.8C: derived from ``FIE_TEST_PG_DSN`` when set (the override actually
+    steers these legs now), else the documented disposable default
+    ``host=/tmp/fie-pg&port=54329``. No operator-host binary path.
+    """
+    from urllib.parse import urlsplit, parse_qs
+    dsn = os.environ.get("FIE_TEST_PG_DSN", "")
+    if dsn:
+        parts = urlsplit(dsn)
+        host = (parse_qs(parts.query).get("host") or
+                ([parts.hostname] if parts.hostname else ["/tmp/fie-pg"]))[0]
+        port = int((parse_qs(parts.query).get("port") or
+                    ([parts.port] if parts.port else ["54329"]))[0])
+        if host == "127.0.0.1" or host == "localhost":
+            host = host  # TCP loopback; pg_isready accepts hostnames fine
+        return host, port
+    return "/tmp/fie-pg", 54329
+
+
 def _pg_available() -> tuple[bool, str]:
     try:
         import psycopg  # noqa: F401
     except ImportError:
         return False, "psycopg not installed"
     try:
-        proc = None
+        from phase3.service.pg_runtime_preflight import _pg_bin
         import subprocess
+        host, port = _test_pg_endpoint()
         proc = subprocess.run(
-            ["/usr/lib/postgresql/18/bin/pg_isready", "-h", "127.0.0.1",
-             "-p", "54329"], capture_output=True, text=True, timeout=5)
+            [_pg_bin("pg_isready"), "-h", str(host),
+             "-p", str(port)], capture_output=True, text=True, timeout=5)
         if proc.returncode != 0:
             return False, "disposable cluster not accepting connections"
     except Exception as exc:  # noqa: BLE001
@@ -60,22 +82,26 @@ UNREACHABLE_PG_DSN = (
 
 
 def _pg_dsn_for(name: str) -> str:
-    if os.environ.get("FIE_TEST_PG_DSN"):
-        pass  # explicit override wins for the parity DB; per-run naming
-              # is still used for disposable database creation below.
-    return f"postgresql://fie@/{name}?host=/tmp/fie-pg&port=54329"
+    # 6.8C: the per-run database name is still used for the disposable
+    # databases created below, but host/port/socket-dir now follow the
+    # FIE_TEST_PG_DSN override when set (portable test-host provisioning).
+    host, port = _test_pg_endpoint()
+    return f"postgresql://fie@/{name}?host={host}&port={port}"
 
 
 @unittest.skipUnless(PG_OK, PG_SKIP_REASON)
 class RawLayerPostgresTests(unittest.TestCase):
     """First-class PostgreSQL raw layer against the disposable cluster."""
 
-    ADMIN_DSN = "postgresql://fie@/postgres?host=/tmp/fie-pg&port=54329"
+    @classmethod
+    def _ADMIN_DSN(cls) -> str:
+        host, port = _test_pg_endpoint()
+        return f"postgresql://fie@/postgres?host={host}&port={port}"
 
     @classmethod
     def _admin(cls, sql: str) -> None:
         import psycopg
-        with psycopg.connect(cls.ADMIN_DSN, autocommit=True) as conn:
+        with psycopg.connect(cls._ADMIN_DSN(), autocommit=True) as conn:
             conn.execute(sql)
 
     @classmethod
