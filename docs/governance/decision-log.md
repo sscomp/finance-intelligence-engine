@@ -172,3 +172,45 @@ fail-safe 語意（`UNKNOWN != SUCCESS`；`TIMED_OUT != confirmed no side effect
 **Consequences**：未來實作有可審查的 boundary 與 gate；禁止的 topology
 （external agent → unrestricted production）被事先記錄。代價是 contract
 目前為提案狀態，official contract 出現時須重新對齊。
+
+---
+
+## 2026-10-05 — Repository execution baseline productionization（Phase 6.8C）
+
+**Context**：6.8B publication 之後，repository 需成為可由全新 ephemeral
+environment（未來 Codex Cloud；現在僅 readiness）安全 acquisition/bootstrap/
+test/驗證的 self-contained baseline。Hidden-dependency audit（Task B）發現
+4 個 blocking 類別全部位於 cron-wrapper / production-contract 鏈（operator
+venv 預設、operator-owned wrapper env file、host-literal production fallback
+store、operator 路徑 production contract 預設），全部 fail-closed 但 wrapper
+鏈不可由 repo + non-secret config 滿足；另發現一個 fail-closed 缺口：
+**DSN-free production contract file 讓 rehearsal guard 在無法證明非 Production
+的情況下接受 target**（與 `load_production_identities` 自身 docstring「missing/
+unreadable/DSN-free fail-closed」相矛盾）。
+
+**Decision**：
+1. Wrapper 鏈修復（保留 D5/§21 生產語意）：`PYTHON_BIN` 預設不變但 fail-fast
+   （exit 78、可讀訊息）；wrapper env file 缺失時輸出 operator bootstrap 提示
+   （exit 語意不變仍走 guard fail-closed）；D5 production fallback store 改由
+   `PROJECT_ROOT` 推導（operator host 上等值，不再 host-literal）。
+2. runtime_contract fail-closed 強化：readable-but-DSN-free contract set 一律
+   `FAIL_CLOSED_PRODUCTION_IDENTITY_UNAVAILABLE`（unknown != safe 落實為程式碼）。
+3. 建立 canonical 入口：`scripts/bootstrap.sh`（idempotent venv + pyproject 依
+   賴 + 離線驗證）、`scripts/test-cloud.sh`（scrubbed env + ephemeral isolated PG
+   + caller DSN preflight + 負向控制執行 + trap 清理）、
+   `scripts/cloud_negative_controls.py`（8 負向控制 executable proof）。
+4. 新增 operator env 範本 `examples/fie-wrapper.env.example`（全 synthetic
+   placeholder；真實契約仍在 git 外 0600 檔案）。
+5. 新增 provider-neutral
+   `docs/architecture/cloud-execution-contract.md`（acquisition/bootstrap/
+   test/cleanup/exit 契約；Codex Cloud 僅 future consumer example）。
+6. `.gitignore` 收斂：`*.db-journal`、`.env` / `*.env`（含 `!*.env.example`
+   回補）、`*.passphrase`、`*.secret`、`*.token`、`.ruff_cache/`、cloud-agent
+   目錄；`tests/phase3/test_raw_layer_pg.py` 的 `pg_isready` 硬編碼路徑改由
+   `pg_runtime_preflight._pg_bin` 探測 + `FIE_TEST_PG_DSN` 真正生效。
+
+**Consequences**：fresh clone 以 repo + documented non-secret config 即可完成
+bootstrap / isolated test / 負向控制；cron 生產鏈語意不變（同一 wrapper 在
+operator host 上行為等效、僅錯誤訊息與 portable 路徑推導更清晰）。
+`CODEX_CLOUD_INTEGRATION_IMPLEMENTED / RUNTIME_ENABLED / DEPLOYED` 維持 false；
+任何 live Cloud 工作需 Owner 另行授權（Phase 6.9）。

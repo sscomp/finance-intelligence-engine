@@ -8,6 +8,13 @@
 > 詳見 [PostgreSQL Production Architecture](../architecture/postgresql-production-architecture.md)
 > 與 [production baselines](../production/ABACUS_FIE_6_7B_PRODUCTION_BASELINE.md)。
 
+> **⚠️ PHASE 6.8C NOTICE（2026-10-05）**：repository productionization /
+> cloud-readiness baseline 發佈：canonical bootstrap（`scripts/bootstrap.sh`）、
+> 雲端安全隔離測試入口（`scripts/test-cloud.sh` + `scripts/cloud_negative_controls.py`）、
+> operator wrapper env 範本（`examples/fie-wrapper.env.example`）、
+> [Cloud Execution Contract](../architecture/cloud-execution-contract.md)。
+> Codex Cloud 仍 NOT IMPLEMENTED / NOT ENABLED / NOT DEPLOYED。
+
 > **快照日期**：2026-08-26
 > **快照時當前階段**：Phase 5 工程完成 — M8 營運驗收進行中
 

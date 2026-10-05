@@ -20,6 +20,7 @@ Finance Intelligence Engine（FIE）是一套針對台灣股市的投資研究�
 
 詳細架構：[PostgreSQL Production Architecture](docs/architecture/postgresql-production-architecture.md)、
 [Codex Cloud Integration Readiness](docs/architecture/codex-cloud-integration-readiness.md)、
+[Cloud Execution Contract（Phase 6.8C：fresh-clone bootstrap / isolated test 契約）](docs/architecture/cloud-execution-contract.md)、
 production baselines（[FIE_6_7B](docs/production/FIE_6_7B_PRODUCTION_BASELINE.md) /
 [ABACUS_FIE_6_7B](docs/production/ABACUS_FIE_6_7B_PRODUCTION_BASELINE.md)）。
 
@@ -148,6 +149,14 @@ macro-report/
 │   ├── test_phase2b_step4b.py
 │   ├── test_real_score_bridge.py
 │   └── ...
+├── scripts/                      # canonical bootstrap / cloud-safe test / DB-target guard
+│   ├── bootstrap.sh              # 一鍵 venv + 宣告安裝（idempotent；6.8C）
+│   ├── test-cloud.sh             # 雲端安全隔離測試入口（scrubbed env + ephemeral PG；6.8C）
+│   ├── cloud_negative_controls.py# runtime fail-closed 負向控制（8 情境；6.8C）
+│   ├── rehearsal_db_guard.sh     # fail-closed DB-target guard（shell boundary）
+│   └── db_target_identity.py     # guard 的 stdin 指紋 adapter（薄層）
+├── examples/                     # operator 環境檔範本（synthetic placeholder；無 secret）
+│   └── fie-wrapper.env.example
 ├── docs/                         # 文件
 │   ├── phase3/                   # Phase 3 設計文件（架構 / 信號 / 評分 / 圖譜 / 資料模型）
 │   ├── contracts/                # 介面契約
@@ -168,6 +177,16 @@ macro-report/
 ├── taiwan50_config.json          # 台灣50成分股配置
 ├── industry_config.json          # 產業關鍵字與供應鏈映射
 └── .gitignore
+```
+
+> **6.8C 檔案分類註記**：
+> ① `run.sh` / `run_weekly.sh` / `run_monthly.sh` 是 **PRODUCTION_OPERATOR_ONLY**
+> 的 cron 入口（依賴 operator-owned 0600 wrapper env file——範本見
+> [examples/fie-wrapper.env.example](examples/fie-wrapper.env.example)；
+> **不屬於** cloud execution profile，cloud 場景勿執行）。
+> ② 根目錄的 `PHASE2*.md` / `PHASE3*` / `PHASE4_*` / `*REVIEW*` / `*SOP*` /
+> `evidence_inventory.md` 為**歷史 phase/ops 記錄**（point-in-time；其 host 路徑
+> 與 SQLite 時代敘述已由 6.8A/6.7B 廢除，以本檔「Current production state」為準）。
 ```
 
 ---
@@ -235,12 +254,20 @@ M8 是 Phase 5 路線圖的營運驗收里程碑，要求連續 7 天執行 `por
 
 ### 設定步驟（Phase 6.1 之後：宣告式相依 + 可移植路徑）
 
+> **Canonical bootstrap（6.8C）**：fresh clone 後，步驟 2–3 可由一鍵入口取代
+> （idempotent、含離線 import 驗證；契約見
+> [Cloud Execution Contract](docs/architecture/cloud-execution-contract.md)），
+> 隨後以 `scripts/test-cloud.sh` 執行隔離測試。
+
 ```bash
 # 1. Clone 專案
 git clone https://github.com/sscomp/finance-intelligence-engine.git
 cd finance-intelligence-engine
 
-# 2. 建立虛擬環境
+# 2.（6.8C canonical，一鍵；等效取代下方手動步驟 2–3）
+bash scripts/bootstrap.sh --all
+
+# 2. 建立虛擬環境（手動等效路徑）
 python3 -m venv .venv
 source .venv/bin/activate
 
@@ -474,13 +501,25 @@ python -m phase3.cli cross-layer-impact --node "score:macro:global" --db-path /t
 
 ## 測試
 
+> **⚠️ 6.8C 說明**：以下「執行測試」小節為歷史手動形式（可攜但無隔離保障）。
+> **canonical 入口**請用 `scripts/test-cloud.sh`（scrubbed env + 隔離 PostgreSQL +
+> 負向控制 + 自動清理；契約見
+> [Cloud Execution Contract](docs/architecture/cloud-execution-contract.md)）。
+> `FIE_HTTP_PORT=18720` 等覆寫**僅**在服務並存主機上需要；transport tests 本身
+> bind ephemeral 端口，可攜環境不須設定。
+
 ### 執行測試
 
 ```bash
-# Phase 3 完整測試套件
+# （6.8C canonical）雲端安全隔離測試：focused set + 負向控制
+bash scripts/test-cloud.sh
+# （6.8C canonical）full regression：hermetic、隔離 PG、負向控制、清理
+bash scripts/test-cloud.sh --full
+
+# Phase 3 完整測試套件（歷史手動形式）
 PYTHONPATH=. python -m unittest discover -s tests/phase3
 
-# 全部測試（含 Phase 2B framework + bridge）
+# 全部測試（含 Phase 2B framework + bridge）（歷史手動形式）
 PYTHONPATH=. python -m unittest discover -s tests --top-level-dir=.
 
 # 特定測試模組
