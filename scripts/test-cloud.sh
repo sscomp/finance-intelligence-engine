@@ -101,7 +101,31 @@ from phase3.runtime_contract import (
 spec = parse_target(os.environ["FIE_TEST_PG_DSN"])
 prod = load_production_identities()
 assert_rehearsal_target_safe(spec, prod)
-print("test-cloud: preflight — test PG target proven non-Production (identity OK)")
+# 6.8C fresh-clone finding: a SQL_ASCII test server makes psycopg return
+# TEXT as bytes (text-comparison contract tests break). The test target
+# must be UTF8 — refuse otherwise (fail closed before tests run).
+try:
+    import psycopg
+except ImportError:
+    # No psycopg in this environment → PG parity legs will skip anyway.
+    psycopg = None
+if psycopg is None:
+    print("test-cloud: preflight — test PG target proven non-Production"
+          " (identity OK; encoding unprobeable: psycopg absent)")
+else:
+    try:
+        with psycopg.connect(os.environ["FIE_TEST_PG_DSN"]) as conn:
+            enc = conn.execute("SHOW server_encoding").fetchone()[0]
+            if enc != "UTF8":
+                print(f"FAIL_CLOSED_TEST_PG_ENCODING_NOT_UTF8 (server_encoding={enc})")
+                raise SystemExit(2)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"FAIL_CLOSED_TEST_PG_ENCODING_PROBE_FAILED ({exc})")
+        raise SystemExit(2)
+    print("test-cloud: preflight — test PG target proven non-Production"
+          " (identity OK; server_encoding=UTF8)")
 PREFLIGHT
     then
         echo "test-cloud: FAIL_CLOSED — FIE_TEST_PG_DSN could not be proven" \
@@ -121,18 +145,30 @@ else
     if [ -n "${PG_BINDIR}" ]; then
         PGPORT_TEST="${CALLER_TEST_PG_PORT:-54331}"
         echo "test-cloud: provisioning ephemeral PG cluster (${PG_BINDIR}, port ${PGPORT_TEST})"
+        # Encoding is pinned explicitly, NOT inherited from ambient locale
+        # (6.8C fresh-clone finding): under a scrubbed env (env -i / POSIX
+        # locale) initdb leaves server_encoding=SQL_ASCII, and psycopg then
+        # returns TEXT values as bytes — every text-comparison contract test
+        # fails. C.UTF-8 is provided by base glibc (>=2.35), no locale-gen
+        # service needed.
         mkdir -p "${TMPROOT}/pgdata"
         if ! "${PG_BINDIR}/initdb" -D "${TMPROOT}/pgdata" -U fie --auth=trust \
+                --encoding=UTF8 --locale=C.UTF-8 \
                 >/dev/null 2>&1; then
             echo "test-cloud: initdb failed; PG legs will skip (documented reason)" >&2
-            "${PG_BINDIR}/initdb" -D "${TMPROOT}/pgdata" -U fie --auth=trust 2>&1 | tail -5 >&2 || true
+            "${PG_BINDIR}/initdb" -D "${TMPROOT}/pgdata" -U fie --auth=trust \
+                --encoding=UTF8 --locale=C.UTF-8 2>&1 | tail -5 >&2 || true
         else
             "${PG_BINDIR}/pg_ctl" -D "${TMPROOT}/pgdata" -l "${TMPROOT}/pg.log" \
                 -w -t 60 -o "-p ${PGPORT_TEST} -k ${TMPROOT}" start >/dev/null 2>&1 \
                 && "${PG_BINDIR}/createdb" -h "${TMPROOT}" -p "${PGPORT_TEST}" -U fie fie_test \
+                && ENC="$("${PG_BINDIR}/psql" -h "${TMPROOT}" -p "${PGPORT_TEST}" \
+                        -U fie -d postgres -Atc "SHOW server_encoding" 2>/dev/null)" \
+                && [ "${ENC}" = "UTF8" ] \
                 && export FIE_TEST_PG_DSN="postgresql://fie@/fie_test?host=${TMPROOT}&port=${PGPORT_TEST}" \
                 && EPHEMERAL=1 \
-                || { echo "test-cloud: ephemeral cluster start failed; PG legs skip" >&2; }
+                || { echo "test-cloud: ephemeral cluster start/encoding check failed" \
+                           "(server_encoding must be UTF8); PG legs skip" >&2; }
         fi
     else
         echo "test-cloud: no PG tooling found; running SQLite-only (PG legs skip with documented reason)"

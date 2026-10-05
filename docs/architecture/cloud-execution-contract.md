@@ -65,9 +65,14 @@ tests 本身 bind ephemeral 端口，非必要）、`FIE_VENV_DIR`、`FIE_PYTHON
   以 SQLite-only 跑（PG legs skip-with-reason，不會 fail）；有 PG tooling（`initdb`/
   `pg_ctl` on PATH 或 `/usr/lib/postgresql/*/bin`）時自动 provision：使用者級
   trust-auth cluster、`$TMPDIR` socket、per-run port（預設 54331）、run 結束即销毀。
+  **encoding 一律 pinned `--encoding=UTF8 --locale=C.UTF-8`** 並在 start 後驗證
+  `server_encoding == UTF8`（scrubbed 環境/locale 缺失下 initdb 會得到
+  SQL_ASCII，使 psycopg 以 bytes 回覆 TEXT — 6.8C fresh-clone finding；不符
+  → 以明確原因 skip PG legs，不會誤判 PASS）。
 - **Caller-provided**：`FIE_TEST_PG_DSN` 僅接受 `/tmp` socket 或 loopback 形式，
   且 preflight 以 production identity contract 證明非 Production（operator host 上
-  契約檔存在 → identity 比對；DSN-free/missing → FAIL CLOSED）。
+  契約檔存在 → identity 比對；DSN-free/missing → FAIL CLOSED）並驗證
+  `server_encoding == UTF8`（否則 exit 78）。
 - Production DSN ≠ test DSN、Production hostname/data/credential 均不需要。
 
 ## 5. Test commands（canonical entrypoints）

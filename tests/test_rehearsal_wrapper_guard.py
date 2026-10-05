@@ -121,6 +121,37 @@ def _expanded_default(wrapper: str, root: Path | None = None) -> Path:
     return Path(raw.replace("${PROJECT_ROOT}", str(REPO if root is None else root)))
 
 
+def _ensure_prod_store_for_runtime(test: unittest.TestCase,
+                                   wrapper: str = "run.sh",
+                                   root: Path | None = None) -> Path:
+    """Runtime production default with a fresh-clone guarantee.
+
+    6.8C zero-history finding: the production store lives inside the
+    operator worktree but is UNTRACKED (gitignored), so a fresh clone has
+    no store at ${PROJECT_ROOT}/metadata/intelligence_store.db and the
+    runtime-negative cases (symlink alias, fallback-presence, byte-identity
+    fingerprint) would fail on a missing file. On absence, a SYNTHETIC
+    store (SQLite file with one sentinel table) is created at the same
+    path and removed at cleanup — the negative cases then exercise
+    identical semantics, and the operator host (store present) is
+    untouched (fingerprints the real file).
+    """
+    prod = _expanded_default(wrapper, root)
+    if not prod.exists():
+        import sqlite3
+        prod.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(prod))
+        try:
+            conn.executescript(
+                "CREATE TABLE IF NOT EXISTS synthetic_guard_sentinel "
+                "(id INTEGER PRIMARY KEY);")
+            conn.commit()
+        finally:
+            conn.close()
+        test.addCleanup(lambda: (prod.unlink(missing_ok=True),))
+    return prod
+
+
 def _run_wrapper(wrapper: str, env_overrides: dict) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     for key in ("FIE_SERVICE_ENV", "FIE_INTELLIGENCE_DB",
@@ -181,7 +212,7 @@ class WrapperNegativeTests(unittest.TestCase):
     def _assert_refused(self, wrapper: str, overrides: dict,
                         *, expect_code=GUARD_CODE,
                         assert_target_absent=True):
-        prod = _expanded_default(wrapper)
+        prod = _ensure_prod_store_for_runtime(self, wrapper=wrapper)
         prod_sha_before = _sha256(prod)
         sidecars = {}
         for suffix in ("-wal", "-shm"):
@@ -265,7 +296,7 @@ class WrapperNegativeTests(unittest.TestCase):
     def test_6_symlink_to_production_rejected(self):
         empty_env = _fixture_wrapper_env(self.tmp)
         wrapper = "run.sh"
-        prod = _expanded_default(wrapper)
+        prod = _ensure_prod_store_for_runtime(self, wrapper)
         link = self.tmp / "alias-to-prod.db"
         link.symlink_to(prod)
         self._assert_refused(wrapper, {
@@ -276,9 +307,11 @@ class WrapperNegativeTests(unittest.TestCase):
 
     def test_7_fallback_available_but_target_absent_rejected(self):
         # The production default EXISTS and is reachable, yet rehearsal test
-        # mode with no explicit target still refuses the fallback.
+        # mode with no explicit target still refuses the fallback. On a
+        # fresh clone (no untracked store) a synthetic store is created at
+        # the same path so the fallback-presence semantics stay testable.
         wrapper = "run.sh"
-        prod = _expanded_default(wrapper)
+        prod = _ensure_prod_store_for_runtime(self, wrapper)
         self.assertTrue(prod.exists(), "production store expected present")
         self._assert_refused(wrapper, {
             "FIE_SERVICE_ENV": "test",
@@ -353,7 +386,7 @@ class WrapperNegativeTests(unittest.TestCase):
         # wrapper proceeds to Step 1 (stubbed interpreter: sentinel +
         # exit 42), the guard never fires, and the live production store
         # stays byte-identical (no write on the accepted path either).
-        prod = _expanded_default("run.sh")
+        prod = _ensure_prod_store_for_runtime(self, "run.sh")
         before = _sha256(prod)
         self.assertIsNotNone(before)
         for wrapper in WRAPPERS:
@@ -367,6 +400,8 @@ class WrapperNegativeTests(unittest.TestCase):
             self.assertIn("STUB_STEP1_SENTINEL", result.stdout)
             self.assertEqual(result.returncode, 42,
                              f"{wrapper}: stub sentinel exit expected")
+        # _ensure_prod_store_for_runtime guarantees a fingerprintable store
+        # (real on the operator host, synthetic on a fresh clone).
         self.assertEqual(_sha256(prod), before,
                          "production store changed on the accepted path")
 

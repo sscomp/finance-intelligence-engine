@@ -214,3 +214,17 @@ bootstrap / isolated test / 負向控制；cron 生產鏈語意不變（同一 w
 operator host 上行為等效、僅錯誤訊息與 portable 路徑推導更清晰）。
 `CODEX_CLOUD_INTEGRATION_IMPLEMENTED / RUNTIME_ENABLED / DEPLOYED` 維持 false；
 任何 live Cloud 工作需 Owner 另行授權（Phase 6.9）。
+
+**Addendum（G6–G9 fresh-clone simulation 的兩個真實發現，已修復）**：
+1. `env -i`（scrubbed locale）下 initdb 會產生 `server_encoding=SQL_ASCII`
+   → psycopg 將 TEXT 回覆為 bytes → text-comparison contract tests 大面積
+   失敗。修正：`scripts/test-cloud.sh` 自 provision 時一律 pinned
+   `--encoding=UTF8 --locale=C.UTF-8`（glibc builtin）＋ start 後驗證
+   `server_encoding == UTF8`（否則 skip-with-reason）；caller-provided
+   DSN 的 preflight 同樣拒絕非 UTF8 target（exit 78）。operator-host
+   行為不受影響（原本即以 ambient UTF8 locale）。
+2. wrapper-guard negative 測試假設 operator worktree 內的未追蹤
+   production store 存在 — fresh clone 上不成立。修正：store 缺失時
+   skip-with-documented-reason（拒絕行為仍全數驗證；fallback 缺失拒絕
+   由 test_1 覆蓋）；operator host 上 byte-identity 斷言照常運作。
+   這兩項由 fresh-clone 全新環境驗證收斂（G8 rerun PASS）。
