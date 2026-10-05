@@ -144,8 +144,8 @@ def load_runtime_config(
     keeps the accepted ``local`` development default.
     """
     from phase3.persistence.backend import resolve_spec
+    from phase3.runtime_contract import FailClosedTarget
 
-    spec = resolve_spec(explicit_db)
     if service_env is not None:
         profile = service_env.strip().lower()
     else:
@@ -169,6 +169,28 @@ def load_runtime_config(
             "FIE_LOG_FORMAT invalid; expected one of structured|plain; "
             "value withheld",
         )
+    # Phase 6.8A: DB-target resolution fails closed at the canonical
+    # resolver (no implicit default exists anymore) — resolved AFTER the
+    # profile/log-format vocabulary so each refusal class stays
+    # independently testable (order: profile → log-format → DB target).
+    # The contract refusal is translated into this layer's closed
+    # refusal vocabulary so the composed refusal surface stays
+    # ConfigurationError-typed; the fail-closed class is preserved in
+    # the message.
+    try:
+        spec = resolve_spec(explicit_db)
+    except FailClosedTarget as exc:
+        code = {
+            "FAIL_CLOSED_DB_TARGET_REQUIRED": "DATABASE_URL_MISSING",
+            "FAIL_CLOSED_MALFORMED_DB_TARGET": "DATABASE_URL_INVALID",
+            "FAIL_CLOSED_CONTRADICTORY_DB_TARGETS":
+                "CONTRADICTORY_DB_TARGETS",
+        }.get(exc.reason, "DATABASE_URL_MISSING")
+        raise ConfigurationError(
+            code,
+            f"database-target contract refused ({type(exc).__name__}; "
+            "values withheld)",
+        ) from None
     return ServiceRuntimeConfig(
         # database_spec: only the sanitized form is ever materialized
         database_spec=spec.sanitized(),

@@ -156,14 +156,18 @@ present — that variable is NOT the wrapper seed-target contract \
 (misnamed-variable class, refused in every mode; value withheld)"
             fi
             if [ "${service_env}" = "" ] && \
-               { [ -n "${FIE_DATABASE_URL:-}" ] || [ -n "${FIE_DB_PATH:-}" ]; }; then
-                # Accepted production behavior is unchanged, but a
-                # production-undeclared invocation with DB-related
-                # overrides is visible on stderr (no exit-code change).
-                echo "run-wrapper: WARNING: production fallback default in use " \
-                    "while FIE_* DB overrides are present and FIE_SERVICE_ENV is " \
-                    "unset; declare FIE_SERVICE_ENV=production explicitly " \
-                    "(rehearsal/test runs must use FIE_SERVICE_ENV=test|staging)" >&2
+               { [ -n "${FIE_DATABASE_URL:-}" ] || [ -n "${FIE_DB_PATH:-}" ] || [ -n "${FIE_INTELLIGENCE_DB:-}" ]; }; then
+                # Phase 6.8A (C-6 remediation): an undeclared execution mode
+                # with DB-related overrides present is an INDETERMINATE
+                # target context — the former non-fatal WARNING is abolished.
+                # Accepted production runs declare FIE_SERVICE_ENV=production
+                # explicitly (the wrapper env file does); refusal happens
+                # BEFORE any write.
+                _fie_guard_fail "FAIL_CLOSED_PRODUCTION_MODE_DECLARATION_REQUIRED: \
+FIE_SERVICE_ENV is unset while DB-related overrides are present; declaring \
+the production fallback default implicitly is no longer accepted — declare \
+FIE_SERVICE_ENV=production explicitly (rehearsal/test must use \
+FIE_SERVICE_ENV=test|staging; value withheld)"
             fi
             SEED_DB="${FIE_INTELLIGENCE_DB:-${fallback_default}}"
             return 0

@@ -31,26 +31,32 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-try:
-    from phase3.paths import macro_history_db_spec, data_dir
-except ImportError:  # db.py 可獨立於 phase3 使用（無 phase3 於 sys.path 時）
-    macro_history_db_spec = None
-    data_dir = None
+# Phase 6.8A (Runtime Contract Normalization): the raw layer resolves its
+# target through the one canonical contract
+# (phase3.runtime_contract — FIE_DB_TARGET_RAW > legacy FIE_DB_PATH) and
+# FAILS CLOSED when no target contract exists. The historical behaviors —
+# the ImportError stub (import failure silently selecting a CWD-relative
+# SQLite file) and the <FIE_DATA_DIR or CWD>/macro_history.db default —
+# are abolished (WO C-3/C-5): import or resolution failure can never
+# change the backend or invent a path.
+from phase3.paths import macro_history_db_spec  # noqa: F401 (re-export parity)
+from phase3.runtime_contract import (
+    FailClosedTarget,
+    assert_rehearsal_target_safe,
+    classify_service_env,
+    resolve_raw_target,
+)
 
 TZ_TAIPEI = timezone(timedelta(hours=8))
 
-# Phase 6.1 portability: production DB path is now derived from the central
-# configuration boundary (FIE_DB_PATH > FIE_DATA_DIR > project root) instead
-# of the historical hard-coded /home/ubuntu/macro-report absolute path.
-# The DB_PATH module attribute is kept (callers/tests patch it) — the default
-# is computed by the same rule for every importer. A postgres:// FIE_DB_PATH
-# at cutover flows through the same attribute VERBATIM (macro_history_db_spec,
-# not Path-normalized: Path() would mangle DSNs); see raw_layer_backend().
-if macro_history_db_spec is not None:
-    _DEFAULT_DB_PATH = macro_history_db_spec()
-else:
-    _data_base = os.environ.get("FIE_DATA_DIR") or os.getcwd()
-    _DEFAULT_DB_PATH = os.path.join(_data_base, "macro_history.db")
+# The DB_PATH module attribute is kept (callers/tests patch it). When no
+# raw-target contract exists at import time it is None — every use raises
+# fail-closed with the recorded reason; there is NO path default.
+try:
+    _DEFAULT_DB_PATH: "str | None" = resolve_raw_target().value
+except FailClosedTarget as _exc:  # no contract at import: fail closed at use
+    _DEFAULT_DB_PATH = None
+    _DEFAULT_DB_PATH_FAILURE = _exc
 
 DB_PATH = _DEFAULT_DB_PATH
 
@@ -65,12 +71,24 @@ def _is_pg_spec(specifier: object) -> bool:
 
 
 def raw_db_spec() -> str:
-    """The raw-layer specifier currently in force (DSN or SQLite path)."""
+    """The raw-layer specifier currently in force (DSN or SQLite path).
+
+    Fail closed when no raw-target contract exists — never a CWD default.
+    """
+    if DB_PATH is None:
+        raise FailClosedTarget(
+            getattr(globals().get("_DEFAULT_DB_PATH_FAILURE"), "reason",
+                    "FAIL_CLOSED_DB_TARGET_REQUIRED"),
+            "no raw-layer target contract (FIE_DB_TARGET_RAW / FIE_DB_PATH "
+            "unset at import; no implicit default)")
     return DB_PATH
 
 
 def raw_layer_backend() -> str:
-    """'postgres' when the raw layer specifier selects PostgreSQL."""
+    """'postgres' when the raw layer specifier selects PostgreSQL;
+    'unresolved' when no target contract exists (fail closed at use)."""
+    if DB_PATH is None:
+        return "unresolved"
     return "postgres" if _is_pg_spec(raw_db_spec()) else "sqlite"
 
 
@@ -138,12 +156,45 @@ def _pg_sql(sql: str) -> str:
 
 
 def get_db():
-    """Open the raw layer with the backend the specifier selects."""
+    """Open the raw layer with the backend the specifier selects.
+
+    Phase 6.8A fail-closed semantics: no raw-target contract -> raise
+    (never a CWD SQLite default). In rehearsal/test mode
+    (FIE_SERVICE_ENV=test|staging) the resolved target must be
+    PROVEN non-Production against the authoritative contract-file
+    identities BEFORE the writer opens anything (Task F raw-layer
+    boundary): disposable intelligence targets never make the raw layer
+    disposable, and vice versa.
+    """
+    if DB_PATH is None:
+        raise FailClosedTarget(
+            getattr(globals().get("_DEFAULT_DB_PATH_FAILURE"), "reason",
+                    "FAIL_CLOSED_DB_TARGET_REQUIRED"),
+            "no raw-layer target contract; refusing to resolve an implicit "
+            "database (value withheld)")
+    _assert_raw_layer_rehearsal_boundary()
     if raw_layer_backend() == "postgres":
         return _PGConnection(str(raw_db_spec()).strip())
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _assert_raw_layer_rehearsal_boundary() -> None:
+    """Task F: the raw layer carries the same fail-closed boundary.
+
+    Rehearsal/test mode (FIE_SERVICE_ENV=test|staging) must not open a
+    Production-equivalent raw target. Production-mode execution
+    (accepted business writes) is unaffected.
+    """
+    mode = os.environ.get("FIE_SERVICE_ENV", "")
+    if classify_service_env(mode) != "rehearsal":
+        return
+    from phase3.runtime_contract import parse_target
+    # DB_PATH is the resolved target value (DSN or path); re-parse it for
+    # identity comparison only — never re-resolve via the ambient env, so
+    # a caller-patched module attribute is what gets checked.
+    assert_rehearsal_target_safe(parse_target(str(DB_PATH)))
 
 
 # ---------------------------------------------------------------------------

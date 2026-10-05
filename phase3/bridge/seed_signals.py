@@ -58,8 +58,8 @@ accounting (and the CLI ``--min-seed-total`` assertion).
 Usage:
     from phase3.bridge.seed_signals import seed_from_macro_history
     seed_from_macro_history(
-        source_db="macro_history.db",          # or a postgres DSN
-        target_db="intelligence.db",           # or a postgres DSN
+        source_db="postgres://.../raw",        # or an explicit SQLite path
+        target_db="postgres://.../intel",      # or an explicit SQLite path
     )
 
 The target_db must NOT be macro_history.db (guarded upstream).
@@ -699,7 +699,7 @@ def _seed_industry_signals(
 
 
 def resolve_as_of_dates(
-    source_db: str = "macro_history.db",
+    source_db: str,
     requested_date: str | None = None,
 ) -> dict[str, str | None]:
     """Resolve the as-of date for each data source given a requested date.
@@ -748,8 +748,8 @@ def resolve_as_of_dates(
 
 
 def seed_from_macro_history(
-    source_db: str = "macro_history.db",
-    target_db: str = "intelligence.db",
+    source_db: str | None = None,
+    target_db: str | None = None,
     *,
     macro_date: str | None = None,
     company_codes: list[str] | None = None,
@@ -777,6 +777,13 @@ def seed_from_macro_history(
      new_rows: N, resolved_dates: {...},
      SOURCE_COUNT: {...}, SEEDED_COUNT: N, REJECTED_COUNT: {...}}
     """
+    # Phase 6.8A: both targets are required (no implicit CWD defaults —
+    # the historical "macro_history.db" / "intelligence.db" literals have
+    # been abolished).
+    if not source_db or not target_db:
+        raise ValueError(
+            "seed_from_macro_history: source_db and target_db are both "
+            "required (no implicit CWD default per runtime contract)")
     # Auto-resolve dates if requested
     resolved_dates: dict[str, str | None] = {}
     if auto_resolve_dates:

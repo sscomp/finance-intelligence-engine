@@ -58,6 +58,25 @@ from phase3.signals import SignalAggregator, SignalEngine
 DEFAULT_NODE_SENTINEL = "score:company:2330:2026-07-08"
 
 
+def _cli_db_target_or_none(explicit, role, purpose):
+    """Resolve a CLI DB target through the canonical runtime contract.
+
+    Phase 6.8A: no implicit CWD/SQLite default exists — the target is an
+    explicit argument, a canonical role variable, or a legacy alias; a
+    missing/malformed/contradictory target prints a fail-closed refusal
+    and returns None (caller exits non-zero before any write).
+    """
+    from phase3.runtime_contract import FailClosedTarget, resolve_role_target
+    try:
+        return resolve_role_target(role, explicit, dict(os.environ)).value
+    except FailClosedTarget as exc:
+        print(
+            f"refusing to run: {purpose}: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+
 # ---------- sample data ----------
 
 SAMPLE_MACRO_INPUTS: dict[str, Any] = {
@@ -235,11 +254,17 @@ def cmd_init_db(args: argparse.Namespace) -> int:
     # import cleanly even if persistence is missing in some
     # deployments.
     from phase3.graph.pg_store import PostgresGraphStore
-    from phase3.graph.sqlite_store import DEFAULT_DB_PATH, SQLiteGraphStore
+    from phase3.graph.sqlite_store import SQLiteGraphStore
     from phase3.persistence import backend as backend_mod
     from phase3.persistence.sqlite import quick_check
 
-    target = getattr(args, "db_path", None) or DEFAULT_DB_PATH
+    # Phase 6.8A: no implicit default — an explicit --db-path or target
+    # contract is required (fail closed before any store is created).
+    target = _cli_db_target_or_none(
+        getattr(args, "db_path", None), "intelligence",
+        "init-db: missing explicit --db-path or target contract")
+    if target is None:
+        return 2
     print(f"[init-db] target = {backend_mod.sanitize_db_url(target)}")
     # We pass ``auto_migrate=False`` here so we can capture the list
     # of migrations that were *newly* applied in this call. The
@@ -1226,7 +1251,14 @@ def cmd_ingest_signals(args: argparse.Namespace) -> int:
     if user_db_path:
         db_path = user_db_path
     else:
-        db_path = "phase3/data/intelligence.db"
+        # Phase 6.8A: no implicit CWD SQLite default. Resolve the
+        # intelligence/store role through the canonical contract; fail
+        # closed when absent.
+        db_path = _cli_db_target_or_none(
+            None, "intelligence", "ingest-signals: missing explicit "
+            "--db-path or target contract")
+        if db_path is None:
+            return 2
     if backend_mod.is_pg_dsn(db_path):
         resolved_db = db_path
     else:
@@ -1515,7 +1547,12 @@ def cmd_pipeline_run(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        source_db = getattr(args, "source_db", None) or "macro_history.db"
+        source_db = _cli_db_target_or_none(
+            getattr(args, "source_db", None), "raw",
+            "--seed-from-history: missing explicit --source-db or raw "
+            "target contract (no implicit CWD default)")
+        if source_db is None:
+            return 2
         from phase3.persistence.backend import is_pg_dsn
         if not is_pg_dsn(source_db) and not os.path.exists(source_db):
             print(
@@ -1822,7 +1859,12 @@ def cmd_pipeline_export(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        source_db = getattr(args, "source_db", None) or "macro_history.db"
+        source_db = _cli_db_target_or_none(
+            getattr(args, "source_db", None), "raw",
+            "--seed-from-history: missing explicit --source-db or raw "
+            "target contract (no implicit CWD default)")
+        if source_db is None:
+            return 2
         from phase3.persistence.backend import is_pg_dsn
         # Verify source exists (SQLite file spec only — a PostgreSQL DSN
         # is not a filesystem path and must not be fs-probed)

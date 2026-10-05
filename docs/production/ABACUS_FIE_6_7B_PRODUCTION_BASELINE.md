@@ -155,3 +155,19 @@ Rollback remains READY (accepted plan, evidence `07_rollback_plan.md`): stop the
 ## 16. Scope statement
 
 **Phase 6.8 is NOT authorized by this baseline or its publishing commit.** Any future production change (application, schema, credentials, topology, Hermes schedules, Phase 6.8) requires an independent governance decision / work order with its own verification gates. This document, its publishing commit, and the wrapper/config reconciliation it carries do not execute, test-open, or authorize any such change.
+## 17. Post-baseline amendment — Phase 6.8A runtime DB-target contract (2026-10-05)
+
+The database-target selection semantics described above (D5 fallback
+default, `FIE_DB_PATH` / `FIE_INTELLIGENCE_DB` wrapper contract, and the
+rehearsal guard) are NORMALIZED by WO ABACUS_FIE_6_8A_RUNTIME_CONTRACT_
+NORMALIZATION: explicit backend classes, role-scoped targets
+(`FIE_DB_TARGET_RAW` / `FIE_DB_TARGET_INTELLIGENCE` / `FIE_DB_TARGET_TEST`
+/ `FIE_DB_TARGET_ROLLBACK`), ONE canonical resolver
+(`phase3/runtime_contract.py`), authoritative production identity read
+ONLY from the production contract files, and fail-closed behavior on
+missing/ambiguous/contradictory/malformed targets. The legacy env-file
+variables remain valid aliases. The `FIE_SERVICE_ENV=production`
+declaration is now mandatory for accepted cron runs, and an ambient test
+declaration survives wrapper-env sourcing (ambient > env file > unset).
+Sanitized contract documentation: `ABACUS_FIE_6_8A_RUNTIME_CONTRACT.md`
+(repo root of the 6.8A WO). No credentials appear in any documentation.

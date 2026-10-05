@@ -4,13 +4,16 @@ One entry point — :func:`resolve_spec` — turns a caller-supplied
 specifier into a :class:`DatabaseSpec`, and :func:`open_store`
 instantiates the right :class:`~phase3.persistence.contracts.DatabaseStore`.
 
-Precedence (Phase 6.3 work order §13)
--------------------------------------
+Precedence (Phase 6.8A runtime contract; supersedes the Phase 6.3 §13
+default)
+------------
 1. explicit API/CLI argument (``--db-path`` value or a Python
    argument), when non-empty;
-2. ``FIE_DATABASE_URL`` environment variable
-   (:func:`~phase3.paths.database_url`);
-3. portable default — SQLite at the caller's default path.
+2. the canonical role variable ``FIE_DB_TARGET_INTELLIGENCE``;
+3. legacy aliases ``FIE_DATABASE_URL`` / ``FIE_INTELLIGENCE_DB``
+   (contradictory values fail closed);
+4. nothing — a missing target raises :class:`FailClosedTarget`
+   (no implicit CWD SQLite selection remains).
 
 Selection rule
 --------------
@@ -33,7 +36,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from phase3.paths import database_url
+from phase3.runtime_contract import (
+    FailClosedTarget,
+    resolve_intelligence_target,
+)
 from phase3.persistence.sqlite import (
     ACCESS_IMMUTABLE,
     ACCESS_MODES,
@@ -110,18 +116,32 @@ def sanitize_db_url(url: str) -> str:
 
 
 def resolve_spec(explicit: str | None = None) -> DatabaseSpec:
-    """Resolve the backend spec: explicit > ``FIE_DATABASE_URL`` > default."""
-    if explicit:
-        return _spec_from(explicit, "explicit")
-    from_env = database_url()
-    if from_env:
-        return _spec_from(from_env, "env")
-    # Default: SQLite at the caller-provided portable default path.
+    """Resolve the backend spec through the canonical runtime contract.
+
+    Phase 6.8A precedence: explicit > ``FIE_DB_TARGET_INTELLIGENCE`` >
+    legacy aliases (``FIE_DATABASE_URL`` / ``FIE_INTELLIGENCE_DB``,
+    contradiction = fail closed). The historical portable default
+    (CWD-relative ``phase3/data/intelligence.db``) is ABOLISHED: a
+    missing target raises :class:`FailClosedTarget` before any store can
+    be opened (WO C-3 / §3.5 — no implicit CWD SQLite selection).
+    """
+    try:
+        resolved = resolve_intelligence_target(explicit)
+    except FailClosedTarget as exc:
+        if explicit:
+            # An explicit-but-unparseable target retains the caller's
+            # context; re-raise unchanged (fail closed).
+            raise
+        raise FailClosedTarget(
+            exc.reason,
+            exc.detail or "no intelligence/store target contract",
+        ) from None
     return DatabaseSpec(
-        backend=BACKEND_SQLITE,
-        dsn="phase3/data/intelligence.db",
-        source="default",
-        original="phase3/data/intelligence.db",
+        backend=resolved.backend,
+        dsn=resolved.value,
+        source="env" if resolved.source in ("canonical_env", "legacy_alias")
+        else "explicit",
+        original=resolved.value,
     )
 
 

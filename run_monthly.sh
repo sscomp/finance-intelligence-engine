@@ -60,8 +60,18 @@ cd -- "${PROJECT_ROOT}" || {
 # env, restart the FIE service; the SQLite-era literal defaults below this
 # stanza become effective again.
 WRAPPER_ENV="${FIE_WRAPPER_ENV:-/home/ubuntu/fie-67b-upgrade/fie-wrapper-pg.env}"
+# 2026-10-05 (6.8A incident lesson): an ambient FIE_SERVICE_ENV declaration
+# (e.g. a harness exporting FIE_SERVICE_ENV=test) MUST survive the wrapper
+# env file sourcing — the file's own declaration (production, for cron)
+# never overrides the caller's explicit ambient declaration.
+# Precedence: ambient FIE_SERVICE_ENV > wrapper env file > unset.
 if [ -f "${WRAPPER_ENV}" ]; then
+    _fie_wrapper_ambient_service_env="${FIE_SERVICE_ENV:-}"
     . "${WRAPPER_ENV}"
+    if [ -n "${_fie_wrapper_ambient_service_env}" ]; then
+        export FIE_SERVICE_ENV="${_fie_wrapper_ambient_service_env}"
+    fi
+    unset _fie_wrapper_ambient_service_env
 fi
 
 . "${REPO_ROOT}/scripts/rehearsal_db_guard.sh"
@@ -158,8 +168,16 @@ esac
 # --freshness-check (Workstream H): classification is warnings-only (stderr/JSON
 # warnings; no exit-code change) so a stale/unreachable source is VISIBLE in the
 # artifact and operator output instead of silently looking fresh.
+# Phase 6.8A: no literal fallback for the raw source — fail-closed exit 78
+# when the raw target contract is absent (WO C-4 remediation).
+if [ -z "${FIE_DB_PATH:-}" ]; then
+    echo "run_monthly.sh: FAIL_CLOSED_DB_TARGET_REQUIRED: no raw-layer " \
+        "target contract (FIE_DB_TARGET_RAW / FIE_DB_PATH unset); refusing " \
+        "to resolve an implicit source DB (value withheld)" >&2
+    exit 78
+fi
 SEED_ARGS=(--seed-from-history --db-path "${SEED_DB}" --persist --freshness-check
-    --source-db "${FIE_DB_PATH:-${PROJECT_ROOT}/macro_history.db}"
+    --source-db "${FIE_DB_PATH}"
     --industry-config "${FIE_CONFIG_DIR:-${PROJECT_ROOT}}/industry_config.json")
 
 PYTHONPATH="${PROJECT_ROOT}" "${PYTHON_BIN}" -m phase3.cli pipeline-export \

@@ -61,3 +61,14 @@ metadata/reports/artifacts/
 # Python packaging artifacts (Phase 6.1: clean-env install build products)
 build/
 dist/
+
+# Phase 6.8A Task H — runtime SQLite sidecars of already-ignored databases
+# (*.db is ignored; *.db-wal / *.db-shm are their live companions; keeping
+# them out of git never deletes the rollback artifacts themselves).
+*.db-wal
+*.db-shm
+# The literal ":memory:" filename artifact (a misdirected SQLite target;
+# real :memory: databases never touch disk, so this file is always junk).
+/:memory:
+# Deliberate /dev/null sentinel symlink produced by rehearsal tooling.
+/metadata/reports/artifacts_will_fail

@@ -145,6 +145,10 @@ REFUSAL_CODES = (
     "AUTH_CREDENTIAL_MISSING",
     "DATABASE_URL_MISSING",
     "DATABASE_URL_INVALID",
+    # Phase 6.8A: role-scoped DB-target contract — contradictory
+    # (non-equivalent) aliases fail closed at startup like every other
+    # malformed target class (canonical resolver, runtime_contract).
+    "CONTRADICTORY_DB_TARGETS",
     "UNKNOWN_ACCESS_MODE",
     "INVALID_HTTP_PORT",
     "INVALID_LOG_LEVEL",
