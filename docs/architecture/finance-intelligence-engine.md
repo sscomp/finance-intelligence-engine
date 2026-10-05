@@ -1,5 +1,12 @@
 # FIE 架構總覽
 
+> **⚠️ CURRENT-STATE NOTE（2026-10-05）**：本文件為 SQLite 時代的層次/流程描述
+> （歷史設計記錄，保留原狀）。目前 **Production 後端為 PostgreSQL**（authoritative
+> production datastore）；**SQLite 僅為 rollback/recovery source**；DB target 一律
+> 明確指定 + fail-closed（Phase 6.8A canonical contract；下圖「SQLite Persistence」
+> 及〈資料流〉之 SQLite 檔名與預設請以新契約解讀）。current-state 敘事見
+> [PostgreSQL Production Architecture](postgresql-production-architecture.md)。
+
 ## 定位
 
 Finance Intelligence Engine（FIE）是一套投資研究核心引擎，將多來源市場訊號轉換為可解釋、可追溯、可評分的結構化情報。它不取代現有報表系統，而是作為評分引擎層，為投資決策提供可審計的分析基礎。

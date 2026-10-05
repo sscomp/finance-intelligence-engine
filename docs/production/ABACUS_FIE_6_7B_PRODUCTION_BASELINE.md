@@ -171,3 +171,28 @@ declaration is now mandatory for accepted cron runs, and an ambient test
 declaration survives wrapper-env sourcing (ambient > env file > unset).
 Sanitized contract documentation: `ABACUS_FIE_6_8A_RUNTIME_CONTRACT.md`
 (repo root of the 6.8A WO). No credentials appear in any documentation.
+
+## 18. Post-baseline amendment — SQLite→PostgreSQL controlled production cutover (2026-10-05, SUPERSEDES §9 D3 AS CURRENT BACKEND)
+
+D3 (§9) records the accepted AT-FREEZE (2026-10-04) backend choice. On
+2026-10-05 the **SQLite→PostgreSQL controlled production cutover was executed and
+accepted** — production backend is now **PostgreSQL** (authoritative production
+datastore), per the cutover / final-acceptance work orders and the wrapper PG
+env stanza (commit `35c0b3e`). D3 is therefore a **historical record of the
+pre-cutover freeze**, not the current production backend statement.
+
+Consequently:
+
+- **SQLite role = explicit ROLLBACK / RECOVERY SOURCE ONLY.** The SQLite-era
+  stores (`macro_history.db`, `intelligence_store.db`) and encrypted backups are
+  preserved untouched; operating on them requires an explicit rollback contract
+  (canonical `FIE_DB_TARGET_ROLLBACK` / wrapper env removal path, 6.7B baseline
+  §12). SQLite retirement, deletion, or silent re-selection is NOT authorized.
+- Current-state narrative: `docs/architecture/postgresql-production-architecture.md`.
+- The literal wrapper defaults described in §8 remain in the wrappers as the
+  documented rollback path (effective only when the wrapper-pg env file is
+  removed); they are NOT the production default.
+- No schema change, data mutation, credential rotation, deployment, restart,
+  tag creation accompanies this documentation amendment (Phase 6.8B publication
+  WO), and no further "normalization" of the D1–D5 freeze-time decisions is
+  authorized by this amendment beyond the recorded backend supersession.

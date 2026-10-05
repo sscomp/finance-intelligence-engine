@@ -1,8 +1,27 @@
 # Finance Intelligence Engine (FIE)
 
-Finance Intelligence Engine（FIE）是一套針對台灣股市的投資研究核心引擎。它將總體經濟指標、產業動態、公司財務數據與法人買賣超等多來源市場訊號，轉換為具有可追溯性（Traceable）、可解釋性（Explainable）、可評分（Scorable）的結構化投資情報。系統涵蓋信號擷取、維度評分、研究圖譜、投資組合決策建議與風險控管，並以 SQLite 為持久層，提供完整的 CLI 操作介面。
+Finance Intelligence Engine（FIE）是一套針對台灣股市的投資研究核心引擎。它將總體經濟指標、產業動態、公司財務數據與法人買賣超等多來源市場訊號，轉換為具有可追溯性（Traceable）、可解釋性（Explainable）、可評分（Scorable）的結構化投資情報。系統涵蓋信號擷取、維度評分、研究圖譜、投資組合決策建議與風險控管，持久層採雙後端（生產環境：PostgreSQL；SQLite 僅為 rollback/recovery source），並提供完整的 CLI 操作介面。
 
 > 本專案目前處於 **工程完成（Engineering Complete）** 階段，已通過完整的單元測試與安全防護驗證。營運驗收（Operational Acceptance）正在進行中。本專案尚未宣告任何開源授權條款。
+
+---
+
+## 當前生產狀態（Current production state — 2026-10-05）
+
+> 本 README 其餘章節的 SQLite 預設路徑／SQLite 為預設之敘述，是 **6.8A 之前的歷史文件內容**（保留原狀以維持各 phase 記錄），已由 Phase 6.8A runtime contract normalization **廢除**（所有 target 明確指定、缺值/矛盾一律 fail-closed，無任何 silent default／fallback）。以本節與下方架构文件為準。
+
+| 項目 | 現況 |
+|---|---|
+| **Production DB** | **PostgreSQL**（authoritative production datastore；2026-10-05 controlled cutover accepted） |
+| **SQLite** | **ROLLBACK / RECOVERY SOURCE ONLY** — 不是 production default、不是 silent fallback；操作需 explicit rollback contract |
+| **DB target 決定方式** | explicit arg ＞ canonical env（`FIE_DB_TARGET_*`）＞ legacy alias（`FIE_DB_PATH` / `FIE_DATABASE_URL` / `FIE_INTELLIGENCE_DB`）＞ **fail-closed（無任何預設）**；single canonical resolver：`phase3/runtime_contract.py` |
+| **Production credentials** | operator-owned 0600 env contract files（**git 之外**；任何 secret-bearing env file 不得入 Git） |
+| **Codex Cloud** | **NOT IMPLEMENTED / NOT ENABLED / NOT DEPLOYED** — 僅 readiness 架構與 API 提案文件（PROPOSED/FUTURE） |
+
+詳細架構：[PostgreSQL Production Architecture](docs/architecture/postgresql-production-architecture.md)、
+[Codex Cloud Integration Readiness](docs/architecture/codex-cloud-integration-readiness.md)、
+production baselines（[FIE_6_7B](docs/production/FIE_6_7B_PRODUCTION_BASELINE.md) /
+[ABACUS_FIE_6_7B](docs/production/ABACUS_FIE_6_7B_PRODUCTION_BASELINE.md)）。
 
 ---
 
@@ -244,11 +263,20 @@ python -m phase3.cli --help
 > | `FIE_DATA_DIR` | 可寫資料目錄（含 DB 預設位置、logs） | 專案根 |
 > | `FIE_CONFIG_DIR` | 設定目錄 | 專案根 |
 > | `FIE_ARTIFACT_DIR` | 報告 artifact 輸出 | `<專案根>/metadata/reports/artifacts` |
-> | `FIE_DB_PATH` | 歷史資料庫 `macro_history.db` 位置 | `<FIE_DATA_DIR>/macro_history.db` |
-> | `FIE_DATABASE_URL` | Phase 3B `intelligence.db` 持久層後端指定（SQLite 路徑或 `postgres://` DSN） | 未設定 → SQLite `phase3/data/intelligence.db` |
+> | `FIE_DB_PATH` | 歷史資料庫 raw target（SQLite 路徑或 PG DSN；cutover 後生產值為 PG DSN） | （6.8A 起：**無任何預設**；未指定屬 fail-closed） |
+> | `FIE_DATABASE_URL` | intelligence target 指定（SQLite 路徑或 `postgres://` DSN） | （6.8A 起：**無任何預設**；未指定屬 fail-closed） |
 > | `FIE_PYTHON` | wrapper 使用的直譯器 | `python3` |
 > | `FIE_TELEGRAM_CHAT_ID` / `FIE_TELEGRAM_SECONDARY_CHAT_ID` | 派送 chat ID（個人資料，不落盤） | 無 |
 >
+> **⚠️ 6.8A normalization（2026-10-05，current state）**：上表「預設」欄位的 SQLite
+> 預設屬歷史文件內容。Phase 6.8A 起 SQLite 時代的 implicit defaults **已廢除**：
+> DB target 永遠 explicit（canonical `FIE_DB_TARGET_{RAW,INTELLIGENCE,TEST,ROLLBACK}`
+> > 上表 legacy aliases），缺失/矛盾/malformed 一律 fail-closed 拒絕（exit 78），
+> 無任何 silent fallback。Production 後端為 PostgreSQL；SQLite 僅為
+> rollback/recovery source。詳見
+> [PostgreSQL Production Architecture](docs/architecture/postgresql-production-architecture.md)。
+>
+> （以下為 Phase 6.3 歷史文件內容——保留時期語意）
 > Phase 3B store (`intelligence.db`) 預設仍為 `phase3/data/intelligence.db`，可用
 > 各 pipeline 子命令的 `--db-path` 覆寫。Phase 6.3 起的後端選擇與優先序：
 > **明確引數 > `FIE_DATABASE_URL` > SQLite 預設路徑**。`postgres://`／
@@ -275,6 +303,12 @@ python -m phase3.cli init-db --db-path "postgresql://fie@/fie_test?host=/tmp/fie
 
 ### 持久層後端 (Phase 6.3)
 
+> **⚠️ 現況說明（Phase 6.8A/6.7B-cutover，2026-10-05）**：本小節為 Phase 6.3 歷史
+> 語意（SQLite 預設）。目前 **Production 後端為 PostgreSQL**（authoritative
+> production datastore）；**SQLite 僅為 rollback/recovery source**，且 6.8A 起任何
+> implicit SQLite default 已廢除（所有 target 明確指定，缺值 fail-closed）。
+> 詳見 [PostgreSQL Production Architecture](docs/architecture/postgresql-production-architecture.md)。
+
 Phase 3B 的持久層在 Phase 6.3 抽象為雙後端：**SQLite 為預設並完整保留**；
 **PostgreSQL 僅作為 disposable/synthetic parity 後端**（驗證 schema 與 SQL
 方言可攜性；本階段不做 production migration／cloud provisioning）。兩個
@@ -283,7 +317,8 @@ Phase 3B 的持久層在 Phase 6.3 抽象為雙後端：**SQLite 為預設並完
 （`tests/phase3/persistence/test_backend_contract.py`）與確定性 pipeline
 parity 測試（`tests/phase3/test_pg_parity.py`）。
 
-後端指定方式（優先序：明確引數 > `FIE_DATABASE_URL` > SQLite 預設）：
+後端指定方式（Phase 6.3 歷史優先序：明確引數 > `FIE_DATABASE_URL` > SQLite 預設；
+**6.8A 起預設已廢除，見上註記**）：
 
 ```bash
 # 方式一：--db-path 明確引數（上述 init-db / pipeline-run 等）
@@ -558,9 +593,12 @@ PHASE3B_ENABLED=1 python -m phase3.cli pipeline-run --date 2026-07-08 \
 
 ### 架構文件
 
+- [PostgreSQL Production Architecture](docs/architecture/postgresql-production-architecture.md) — **目前生產後端架構（current state）**
+- [Codex Cloud Integration Readiness](docs/architecture/codex-cloud-integration-readiness.md) — **PROPOSED/FUTURE，未實作**
 - [FIE 架構總覽](docs/architecture/finance-intelligence-engine.md)
 - [資料供應鏈](docs/architecture/data-supply-chain.md)
 - [歷史資料治理](docs/architecture/historical-data-governance.md)
+- [Production Baseline — FIE 6.7B](docs/production/FIE_6_7B_PRODUCTION_BASELINE.md) / [Production Baseline — ABACUS FIE 6.7B](docs/production/ABACUS_FIE_6_7B_PRODUCTION_BASELINE.md)
 - [Phase 6.5 ChatGPT Tool Contract](docs/architecture/phase6-5/chatgpt-tool-contract.md)
 - [Phase 6.5 Service Planes](docs/architecture/phase6-5/service-boundary-planes.md)
 - [Phase 6.6 Reference Runtime](docs/architecture/phase6-6/reference-runtime.md)

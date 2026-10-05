@@ -131,3 +131,44 @@
 **Decision**：建立 `docs/governance/`、`docs/architecture/`、`docs/adr/` 三層文件結構，從治理報告中萃取 durable 內容，以正常化、去敏感化的方式整理。原始內部報告保持不動。
 
 **Consequences**：公開文件專注於「為什麼」和「如何演進」，排除 runtime 證據、敏感資訊、機器特定細節。代價是文件維護需要同步更新。
+---
+
+## 2026-10-05 — PostgreSQL 生產權威定型 + SQLite 降級為 rollback source
+
+**Context**：2026-10-05 SQLite→PostgreSQL controlled production cutover 已依
+cutover / final-acceptance work orders 執行並 accepted（wrapper PG env stanza
+commit `35c0b3e`）。Repository 內多份歷史文件仍以 SQLite 時代語意描述持久層
+（SQLite 預設、fallback），Phase 6.8A 已廢除 implicit defaults 但 repository
+缺一份 current-state 生產架構敘事。
+
+**Decision**：Production authoritative datastore 定型為 **PostgreSQL**；SQLite
+正式角色固定為 **explicit rollback / recovery source only**（保留不動、操作需
+explicit rollback contract、非 silent fallback、無 retirement）。新增 current-state
+架構文件 `docs/architecture/postgresql-production-architecture.md`；在 6.7B
+baseline 補 §18 amendment 標註 D3 supersession；README 增加 current-state
+entrypoint 與針對性 normalization 註記（不做 global rewrite，歷史文件保留）。
+
+**Consequences**：新讀者可由 README → 架構文件取得正確生產敘事；歷史記錄的
+forensic 價值保留、以 amendment/banner 分級。代價是部分歷史文件仍含舊語意，
+須靠索引註記導流。
+
+---
+
+## 2026-10-05 — Codex Cloud 整合：readiness 文件 only，未實作
+
+**Context**：未來可能以 Codex Cloud 作為外部執行 provider（outbound execution；
+與既有 Phase 6.5 inbound ChatGPT tool boundary 方向相反）。為避免「readiness
+文件」被解讀為「已整合」，需要一個明確的準備狀態決策。
+
+**Decision**：僅建立 readiness architecture 文件
+`docs/architecture/codex-cloud-integration-readiness.md`（PROPOSED/FUTURE）：
+logical boundary（submission/status/result/cancellation）、FIE-proposed 狀態
+模型、idempotency（`client_request_id`）、security boundary（adapter 禁取
+Production DB credentials、禁直寫 Production、禁繞過 guards、payload redaction）、
+fail-safe 語意（`UNKNOWN != SUCCESS`；`TIMED_OUT != confirmed no side effect`）。
+**NOT IMPLEMENTED / NOT ENABLED / NOT DEPLOYED**；任何實作需另案 work order
+＋§ readiness checklist 覆核。
+
+**Consequences**：未來實作有可審查的 boundary 與 gate；禁止的 topology
+（external agent → unrestricted production）被事先記錄。代價是 contract
+目前為提案狀態，official contract 出現時須重新對齊。

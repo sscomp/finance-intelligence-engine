@@ -1,7 +1,15 @@
 # FIE 系統狀態總覽
 
+> **⚠️ CURRENT-STATE NOTICE（2026-10-05）**：以下快照之日期為 **2026-08-26**（Phase 5
+> 時期的狀態快照；保留原狀作為里程碑歷史）。**目前生產現況**（Phase 6.7B/6.8A 之後）：
+> **Production backend = PostgreSQL**（2026-10-05 controlled cutover accepted）；
+> **SQLite = rollback/recovery source only**；runtime DB target 一律 explicit + fail-closed
+> （Phase 6.8A canonical contract）；**Codex Cloud = NOT IMPLEMENTED**（僅 readiness 文件）。
+> 詳見 [PostgreSQL Production Architecture](../architecture/postgresql-production-architecture.md)
+> 與 [production baselines](../production/ABACUS_FIE_6_7B_PRODUCTION_BASELINE.md)。
+
 > **快照日期**：2026-08-26
-> **當前階段**：Phase 5 工程完成 — M8 營運驗收進行中
+> **快照時當前階段**：Phase 5 工程完成 — M8 營運驗收進行中
 
 ## 里程碑狀態
 
