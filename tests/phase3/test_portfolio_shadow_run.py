@@ -401,7 +401,12 @@ class TestPortfolioShadowRunAdditive(unittest.TestCase):
         # default macro_history_db_spec + additive --min-seed-total
         # floor; 0 deletions — cmd_shadow_run behavior unchanged).
         expected_post_m8_sha = (
-            "12de9d1e9476b708ad15af8791536fcef089a1b01046ddc1580c4e23410b2ad0"
+            # FIE 6.8A UPDATE 2026-10-05: SHA updated from 12de9d1e...
+            # to ed3aebe0... (runtime contract normalization: db-target
+            # resolution through the canonical runtime_contract resolver,
+            # CWD defaults abolished — dispatch-only, cmd_shadow_run
+            # behavior unchanged; regression tests pass).
+            "ed3aebe0036523527434d0fffea4845c3b2563d0da5f198621a88c4bc24cbfa5"
         )
         self.assertEqual(actual_sha, expected_post_m8_sha,
                          "cli.py SHA should match post-M8 baseline")

@@ -305,16 +305,18 @@ class SQLiteContractTests(ContractMixin, unittest.TestCase):
     def test_sqlite_scheme_normalization_forms(self) -> None:
         # Phase 6.7B-R1 defect FIE-R1-001: scheme stripping must never
         # invent a different path. Pin the documented forms
-        # (sqlite:///abs/path -> abs/path; sqlite:relative -> relative)
-        # — the former regex silently rewrote the ABSOLUTE form into a
-        # CWD-relative path.
+        # (sqlite:///abs/path -> abs/path) — the former regex silently
+        # rewrote the ABSOLUTE form into a CWD-relative path.
+        # Phase 6.8A: relative forms no longer normalize to a CWD walk —
+        # they fail closed (absolute path required).
         import os as _os
+
+        from phase3.runtime_contract import FailClosedTarget
 
         cases = [
             ("sqlite:///abs/db", "/abs/db"),
             ("sqlite:/abs/db", "/abs/db"),
             ("SQLITE:///abs/db", "/abs/db"),  # case-insensitive scheme
-            ("sqlite:relative/db", "relative/db"),
             ("/abs/plain", "/abs/plain"),
         ]
         for value, expected in cases:
@@ -325,6 +327,22 @@ class SQLiteContractTests(ContractMixin, unittest.TestCase):
                     spec = resolve_spec()
                     self.assertEqual(spec.backend, "sqlite")
                     self.assertEqual(spec.dsn, expected)
+                finally:
+                    if saved is None:
+                        _os.environ.pop("FIE_DATABASE_URL", None)
+                    else:
+                        _os.environ["FIE_DATABASE_URL"] = saved
+        for relative in ("sqlite:relative/db", "relative/plain.db"):
+            with self.subTest(relative=relative):
+                saved = _os.environ.get("FIE_DATABASE_URL")
+                _os.environ["FIE_DATABASE_URL"] = relative
+                try:
+                    with self.assertRaises(FailClosedTarget) as cm:
+                        resolve_spec()
+                    self.assertEqual(
+                        cm.exception.reason,
+                        "FAIL_CLOSED_MALFORMED_DB_TARGET",
+                    )
                 finally:
                     if saved is None:
                         _os.environ.pop("FIE_DATABASE_URL", None)

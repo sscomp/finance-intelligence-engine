@@ -110,12 +110,28 @@ class IngestSignalsDryRunTests(unittest.TestCase):
             self.assertFalse(os.path.exists(db))
 
     def test_dry_run_no_input_yields_zero_signals(self) -> None:
+        # Phase 6.8A: the implicit portable DB default is abolished —
+        # even a dry-run must name an explicit target; with a disposable
+        # /tmp target, "no input" still yields zero signals honestly.
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "dryrun_fixture.db")
+            proc = _run(
+                "ingest-signals", "--source", "yfinance", "--dry-run",
+                "--db-path", db,
+                env_extra={"PHASE3B_ENABLED": ""},
+            )
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            self.assertIn("signals=", proc.stdout)
+
+    def test_dry_run_without_db_target_refuses_fail_closed(self) -> None:
+        # Phase 6.8A: no --db-path and no target in the env → the CLI
+        # refuses (exit 2) instead of silently using a CWD default.
         proc = _run(
             "ingest-signals", "--source", "yfinance", "--dry-run",
             env_extra={"PHASE3B_ENABLED": ""},
         )
-        self.assertEqual(proc.returncode, 0)
-        self.assertIn("signals=", proc.stdout)
+        self.assertEqual(proc.returncode, 2)
+        self.assertNotIn("signals=0", proc.stdout)
 
     def test_dry_run_with_unknown_source_rejected(self) -> None:
         """Argparse choices guard catches this."""

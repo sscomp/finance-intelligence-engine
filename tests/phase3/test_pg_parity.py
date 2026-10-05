@@ -229,13 +229,13 @@ class PostgresParityTests(unittest.TestCase):
         in somewhere new) — fix the classification before trusting the
         cross-backend comparison.
         """
-        first = _run_backend("dummy-sqlite-path")
-        second = _run_backend("dummy-sqlite-path")
+        first = _run_backend('/tmp/fie_parity_sqlite_dummy.db')
+        second = _run_backend('/tmp/fie_parity_sqlite_dummy.db')
         for bundle_key in ("payload", "signals", "scores", "nodes", "edges"):
             self.assertEqual(first[bundle_key], second[bundle_key], bundle_key)
 
     def test_full_pipeline_parity(self) -> None:
-        sqlite_res = _run_backend("dummy-sqlite-path")
+        sqlite_res = _run_backend('/tmp/fie_parity_sqlite_dummy.db')
         pg_res = _run_backend(PG_DSN)
 
         # Payload parity (counts, scores structure, graph summaries).

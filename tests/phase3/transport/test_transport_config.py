@@ -1,6 +1,10 @@
-"""Transport configuration precedence tests (Phase 6.6 §9).
+"""Transport configuration precedence tests (Phase 6.6 §9; 6.8A).
 
-Precedence (tested): explicit argument > environment > safe default.
+Precedence (tested): explicit argument > environment > safe default
+for every knob EXCEPT the DB target: Phase 6.8A abolished the implicit
+portable SQLite default — an absent target fails closed with
+``DATABASE_URL_MISSING`` (its own dedicated test), so every knob test
+supplies a disposable /tmp SQLite fixture explicitly.
 No developer paths, no checked-in secrets, non-loopback-free defaults.
 """
 from __future__ import annotations
@@ -29,6 +33,11 @@ from phase3.transport.config import (  # noqa: E402
     TransportConfig,
 )
 
+FIE_DATABASE_URL = "FIE_DATABASE_URL"
+
+# 6.8A: disposable host-safe DB target (absolute /tmp SQLite path).
+FIXTURE_DB_TARGET = "/tmp/fie_transport_cfg_fixture.db"
+
 
 def _env(**vars: str | None) -> dict[str, str | None]:
     saved = {key: os.environ.get(key) for key in vars}
@@ -53,8 +62,26 @@ def _clear_transport_env() -> dict[str, str | None]:
 
 
 class TestDefaults(unittest.TestCase):
-    def test_safe_defaults(self) -> None:
+    def test_absent_db_target_refuses_fail_closed(self) -> None:
+        # Phase 6.8A: no implicit portable SQLite default — a scrubbed
+        # environment refuses at load_transport_config time (before any
+        # knob resolves or anything binds).
+        from phase3.service.runtime_config import ConfigurationError
+
         saved = _clear_transport_env()
+        try:
+            with self.assertRaises(ConfigurationError) as cm:
+                load_transport_config()
+            self.assertEqual(cm.exception.code, "DATABASE_URL_MISSING")
+        finally:
+            _restore(saved)
+
+    def test_safe_defaults(self) -> None:
+        # 6.8A: with an explicit DB target, every absent knob keeps its
+        # accepted safe default (scrub the full transport surface first —
+        # hermetic against the runner's ambient FIE_HTTP_PORT etc.).
+        saved = _clear_transport_env()
+        os.environ["FIE_DATABASE_URL"] = FIXTURE_DB_TARGET
         try:
             config = load_transport_config()
             self.assertEqual(config.host, "127.0.0.1")  # never a public bind
@@ -73,19 +100,21 @@ class TestDefaults(unittest.TestCase):
         # audit lives in test_portability_audit).
         from phase3.paths import artifact_dir, data_dir
 
-        saved = _clear_transport_env()
+        saved = _env(**{"FIE_DATABASE_URL": FIXTURE_DB_TARGET})
         try:
             runtime = load_transport_config().to_dict()["runtime"]
             self.assertEqual(runtime["data_dir"], str(data_dir()))
             self.assertEqual(runtime["artifact_dir"], str(artifact_dir()))
-            self.assertFalse(Path(runtime["database_spec"]).is_absolute())
+            self.assertEqual(runtime["database_source"], "env")
+            self.assertIn("fie_transport_cfg_fixture", runtime["database_spec"])
         finally:
             _restore(saved)
 
 
 class TestPrecedence(unittest.TestCase):
-    def test_env_beats_default(self) -> None:
+    def test_env_knobs_resolve(self) -> None:
         saved = _env(**{
+            FIE_DATABASE_URL: FIXTURE_DB_TARGET,
             FIE_HTTP_HOST: "0.0.0.0",
             FIE_HTTP_PORT: "9001",
             FIE_AUTH_MODE: "TOKEN",  # normalised
@@ -104,6 +133,7 @@ class TestPrecedence(unittest.TestCase):
 
     def test_argument_beats_env(self) -> None:
         saved = _env(**{
+            FIE_DATABASE_URL: FIXTURE_DB_TARGET,
             FIE_HTTP_PORT: "9001",
             FIE_LOG_LEVEL: "ERROR",
             FIE_REQUEST_TIMEOUT: "17",
@@ -126,7 +156,10 @@ class TestPrecedence(unittest.TestCase):
 
         for bad in ("basic", "oidc", "NONE-CERTIFIED", ""):
             with self.subTest(bad=bad):
-                saved = _env(**{FIE_AUTH_MODE: bad})
+                saved = _env(**{
+                    FIE_DATABASE_URL: FIXTURE_DB_TARGET,
+                    FIE_AUTH_MODE: bad,
+                })
                 try:
                     with self.assertRaises(ConfigurationError) as cm:
                         load_transport_config()
@@ -138,7 +171,10 @@ class TestPrecedence(unittest.TestCase):
         # ADR-017: invalid explicit values never silently become INFO.
         from phase3.service.runtime_config import ConfigurationError
 
-        saved = _env(**{FIE_LOG_LEVEL: "verbose"})
+        saved = _env(**{
+            FIE_DATABASE_URL: FIXTURE_DB_TARGET,
+            FIE_LOG_LEVEL: "verbose",
+        })
         try:
             with self.assertRaises(ConfigurationError) as cm:
                 load_transport_config()
@@ -152,7 +188,10 @@ class TestPrecedence(unittest.TestCase):
 
         for bad in ("not-a-port", "-1", "99999", ""):
             with self.subTest(bad=bad):
-                saved = _env(**{FIE_HTTP_PORT: bad})
+                saved = _env(**{
+                    FIE_DATABASE_URL: FIXTURE_DB_TARGET,
+                    FIE_HTTP_PORT: bad,
+                })
                 try:
                     with self.assertRaises(ConfigurationError) as cm:
                         load_transport_config()
@@ -163,7 +202,10 @@ class TestPrecedence(unittest.TestCase):
     def test_zero_port_is_documented_ephemeral(self) -> None:
         # `0` = deliberate ephemeral bind (tests/clean-room probes);
         # pinned here permanently (see ADR-017 §4.6).
-        saved = _env(**{FIE_HTTP_PORT: "0"})
+        saved = _env(**{
+            FIE_DATABASE_URL: FIXTURE_DB_TARGET,
+            FIE_HTTP_PORT: "0",
+        })
         try:
             self.assertEqual(load_transport_config().port, 0)
         finally:
@@ -176,7 +218,10 @@ class TestPrecedence(unittest.TestCase):
 
         for bad in ("abc", "0", "-3", "-0.5", "inf", "nan"):
             with self.subTest(bad=bad):
-                saved = _env(**{FIE_REQUEST_TIMEOUT: bad})
+                saved = _env(**{
+                    FIE_DATABASE_URL: FIXTURE_DB_TARGET,
+                    FIE_REQUEST_TIMEOUT: bad,
+                })
                 try:
                     with self.assertRaises(ConfigurationError) as cm:
                         load_transport_config()
@@ -199,10 +244,14 @@ class TestPrecedence(unittest.TestCase):
             {"request_timeout": float("nan")},
             {"sqlite_access_mode": "not-a-mode"},
         ]
-        for kwargs in cases:
-            with self.subTest(**kwargs):
-                with self.assertRaises(ConfigurationError):
-                    load_transport_config(**kwargs)
+        saved = _env(**{FIE_DATABASE_URL: FIXTURE_DB_TARGET})
+        try:
+            for kwargs in cases:
+                with self.subTest(**kwargs):
+                    with self.assertRaises(ConfigurationError):
+                        load_transport_config(**kwargs)
+        finally:
+            _restore(saved)
 
 
 class TestLogSafety(unittest.TestCase):

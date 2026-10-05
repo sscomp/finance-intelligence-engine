@@ -1,10 +1,14 @@
-"""Runtime configuration contract (Phase 6.5 §10, §17 areas 8-11).
+"""Runtime configuration contract (Phase 6.5 §10, §17 areas 8-11; 6.8A).
 
 Precedence, validation, and secret-safety of the runtime config plus
 the portability/secret audits:
 
-* precedence: explicit argument > environment > portable default;
-* FIE_SERVICE_ENV / FIE_LOG_FORMAT validated with safe fallbacks;
+* precedence: explicit argument > environment > (6.8A: NO implicit
+  default — an absent DB target fails closed with
+  ``DATABASE_URL_MISSING``; tests that need a target set a /tmp
+  fixture explicitly);
+* FIE_SERVICE_ENV / FIE_LOG_FORMAT validated with closed refuse-on-
+  invalid semantics (an *absent* value keeps its accepted default);
 * database DSN only ever materializes in masked (``:***``) form;
 * no developer-specific absolute path inside ``phase3/service`` or the
   Phase 6.5 docs (§10/§20).
@@ -27,6 +31,10 @@ from phase3.service.runtime_config import (  # noqa: E402
     redact,
 )
 
+# 6.8A: disposable (host-safe) SQLite target — absolute, /tmp, never a
+# real or production-shaped DSN.
+FIXTURE_TARGET = "/tmp/fie_runtime_cfg_fixture.db"
+
 
 class TestPrecedenceAndValidation(unittest.TestCase):
     def setUp(self) -> None:
@@ -43,14 +51,23 @@ class TestPrecedenceAndValidation(unittest.TestCase):
             else:
                 os.environ[k] = v
 
-    def test_default_is_portable_local(self) -> None:
-        cfg = load_runtime_config()
-        self.assertEqual(cfg.database_source, "default")
+    def test_absent_db_target_refuses_fail_closed(self) -> None:
+        # Phase 6.8A: the portable CWD-relative SQLite default is
+        # ABOLISHED — an absent target fails closed at load time.
+        from phase3.service.runtime_config import ConfigurationError
+        with self.assertRaises(ConfigurationError) as cm:
+            load_runtime_config()
+        self.assertEqual(cm.exception.code, "DATABASE_URL_MISSING")
+
+    def test_explicit_target_resolves_with_local_defaults(self) -> None:
+        cfg = load_runtime_config(FIXTURE_TARGET)
+        self.assertEqual(cfg.database_source, "explicit")
         self.assertEqual(cfg.service_env, "local")
         self.assertEqual(cfg.log_format, "structured")
-        self.assertFalse(Path(cfg.database_spec).is_absolute())
+        self.assertTrue(Path(cfg.database_spec.split(":***")[0]).is_absolute()
+                        or "file" in cfg.database_spec)
 
-    def test_env_precedes_default(self) -> None:
+    def test_env_target_resolves(self) -> None:
         os.environ["FIE_DATABASE_URL"] = "/tmp/fie_env_override.db"
         cfg = load_runtime_config()
         self.assertEqual(cfg.database_source, "env")
@@ -63,6 +80,9 @@ class TestPrecedenceAndValidation(unittest.TestCase):
         self.assertIn("fie_explicit", cfg.database_spec)
 
     def test_profile_and_log_format_fallbacks(self) -> None:
+        # needs a DB target fixture — an *absent* target now refuses
+        # before the return (refusal covered by its own test above).
+        os.environ["FIE_DATABASE_URL"] = FIXTURE_TARGET
         os.environ[FIE_SERVICE_ENV] = "STAGING"
         cfg = load_runtime_config()
         self.assertEqual(cfg.service_env, "staging")
@@ -74,6 +94,7 @@ class TestPrecedenceAndValidation(unittest.TestCase):
         # format refuses deterministically, it never becomes
         # "structured" (the pre-R4 behavior).
         from phase3.service.runtime_config import ConfigurationError
+        os.environ["FIE_DATABASE_URL"] = FIXTURE_TARGET
         os.environ[FIE_LOG_FORMAT] = "bogus"
         with self.assertRaises(ConfigurationError) as cm:
             load_runtime_config()
@@ -97,13 +118,17 @@ class TestPrecedenceAndValidation(unittest.TestCase):
                     os.environ.pop(FIE_SERVICE_ENV, None)
 
     def test_absent_service_env_keeps_local_default(self) -> None:
-        # Local compatibility boundary: absence still means `local`.
+        # Local compatibility boundary: absence still means `local`
+        # (6.8A: with a DB target present — an absent *DB target* is the
+        # separate fail-closed refusal tested above).
         os.environ.pop(FIE_SERVICE_ENV, None)
+        os.environ["FIE_DATABASE_URL"] = FIXTURE_TARGET
         self.assertEqual(load_runtime_config().service_env, "local")
 
     def test_explicit_service_env_argument_beats_env_and_validates(self) -> None:
         from phase3.service.runtime_config import ConfigurationError
 
+        os.environ["FIE_DATABASE_URL"] = FIXTURE_TARGET
         os.environ[FIE_SERVICE_ENV] = "test"
         try:
             cfg = load_runtime_config(service_env="production")

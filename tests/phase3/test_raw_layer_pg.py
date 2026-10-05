@@ -97,9 +97,12 @@ class RawLayerPostgresTests(unittest.TestCase):
         return mock.patch.object(db, "DB_PATH", self.dsn)
 
     def test_backend_selection(self) -> None:
+        # Phase 6.8A: outside an explicit target the raw layer reports
+        # "unresolved" (fail closed at use) — never a silent SQLite
+        # CWD fallback.
         with self._use_pg():
             self.assertEqual(db.raw_layer_backend(), "postgres")
-        self.assertEqual(db.raw_layer_backend(), "sqlite")
+        self.assertEqual(db.raw_layer_backend(), "unresolved")
 
     def test_init_and_saves_upsert_on_pg(self) -> None:
         with self._use_pg():
@@ -240,8 +243,15 @@ class RawLayerSqliteRegressionTests(unittest.TestCase):
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_default_unresolved_raises_fail_closed(self) -> None:
+        """6.8A: with no raw-target contract in the environment the module
+        default is UNRESOLVED (fail closed) — never a CWD default."""
+        with mock.patch.object(db, "DB_PATH", None):
+            with self.assertRaises(db.FailClosedTarget):
+                db.raw_db_spec()
+
     def test_default_spec_is_a_path_not_a_dsn(self) -> None:
-        with mock.patch.object(db, "DB_PATH", str(db._DEFAULT_DB_PATH)):
+        with mock.patch.object(db, "DB_PATH", "/tmp/fie_default_path_probe.db"):
             self.assertFalse(db._is_pg_spec(db.raw_db_spec()))
 
     def test_env_dsn_flows_through_paths_boundary(self) -> None:

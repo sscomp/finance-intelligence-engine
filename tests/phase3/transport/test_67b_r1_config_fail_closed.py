@@ -122,7 +122,10 @@ class TestServiceEnvProfileVocabulary(unittest.TestCase):
                     _restore(saved)
 
     def test_absent_keeps_local_default(self) -> None:
-        saved = _env(FIE_SERVICE_ENV=None)
+        # 6.8A: the profile default survives; the DB target must be
+        # supplied explicitly (no implicit default anymore).
+        saved = _env(FIE_SERVICE_ENV=None,
+                     FIE_DATABASE_URL="sqlite:///tmp/r1-local.db")
         try:
             self.assertEqual(load_transport_config().service_env, "local")
         finally:
@@ -271,13 +274,21 @@ class TestProductionFailClosed(unittest.TestCase):
                 finally:
                     _restore(saved)
 
-    def test_local_relative_sqlite_dsn_still_works(self) -> None:
-        # local/test compatibility: only production-like profiles gate
-        # DSN shape; the portable default and relative paths stay legal
-        # where the contract permits them.
+    def test_local_relative_sqlite_dsn_refuses_and_absolute_resolves(self) -> None:
+        # Phase 6.8A: relative SQLite paths fail closed in EVERY profile
+        # (the CWD-relative family of semantics is abolished at the
+        # canonical resolver); absolute paths still resolve in local.
+        saved = _env(FIE_SERVICE_ENV="local", FIE_DATABASE_URL="r1-relative.db")
+        try:
+            with self.assertRaises(ConfigurationError) as cm:
+                load_transport_config()
+            self.assertEqual(cm.exception.code, "DATABASE_URL_INVALID")
+        finally:
+            _restore(saved)
         from phase3.transport.config import TransportConfig
 
-        saved = _env(FIE_SERVICE_ENV="local", FIE_DATABASE_URL="r1-relative.db")
+        saved = _env(FIE_SERVICE_ENV="local",
+                     FIE_DATABASE_URL="sqlite:///tmp/r1-local-abs.db")
         try:
             config = load_transport_config()
             self.assertIsInstance(config, TransportConfig)
@@ -303,7 +314,18 @@ class TestLocalTestCompatibility(unittest.TestCase):
     """Gate B: absent values keep every accepted local/test default."""
 
     def test_absent_values_keep_accepted_defaults(self) -> None:
+        # Phase 6.8A: the ONE knob that lost its default is the DB
+        # target — a fully scrubbed environment now refuses; every other
+        # absent knob keeps its accepted default with an explicit target.
         saved = _clear_fie_env()
+        try:
+            with self.assertRaises(ConfigurationError) as cm:
+                load_transport_config()
+            self.assertEqual(cm.exception.code, "DATABASE_URL_MISSING")
+        finally:
+            _restore(saved)
+        saved = _clear_fie_env()
+        os.environ["FIE_DATABASE_URL"] = "sqlite:///tmp/r1-gateb.db"
         try:
             config = load_transport_config()
             self.assertEqual(config.host, "127.0.0.1")  # never a public bind
@@ -313,7 +335,7 @@ class TestLocalTestCompatibility(unittest.TestCase):
             self.assertEqual(config.request_timeout, 60.0)
             self.assertEqual(config.sqlite_access_mode, "writable")
             self.assertEqual(config.service_env, "local")
-            self.assertEqual(config.runtime["database_source"], "default")
+            self.assertEqual(config.runtime["database_source"], "env")
             self.assertEqual(config.runtime["log_format"], "structured")
         finally:
             _restore(saved)
@@ -328,12 +350,15 @@ class TestLocalTestCompatibility(unittest.TestCase):
             _restore(saved)
 
     def test_test_profile_behaves_like_local(self) -> None:
+        # 6.8A: "behaves like local" now requires an explicit target; the
+        # dev/test auth default is kept.
         saved = _env(FIE_SERVICE_ENV="test", FIE_AUTH_MODE=None,
-                     FIE_DATABASE_URL=None)
+                     FIE_DATABASE_URL="sqlite:///tmp/r1-test.db")
         try:
             config = load_transport_config()
             self.assertEqual(config.auth_mode, "none")  # dev default kept
-            self.assertEqual(config.runtime["database_source"], "default")
+            self.assertEqual(config.service_env, "test")
+            self.assertEqual(config.runtime["database_source"], "env")
         finally:
             _restore(saved)
 
@@ -341,11 +366,16 @@ class TestLocalTestCompatibility(unittest.TestCase):
         # determinism is not profile-scoped: a mistyped value refuses
         # everywhere. Only *absent* values fall back (ADR-017).
         cases = [
-            ({"FIE_AUTH_MODE": "basik"}, "UNKNOWN_AUTH_MODE"),
-            ({"FIE_LOG_LEVEL": "verbose"}, "INVALID_LOG_LEVEL"),
-            ({"FIE_HTTP_PORT": "nope"}, "INVALID_HTTP_PORT"),
-            ({"FIE_REQUEST_TIMEOUT": "0"}, "INVALID_REQUEST_TIMEOUT"),
-            ({"FIE_SQLITE_ACCESS_MODE": "writeable"}, "UNKNOWN_ACCESS_MODE"),
+            ({"FIE_DATABASE_URL": "sqlite:///tmp/r1.db",
+              "FIE_AUTH_MODE": "basik"}, "UNKNOWN_AUTH_MODE"),
+            ({"FIE_DATABASE_URL": "sqlite:///tmp/r1.db",
+              "FIE_LOG_LEVEL": "verbose"}, "INVALID_LOG_LEVEL"),
+            ({"FIE_DATABASE_URL": "sqlite:///tmp/r1.db",
+              "FIE_HTTP_PORT": "nope"}, "INVALID_HTTP_PORT"),
+            ({"FIE_DATABASE_URL": "sqlite:///tmp/r1.db",
+              "FIE_REQUEST_TIMEOUT": "0"}, "INVALID_REQUEST_TIMEOUT"),
+            ({"FIE_DATABASE_URL": "sqlite:///tmp/r1.db",
+              "FIE_SQLITE_ACCESS_MODE": "writeable"}, "UNKNOWN_ACCESS_MODE"),
         ]
         for vars, code in cases:
             with self.subTest(vars=vars):
@@ -371,7 +401,8 @@ class TestSqliteAccessModeVocabulary(unittest.TestCase):
     def test_valid_modes_resolve(self) -> None:
         for mode in ("writable", "readonly", "immutable_snapshot"):
             with self.subTest(mode=mode):
-                saved = _env(FIE_SQLITE_ACCESS_MODE=mode.upper())
+                saved = _env(FIE_SQLITE_ACCESS_MODE=mode.upper(),
+                             FIE_DATABASE_URL="sqlite:///tmp/r1-mode.db")
                 try:
                     self.assertEqual(
                         load_transport_config().sqlite_access_mode, mode
@@ -382,7 +413,8 @@ class TestSqliteAccessModeVocabulary(unittest.TestCase):
     def test_invalid_modes_refuse(self) -> None:
         for bad in ("writeable", "read-only", "", "IMMUTABLE"):
             with self.subTest(bad=bad):
-                saved = _env(FIE_SQLITE_ACCESS_MODE=bad)
+                saved = _env(FIE_SQLITE_ACCESS_MODE=bad,
+                             FIE_DATABASE_URL="sqlite:///tmp/r1-mode.db")
                 try:
                     with self.assertRaises(ConfigurationError) as cm:
                         load_transport_config()
@@ -391,7 +423,10 @@ class TestSqliteAccessModeVocabulary(unittest.TestCase):
                     _restore(saved)
 
     def test_absent_keeps_writable(self) -> None:
-        saved = _env(FIE_SQLITE_ACCESS_MODE=None)
+        # 6.8A: absent access-mode default survives; the DB target is
+        # supplied explicitly (no implicit default anymore).
+        saved = _env(FIE_SQLITE_ACCESS_MODE=None,
+                     FIE_DATABASE_URL="sqlite:///tmp/r1-mode.db")
         try:
             self.assertEqual(load_transport_config().sqlite_access_mode, "writable")
         finally:
@@ -410,6 +445,8 @@ class TestRefusalVocabulary(unittest.TestCase):
             "UNKNOWN_SERVICE_ENV", "UNKNOWN_AUTH_MODE",
             "AUTH_MODE_FORBIDDEN_IN_PRODUCTION", "AUTH_CREDENTIAL_MISSING",
             "DATABASE_URL_MISSING", "DATABASE_URL_INVALID",
+            # Phase 6.8A: contradictory role-scoped DB targets refuse.
+            "CONTRADICTORY_DB_TARGETS",
             "UNKNOWN_ACCESS_MODE", "INVALID_HTTP_PORT",
             "INVALID_LOG_LEVEL", "INVALID_REQUEST_TIMEOUT",
             "INVALID_LOG_FORMAT",
@@ -427,6 +464,9 @@ class TestRefusalVocabulary(unittest.TestCase):
             {"FIE_SQLITE_ACCESS_MODE": MARKER_TOKEN},
             {"FIE_SERVICE_ENV": MARKER_TOKEN},
         ):
+            # 6.8A: each case also carries a DB target fixture so the
+            # knob refusal under test is the one that actually fires
+            vars = {"FIE_DATABASE_URL": "sqlite:///tmp/r1-marker.db", **vars}
             with self.subTest(vars=vars):
                 saved = _env(**vars)  # type: ignore[arg-type]
                 try:

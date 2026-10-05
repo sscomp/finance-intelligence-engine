@@ -185,7 +185,12 @@ PHASE3_BASELINE = {
     # remediation: backend-aware seed source default via
     # phase3.paths.macro_history_db_spec + --min-seed-total accounting
     # floor on pipeline-export; 0 deletions of existing behavior).
-    "phase3/cli.py": "12de9d1e9476b708ad15af8791536fcef089a1b01046ddc1580c4e23410b2ad0",
+    # FIE 6.8A UPDATE 2026-10-05: cli.py SHA updated from 12de9d1e... to
+    # ed3aebe0... (runtime contract normalization: db-target resolution
+    # routed through the canonical runtime_contract resolver; silent
+    # CWD defaults abolished — dispatch-only, cmd_shadow_run behavior
+    # unchanged; regression tests pass).
+    "phase3/cli.py": "ed3aebe0036523527434d0fffea4845c3b2563d0da5f198621a88c4bc24cbfa5",
     "phase3/pipeline/scoring_pipeline.py": "b325b97eaae25be515b5a5aada35e28e530fa574836c714ba488108893a15e5a",
     "phase3/pipeline/intelligence_pipeline.py": "025af0e538572fc056a73a9dc8ef2686f7518fd95723525693726f1da6fe5570",
     "phase3/datamodel/scores.py": "cc934edd423b1cea8a51cd0554547546a5bc2a34bac169d0ba154332599a090c",

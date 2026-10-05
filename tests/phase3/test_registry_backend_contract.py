@@ -164,7 +164,13 @@ class RegistryContractTests(unittest.TestCase):
                     "postgresql://u:p@h/db"):
             self.assertTrue(is_pg_dsn(dsn), dsn)
         self.assertEqual(is_pg_dsn("macro_history.db"), False)
-        self.assertEqual(resolve_spec("macro_history.db").backend,
+        # Phase 6.8A: a relative bare path is a MALFORMED target — the
+        # sqlite selection rule is only exercised with an ABSOLUTE path.
+        from phase3.runtime_contract import FailClosedTarget
+
+        with self.assertRaises(FailClosedTarget):
+            resolve_spec("macro_history.db")
+        self.assertEqual(resolve_spec("/tmp/registry_bridge_fixture.db").backend,
                          BACKEND_SQLITE)
         self.assertFalse(BACKEND_POSTGRES == BACKEND_SQLITE)
 

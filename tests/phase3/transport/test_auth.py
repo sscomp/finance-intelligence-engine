@@ -158,6 +158,8 @@ class TestTokenModeOverHTTP(RuntimeHarness):
         saved = {k: os.environ.get(k) for k in (FIE_AUTH_MODE, FIE_AUTH_TOKEN)}
         os.environ[FIE_AUTH_MODE] = "token"
         os.environ[FIE_AUTH_TOKEN] = "from-env"
+        # 6.8A: an explicit DB target is required for the config to resolve.
+        os.environ["FIE_DATABASE_URL"] = "sqlite:///tmp/fie_auth_fixture.db"
         try:
             config = load_transport_config()
             # explicit argument wins over env

@@ -434,7 +434,12 @@ class TestSubprocessShutdownLifecycle(unittest.TestCase):
 
     def test_invalid_config_startup_refuses_nonzero_without_bind(self) -> None:
         env = dict(os.environ)
-        env.update(FIE_SERVICE_ENV="production", FIE_AUTH_MODE="none")
+        # 6.8A: supply an explicit (disposable) DB target so the profile
+        # auth-mode gate is the refusal that fires — with no target the
+        # DATABASE_URL_MISSING refusal would win first.
+        env.update(FIE_SERVICE_ENV="production", FIE_AUTH_MODE="none",
+                   FIE_DATABASE_URL="/tmp/fie_r4_refusal_fixture.db",
+                   FIE_AUTH_TOKEN="")
         proc = subprocess.run(
             [sys.executable, "-m", "phase3.transport.http"],
             env=env,

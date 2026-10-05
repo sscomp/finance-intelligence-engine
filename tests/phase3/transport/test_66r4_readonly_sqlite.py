@@ -386,6 +386,10 @@ class TestAccessModeConfigPlumbing(unittest.TestCase):
         )
 
         os.environ[FIE_SQLITE_ACCESS_MODE] = "immutable_snapshot"
+        # 6.8A: an explicit DB target is required for the config to
+        # resolve at all (no implicit default anymore).
+        os.environ.setdefault("FIE_DATABASE_URL",
+                              "sqlite:///tmp/fie_r4_mode_fixture.db")
         config = load_transport_config()
         self.assertEqual(config.sqlite_access_mode, "immutable_snapshot")
         self.assertIn("sqlite_access_mode", config.to_dict())
@@ -404,6 +408,9 @@ class TestAccessModeConfigPlumbing(unittest.TestCase):
         )
 
         os.environ[FIE_SQLITE_ACCESS_MODE] = "not-a-mode"
+        # 6.8A: explicit DB target fixture so the access-mode refusal is
+        # the one that fires (not DATABASE_URL_MISSING).
+        os.environ["FIE_DATABASE_URL"] = "sqlite:///tmp/fie_r4_mode_fixture.db"
         with self.assertRaises(ConfigurationError) as cm:
             load_transport_config()
         self.assertEqual(cm.exception.code, "UNKNOWN_ACCESS_MODE")
@@ -420,6 +427,8 @@ class TestAccessModeConfigPlumbing(unittest.TestCase):
         )
 
         os.environ[FIE_SQLITE_ACCESS_MODE] = "readonly"
+        # 6.8A: explicit DB target fixture (no implicit default anymore).
+        os.environ["FIE_DATABASE_URL"] = "sqlite:///tmp/fie_r4_mode_fixture.db"
         self.assertEqual(load_transport_config().sqlite_access_mode, "readonly")
 
     def test_access_mode_vocabulary_matches_store_contract(self):

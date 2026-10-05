@@ -66,7 +66,10 @@ class TestDeploymentMatrix(_ProductionGate):
     def test_explicit_absolute_sqlite_allowed_in_local(self) -> None:
         with tempfile.TemporaryDirectory(prefix="fie-r4-") as tmp:
             absolute = f"{tmp}/{MARKER}.db"
-            config = self._load(FIE_DATABASE_URL=absolute)
+            # FIE_SERVICE_ENV="local" explicitly: hermetic vs the ambient
+            # runner profile (6.8A).
+            config = self._load(FIE_DATABASE_URL=absolute,
+                                FIE_SERVICE_ENV="local")
             self.assertEqual(config.service_env, "local")
             from phase3.persistence.backend import resolve_spec
 
@@ -102,7 +105,10 @@ class TestDeploymentMatrix(_ProductionGate):
                 store.close()
 
     def test_relative_sqlite_rejected_in_production_like(self) -> None:
-        from phase3.transport.http import run_server
+        # Phase 6.8A: a relative SQLite path is now a malformed target at
+        # the canonical resolver — it refuses at configuration
+        # resolution (DatabaseTargetError → ConfigurationError), before
+        # run_server is even reachable.
         from phase3.transport import load_transport_config
 
         saved = _env(
@@ -112,9 +118,8 @@ class TestDeploymentMatrix(_ProductionGate):
             FIE_AUTH_TOKEN="synthetic-prod-token",
         )
         try:
-            config = load_transport_config()  # config resolution passes…
             with self.assertRaises(ConfigurationError) as cm:
-                run_server(config)  # …the composition-root DSN gate refuses
+                load_transport_config()
             self.assertEqual(cm.exception.code, "DATABASE_URL_INVALID")
             self.assertNotIn(MARKER, cm.exception.message)
         finally:
@@ -150,11 +155,9 @@ class TestDeploymentMatrix(_ProductionGate):
         self.assertEqual(config.service_env, "staging")
 
     def test_malformed_db_url_refused_in_production_like(self) -> None:
-        from phase3.transport.http import run_server
-
-        # unsupported schemes are NOT SQLite-eligible absolute paths —
-        # they resolve to a CWD-relative garbage path and the
-        # composition-root gate refuses (R3-proved vocabulary)
+        # Phase 6.8A: unsupported schemes are malformed targets at the
+        # canonical resolver — they refuse at configuration resolution
+        # in every profile (no CWD-relative garbage path is materialized)
         for url in (f"postgrex://user@{MARKER}/db", "db://fie.db",
                     f"file://{MARKER}.db"):
             with self.subTest(url=url):
@@ -167,34 +170,38 @@ class TestDeploymentMatrix(_ProductionGate):
                     FIE_AUTH_TOKEN="synthetic-prod-token",
                 )
                 try:
-                    config = load_transport_config()
                     with self.assertRaises(ConfigurationError) as cm:
-                        run_server(config)
+                        load_transport_config()
                     self.assertEqual(cm.exception.code, "DATABASE_URL_INVALID")
                     self.assertNotIn(MARKER, cm.exception.message)
                 finally:
                     _restore(saved)
 
-    def test_malformed_db_url_in_local_is_honest_sqlite(self) -> None:
-        # local keeps the accepted compatibility boundary: the same
-        # unsupported scheme resolves as a relative SQLite path — the
-        # SQLite backend is SELECTED (no other backend silently chosen)
-        # and a broken path fails at open, never by switching backend.
-        from phase3.persistence.backend import resolve_spec, open_store
+    def test_unsupported_scheme_refuses_in_local_too(self) -> None:
+        # Phase 6.8A: the old "honest relative sqlite" local boundary is
+        # ABOLISHED — an unsupported scheme fails closed everywhere (the
+        # explicit resolver raises the fail-closed class; the composed
+        # transport surface translates it to DATABASE_URL_INVALID).
+        from phase3.persistence.backend import resolve_spec
+        from phase3.runtime_contract import FailClosedTarget
 
-        workdir = tempfile.mkdtemp(prefix="fie-r4-scheme-")
-        old_cwd = os.getcwd()
-        os.chdir(workdir)
+        with self.assertRaises(FailClosedTarget) as cm:
+            resolve_spec("db://unusual_local.db")
+        self.assertEqual(
+            cm.exception.reason, "FAIL_CLOSED_MALFORMED_DB_TARGET"
+        )
+
+        from phase3.transport import load_transport_config
+
+        saved = _env(FIE_DATABASE_URL="db://unusual_local.db",
+                     FIE_SERVICE_ENV="local")
         try:
-            spec = resolve_spec("db://unusual_local.db")
-            self.assertEqual(spec.backend, "sqlite")
-            with self.assertRaises(Exception):
-                open_store(spec)
+            with self.assertRaises(ConfigurationError) as cm:
+                load_transport_config()
+            self.assertEqual(cm.exception.code, "DATABASE_URL_INVALID")
+            self.assertNotIn("db://", cm.exception.message)
         finally:
-            os.chdir(old_cwd)
-            import shutil
-
-            shutil.rmtree(workdir, ignore_errors=True)
+            _restore(saved)
 
 
 def _psycopg_available() -> bool:
