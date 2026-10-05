@@ -68,10 +68,10 @@ class ParseTests(unittest.TestCase):
             parse_postgres_dsn("postgres://u@::1:5432/db")
 
     def test_encodings_decoded(self):
-        self.assertEqual(
-            parse_postgres_dsn(
-                "postgres://u%40x:p%2Fw@H%2FY%20case:5432/db%2Fname")["host"],
-            "h/y case")
+        ident = parse_postgres_dsn(
+            "postgres://u%40x@H%2FY%20case:5432/db%2Fname")
+        self.assertEqual(ident["host"], "h/y case")
+        self.assertEqual(ident["dbname"], "db/name")
 
     def test_rejects_missing_or_bad(self):
         for bad in ("", "host=1.2.3.4", "postgres://u@1.2.3.4/",
