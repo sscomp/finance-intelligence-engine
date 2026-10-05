@@ -190,3 +190,21 @@ Phase 6.8B 為 documentation publication only。本文件之存在不表示、�
 不排程任何 Codex Cloud 整合。任何「integration ready」的表述僅指
 architecture / contract readiness。implementation、enablement、deployment
 皆須另行授權。
+---
+
+## 13. 6.9A-R3 addendum — execution-infrastructure readiness (test side)
+
+本文件的 integration 契約（§1–§12）**不變**（PROPOSED / NOT IMPLEMENTED；
+本 addendum 亦不授權任何 live integration）。僅補充一個與之正交的事實紀錄：
+
+**6.9A-R3 已將 isolated test 基礎設施補齊至 fresh-clone re-entry-ready**：
+
+- `scripts/provision-test-postgres.sh` = ONE canonical repository-owned
+  ephemeral PostgreSQL provisioning boundary（discovery > pinned、
+  sha256-verified portable distribution from Maven Central）。
+- `scripts/test-cloud.sh` source 該唯一實作;fresh clone 冷 cache 實證
+  acquire → provision → validate → teardown。
+- **Codex Cloud execution 仍 NOT VALIDATED**——remediation 是
+  repository-ready / re-entry-ready,但一個後續 fresh cloud job 獨立
+  rerun 全套 validation 之前不得宣稱 support。credential/integration
+  面維持 §6 禁止項不變。

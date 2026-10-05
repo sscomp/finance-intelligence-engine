@@ -1,7 +1,11 @@
-# Cloud Execution Contract (Phase 6.8C)
+# Cloud Execution Contract (Phase 6.8C; updated 6.9A-R3)
 
 > **Status**: `REPOSITORY_EXECUTION_READY — NOT AN INTEGRATION`
 > `CODEX_CLOUD_INTEGRATION_IMPLEMENTED=false` · `CODEX_CLOUD_RUNTIME_ENABLED=false` · `CODEX_CLOUD_DEPLOYED=false`
+> **6.9A-R3 update**: isolated PostgreSQL provisioning is now repository-owned
+> (portable acquisition path). Remediation is repository-ready / re-entry-ready,
+> but Codex Cloud execution is **NOT VALIDATED** until a subsequent fresh cloud
+> job independently passes. 本文件**不**使用「Codex Cloud supported」或等效詞彙。
 >
 > 本文件定義 **repository 本身的 acquisition / bootstrap / test / artifact 契約**，
 > 使任何全新、無本機歷史狀態、無 Production credential 的 ephemeral execution
@@ -59,20 +63,38 @@ tests 本身 bind ephemeral 端口，非必要）、`FIE_VENV_DIR`、`FIE_PYTHON
 | `FIE_PRODUCTION_DB_CONTRACT` 指向真實 operator 檔案 | production identity 只允許 synthetic fixture；「DSN-free / 不可讀」契約集一律 fail-closed（6.8C 修復強制） |
 | caller-provided 非 loopback / 非 `/tmp` socket 的 test DSN | target identity 無法證明非 Production → FAIL CLOSED |
 
-## 4. Isolated PostgreSQL provisioning assumption
+## 4. Isolated PostgreSQL provisioning (6.9A-R3 — repository-owned)
 
-- **預設（cloud）**：`scripts/test-cloud.sh` 在沒有 `FIE_TEST_PG_DSN` 與 PG tooling 時
-  以 SQLite-only 跑（PG legs skip-with-reason，不會 fail）；有 PG tooling（`initdb`/
-  `pg_ctl` on PATH 或 `/usr/lib/postgresql/*/bin`）時自动 provision：使用者級
-  trust-auth cluster、`$TMPDIR` socket、per-run port（預設 54331）、run 結束即销毀。
-  **encoding 一律 pinned `--encoding=UTF8 --locale=C.UTF-8`** 並在 start 後驗證
-  `server_encoding == UTF8`（scrubbed 環境/locale 缺失下 initdb 會得到
-  SQL_ASCII，使 psycopg 以 bytes 回覆 TEXT — 6.8C fresh-clone finding；不符
-  → 以明確原因 skip PG legs，不會誤判 PASS）。
-- **Caller-provided**：`FIE_TEST_PG_DSN` 僅接受 `/tmp` socket 或 loopback 形式，
-  且 preflight 以 production identity contract 證明非 Production（operator host 上
-  契約檔存在 → identity 比對；DSN-free/missing → FAIL CLOSED）並驗證
-  `server_encoding == UTF8`（否則 exit 78）。
+- **Canonical boundary（ONE implementation）**：`scripts/provision-test-postgres.sh`
+  （sourceable library + standalone shape；詳見
+  [ephemeral-postgresql-provisioning.md](ephemeral-postgresql-provisioning.md)）。
+  `scripts/test-cloud.sh` **source** 此實作 — 沒有第二個 provisioning 路徑。
+- **預設（有 caller DSN）**：`FIE_TEST_PG_DSN` 僅接受 loopback TCP 或 `/tmp`
+  socket 形式，且 preflight 以 production identity contract 證明非 Production
+  （operator host 上契約檔存在 → identity 比對；DSN-free/missing →
+  **FAIL CLOSED exit 78**）並驗證 `server_encoding == UTF8`（否則 exit 78）。
+- **預設（無 caller DSN）**：entrypoint 呼叫 canonical provisioner 的
+  `fie_test_pg_start`：
+  1. discovery first（`FIE_TEST_PG_BIN` > `/usr/lib/postgresql/<N>/bin` > PATH `initdb`）；
+  2. 無系統 tooling 時 → **portable distribution** 自 Maven Central，
+     version pinned `18.4.0`（== Production major.minor）、published sha256
+     sidecar 驗證、cache 於 `$HOME/.cache/fie/test-postgres`（每次 HIT 重新
+     驗證 jar sha256）、no sudo、no interactive prompt、no global daemon、
+     no system PG config mutation（**Codex Cloud 上沒有 `initdb`/`pg_ctl`
+     的 R2 根因就此補齊**）；
+  3. platform 支援面：Linux x86_64/aarch64；其他 →
+     `POSTGRESQL_PLATFORM_UNSUPPORTED`（exit 90），**fail-closed，無 fallback，
+     永不降級到 Production**；
+  4. job-owned identity：per-run TMPDIR、隨機 synthetic user/db/password
+     （0600 job TMPDIR 內）、loopback-only bind（有 per-line proof）、UTF-8
+     pinned、ownership marker、per-run random port。**任何 caller PG DSN
+     candidate → exit 78（值永不列入）**；
+  5. readiness（process + TCP scram auth + DB identity + UTF-8 + guard）
+     全部通過才 export passwordless socket DSN；teardown 是 ownership-proven、
+     idempotent，**只**移除本 job 的 cluster/dir（雙 cluster NC 證明）。
+- **Provisioning 失敗的下游語意**：PG legs skip-with-reason（classification
+  明示）。**永不**靜默 SQLite fallback（SQLite 是 rollback/recovery only）、
+  **永不** Production fallback。
 - Production DSN ≠ test DSN、Production hostname/data/credential 均不需要。
 
 ## 5. Test commands（canonical entrypoints）
@@ -105,7 +127,9 @@ PRODUCTION_CREDENTIAL_IN_CLOUD_PROFILE      = forbidden（不需要；preflight 
 SILENT SQLITE FALLBACK                      = forbidden（SQLite = ROLLBACK/RECOVERY ONLY，
                                               缺 target 一律 refuse，永不 fallback）
 FORCE PUSH / HISTORY REWRITE                = forbidden（repository 層，另見 work order）
-NETWORK ACCESS（測試）                        = 不需要（suite deterministic, offline-safe）
+NETWORK ACCESS（測試）                        = 不需要（suite deterministic, offline-safe）；
+                                              portable acquisition（首次無系統 tooling 時）
+                                              = 需要 Maven Central 一次取得（cached 之後離線）
 ```
 
 ## 8. Failure semantics
@@ -128,6 +152,14 @@ Codex Cloud live integration: NOT_IMPLEMENTED         （本階段不實作）
 Codex Cloud runtime/adapter behavior: PROPOSED, TO_BE_VALIDATED_IN_PHASE_6_9
 Codex Cloud credential provisioning: FORBIDDEN（本階段不進行）
 Repository execution readiness: READY（本契約 §1–§9 已由 fresh-clone 驗證）
+Isolated PG provisioning (6.9A-R3): REPOSITORY-READY / RE-ENTRY-READY
+  （portable acquisition + canonical provisioner；fresh-clone 於 operator
+   host 以冷 cache 實證取得、provision、validate、teardown）
+Codex Cloud execution validation: NOT VALIDATED
+  （直到一個後續的 fresh cloud job 獨立 rerun 全套 validation；本文件
+   不標稱 "Codex Cloud supported" — Remediation 仍為 repository 遺產）
+Next gate (owner-initiated): 6.9A-R4 fresh cloud re-entry —
+  acquisition → bootstrap → provision → tests → teardown, fully isolated
 ```
 
 下一階段（Phase 6.9A，需 Owner 另行授權）第一個 Cloud gate 只驗證
@@ -137,4 +169,8 @@ credential 或 Production mutation capability。
 ---
 
 *Change record: Phase 6.8C（2026-10-05）— repository productionization hygiene;
-authoritative DB architecture 與 readiness 提案仍以 6.7B/6.8A/6.8B 已接受文件為準。*
+authoritative DB architecture 與 readiness 提案仍以 6.7B/6.8A/6.8B 已接受文件為準。
+Phase 6.9A-R3（2026-10-05）— §4 rewritten: canonical repository-owned
+ephemeral PostgreSQL provisioning（portable acquisition path）replaces the
+inline best-effort provisioning; §7 network note and §10 status updated.
+Codex Cloud execution remains NOT VALIDATED until fresh re-entry.*

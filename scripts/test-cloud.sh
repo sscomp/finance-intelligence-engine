@@ -11,12 +11,17 @@
 #     caller is dropped, then the contract-declared rehearsal profile is
 #     set explicitly (FIE_SERVICE_ENV=test). Production credentials are
 #     never required and never consulted.
-#   * ISOLATED PostgreSQL: FIE_TEST_PG_DSN wins if provided (then asserted
-#     non-Production: loopback socket/loopback TCP only — any other host or
-#     an unprovable target fails closed before tests run); otherwise this
-#     script provisions a fresh ephemeral cluster (trust auth, user-level,
-#     $TMPDIR socket, per-run port) when PG tooling is available, or runs
-#     SQLite-only with PG legs skipping by their documented reason.
+#   * ISOLATED PostgreSQL (6.9A-R3): FIE_TEST_PG_DSN wins if provided (then
+#     asserted non-Production: loopback socket/loopback TCP only — any other
+#     host or an unprovable target fails closed before tests run). Otherwise
+#     the canonical provisioner (scripts/provision-test-postgres.sh) owns
+#     the target: discovered server tooling first, then a pinned,
+#     sha256-verified portable PostgreSQL distribution — a host with NO
+#     initdb/pg_ctl still gets a real ephemeral cluster (loopback-only,
+#     UTF-8, synthetic identity; teardown removes ONLY that job). If even
+#     acquisition cannot succeed the PG legs SKIP with their explicit
+#     classification — never a silent SQLite fallback, never a Production
+#     fallback.
 #   * Production DSN negative controls are executed (run
 #     scripts/cloud_negative_controls.py) — cloud-readiness set includes it,
 #     full regression appends it as a final gate.
@@ -48,7 +53,7 @@ fi
 
 # ---- scrubbed, contract-declared environment -----------------------------
 CALLER_TEST_PG_DSN="${FIE_TEST_PG_DSN:-}"
-CALLER_TEST_PG_PORT="${FIE_TEST_PG_PORT:-}"
+CALLER_FORCE_PORTABLE="${FIE_TEST_PG_FORCE_PORTABLE:-}"
 for v in $(env | grep -oE '^FIE_[A-Za-z0-9_]+' | tr '\n' ' '); do unset "${v}" || true; done
 unset PGPASSWORD 2>/dev/null || true
 export FIE_SERVICE_ENV=test
@@ -56,18 +61,32 @@ export FIE_HTTP_PORT="${FIE_HTTP_PORT:-18720}"
 export PYTHONPATH="${REPO}"
 export ARTIFACT_DIR=""
 
-TMPROOT="$(mktemp -d "${TMPDIR:-/tmp}/fie-cloud-test.XXXXXX")"
 EPHEMERAL=0
 cleanup() {
     if [ "${EPHEMERAL}" -eq 1 ]; then
-        "${PG_BINDIR}/pg_ctl" -D "${TMPROOT}/pgdata" -m fast stop \
-            >/dev/null 2>&1 || true
-        rm -rf -- "${TMPROOT}" 2>/dev/null || true
+        fie_test_pg_stop >/dev/null 2>&1 \
+            || echo "test-cloud: WARNING — teardown of self-provisioned cluster reported failure" >&2
     fi
 }
 trap cleanup EXIT
 
-# ---- isolated PostgreSQL provisioning (Task F) ---------------------------
+# ---- isolated PostgreSQL provisioning (canonical provisioner, 6.9A-R3) ----
+# One canonical implementation: scripts/provision-test-postgres.sh —
+# sourceable library; discovery > Maven-Central portable distribution
+# (pinned, sha256-verified). No caller DSN, no Production fallback,
+# loopback-only, UTF-8 pinned, synthetic identity; teardown stops ONLY this
+# job cluster.
+if [ ! -x "${REPO}/scripts/provision-test-postgres.sh" ]; then
+    echo "test-cloud: scripts/provision-test-postgres.sh missing (canonical provisioner)" >&2
+    exit 5
+fi
+# shellcheck disable=SC1091
+. "${REPO}/scripts/provision-test-postgres.sh"
+command -v fie_test_pg_start >/dev/null 2>&1 || {
+    echo "test-cloud: canonical provisioner library failed to load" >&2
+    exit 5
+}
+
 if [ -n "${CALLER_TEST_PG_DSN}" ]; then
     case "${CALLER_TEST_PG_DSN}" in
         *host=/tmp/*)
@@ -134,44 +153,18 @@ PREFLIGHT
     fi
     echo "test-cloud: using caller-provided isolated PG (FIE_TEST_PG_DSN)"
 else
-    PG_BINDIR=""
-    for d in /usr/lib/postgresql/18/bin /usr/lib/postgresql/*/bin; do
-        [ -x "${d}/initdb" ] && PG_BINDIR="${d}" && break
-    done
-    PGBIN_ALT="$(PATH="${PATH}" command -v initdb 2>/dev/null || true)"
-    if [ -z "${PG_BINDIR}" ] && [ -n "${PGBIN_ALT}" ]; then
-        PG_BINDIR="$(dirname -- "${PGBIN_ALT}")"
-    fi
-    if [ -n "${PG_BINDIR}" ]; then
-        PGPORT_TEST="${CALLER_TEST_PG_PORT:-54331}"
-        echo "test-cloud: provisioning ephemeral PG cluster (${PG_BINDIR}, port ${PGPORT_TEST})"
-        # Encoding is pinned explicitly, NOT inherited from ambient locale
-        # (6.8C fresh-clone finding): under a scrubbed env (env -i / POSIX
-        # locale) initdb leaves server_encoding=SQL_ASCII, and psycopg then
-        # returns TEXT values as bytes — every text-comparison contract test
-        # fails. C.UTF-8 is provided by base glibc (>=2.35), no locale-gen
-        # service needed.
-        mkdir -p "${TMPROOT}/pgdata"
-        if ! "${PG_BINDIR}/initdb" -D "${TMPROOT}/pgdata" -U fie --auth=trust \
-                --encoding=UTF8 --locale=C.UTF-8 \
-                >/dev/null 2>&1; then
-            echo "test-cloud: initdb failed; PG legs will skip (documented reason)" >&2
-            "${PG_BINDIR}/initdb" -D "${TMPROOT}/pgdata" -U fie --auth=trust \
-                --encoding=UTF8 --locale=C.UTF-8 2>&1 | tail -5 >&2 || true
-        else
-            "${PG_BINDIR}/pg_ctl" -D "${TMPROOT}/pgdata" -l "${TMPROOT}/pg.log" \
-                -w -t 60 -o "-p ${PGPORT_TEST} -k ${TMPROOT}" start >/dev/null 2>&1 \
-                && "${PG_BINDIR}/createdb" -h "${TMPROOT}" -p "${PGPORT_TEST}" -U fie fie_test \
-                && ENC="$("${PG_BINDIR}/psql" -h "${TMPROOT}" -p "${PGPORT_TEST}" \
-                        -U fie -d postgres -Atc "SHOW server_encoding" 2>/dev/null)" \
-                && [ "${ENC}" = "UTF8" ] \
-                && export FIE_TEST_PG_DSN="postgresql://fie@/fie_test?host=${TMPROOT}&port=${PGPORT_TEST}" \
-                && EPHEMERAL=1 \
-                || { echo "test-cloud: ephemeral cluster start/encoding check failed" \
-                           "(server_encoding must be UTF8); PG legs skip" >&2; }
-        fi
+    # No caller DSN: the canonical provisioner owns the target. It discovers
+    # system PG tooling first (same preference order as before), then falls
+    # back to the pinned, sha256-verified portable distribution (R3): a job
+    # with NO initdb/pg_ctl on the host still gets a real PostgreSQL server,
+    # never a silent SQLite fallback, never a Production fallback.
+    if fie_test_pg_start ${CALLER_FORCE_PORTABLE:+--force-portable}; then
+        export FIE_TEST_PG_DSN
+        EPHEMERAL=1
     else
-        echo "test-cloud: no PG tooling found; running SQLite-only (PG legs skip with documented reason)"
+        echo "test-cloud: PG legs will SKIP — ephemeral PG provisioning" \
+            "unavailable (classification printed above; never a silent" \
+            "SQLite fallback, never a Production fallback)" >&2
     fi
 fi
 
@@ -199,6 +192,7 @@ else
         tests.phase3.persistence.test_67b_r4_sqlite_policy \
         tests.phase3.test_raw_layer_contract_matrix \
         tests.test_rehearsal_wrapper_guard \
+        tests.test_cloud_pg_provisioning \
         tests.test_rehearsal_guard_zero_write_invariant \
         tests.test_wrapper_guard_68a \
         tests.test_db_target_identity

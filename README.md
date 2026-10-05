@@ -16,11 +16,13 @@ Finance Intelligence Engine（FIE）是一套針對台灣股市的投資研究�
 | **SQLite** | **ROLLBACK / RECOVERY SOURCE ONLY** — 不是 production default、不是 silent fallback；操作需 explicit rollback contract |
 | **DB target 決定方式** | explicit arg ＞ canonical env（`FIE_DB_TARGET_*`）＞ legacy alias（`FIE_DB_PATH` / `FIE_DATABASE_URL` / `FIE_INTELLIGENCE_DB`）＞ **fail-closed（無任何預設）**；single canonical resolver：`phase3/runtime_contract.py` |
 | **Production credentials** | operator-owned 0600 env contract files（**git 之外**；任何 secret-bearing env file 不得入 Git） |
-| **Codex Cloud** | **NOT IMPLEMENTED / NOT ENABLED / NOT DEPLOYED** — 僅 readiness 架構與 API 提案文件（PROPOSED/FUTURE） |
+| **Codex Cloud** | **NOT IMPLEMENTED / NOT ENABLED / NOT DEPLOYED** — 僅 readiness 架構與 API 提案文件（PROPOSED/FUTURE）；execution validation **NOT VALIDATED**（6.9A-R3） |
+| **Isolated test PG provisioning** | repository-owned `scripts/provision-test-postgres.sh`（6.9A-R3）：discovery > pinned portable distribution（Maven Central, sha256-verified）— fresh clone 無系統 `initdb`/`pg_ctl` 仍得真實 ephemeral PG |
 
 詳細架構：[PostgreSQL Production Architecture](docs/architecture/postgresql-production-architecture.md)、
 [Codex Cloud Integration Readiness](docs/architecture/codex-cloud-integration-readiness.md)、
-[Cloud Execution Contract（Phase 6.8C：fresh-clone bootstrap / isolated test 契約）](docs/architecture/cloud-execution-contract.md)、
+[Cloud Execution Contract（Phase 6.8C：fresh-clone bootstrap / isolated test 契約；6.9A-R3 更新）](docs/architecture/cloud-execution-contract.md)、
+[Ephemeral Test-PostgreSQL Provisioning Contract（6.9A-R3）](docs/architecture/ephemeral-postgresql-provisioning.md)、
 production baselines（[FIE_6_7B](docs/production/FIE_6_7B_PRODUCTION_BASELINE.md) /
 [ABACUS_FIE_6_7B](docs/production/ABACUS_FIE_6_7B_PRODUCTION_BASELINE.md)）。
 
@@ -151,7 +153,8 @@ macro-report/
 │   └── ...
 ├── scripts/                      # canonical bootstrap / cloud-safe test / DB-target guard
 │   ├── bootstrap.sh              # 一鍵 venv + 宣告安裝（idempotent；6.8C）
-│   ├── test-cloud.sh             # 雲端安全隔離測試入口（scrubbed env + ephemeral PG；6.8C）
+│   ├── test-cloud.sh             # 雲端安全隔離測試入口（scrubbed env + canonical provisioner；6.8C/R3）
+│   ├── provision-test-postgres.sh# canonical ephemeral PG provisioner（portable distribution；6.9A-R3）
 │   ├── cloud_negative_controls.py# runtime fail-closed 負向控制（8 情境；6.8C）
 │   ├── rehearsal_db_guard.sh     # fail-closed DB-target guard（shell boundary）
 │   └── db_target_identity.py     # guard 的 stdin 指紋 adapter（薄層）
@@ -504,7 +507,12 @@ python -m phase3.cli cross-layer-impact --node "score:macro:global" --db-path /t
 > **⚠️ 6.8C 說明**：以下「執行測試」小節為歷史手動形式（可攜但無隔離保障）。
 > **canonical 入口**請用 `scripts/test-cloud.sh`（scrubbed env + 隔離 PostgreSQL +
 > 負向控制 + 自動清理；契約見
-> [Cloud Execution Contract](docs/architecture/cloud-execution-contract.md)）。
+> [Cloud Execution Contract](docs/architecture/cloud-execution-contract.md) 與
+> [Ephemeral Test-PostgreSQL Provisioning](docs/architecture/ephemeral-postgresql-provisioning.md)）。
+> 6.9A-R3：fresh clone 即使**無**系統 PostgreSQL tooling，test-cloud 仍會經由
+> canonical provisioner 以 pinned、sha256-verified 的 portable PostgreSQL
+> distribution 起出真實 ephemeral cluster（首次取得需 Maven Central 網路；
+> cached 之後離線）。
 > `FIE_HTTP_PORT=18720` 等覆寫**僅**在服務並存主機上需要；transport tests 本身
 > bind ephemeral 端口，可攜環境不須設定。
 
