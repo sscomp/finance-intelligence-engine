@@ -55,6 +55,23 @@ def _test_pg_endpoint() -> tuple[str, int]:
     return "/tmp/fie-pg", 54329
 
 
+def _test_pg_user() -> str:
+    """Admin/role user of the disposable test cluster.
+
+    6.9A-R3: the canonical provisioner owns per-run synthetic roles, so the
+    user follows ``FIE_TEST_PG_DSN`` userinfo (never hardcoded 'fie' — the
+    provisioner's roles are random per job); the static disposable default
+    keeps its historical 'fie'.
+    """
+    dsn = os.environ.get("FIE_TEST_PG_DSN", "")
+    if dsn:
+        from urllib.parse import urlsplit
+        user = urlsplit(dsn).username
+        if user:
+            return user
+    return "fie"
+
+
 def _pg_available() -> tuple[bool, str]:
     try:
         import psycopg  # noqa: F401
@@ -85,8 +102,9 @@ def _pg_dsn_for(name: str) -> str:
     # 6.8C: the per-run database name is still used for the disposable
     # databases created below, but host/port/socket-dir now follow the
     # FIE_TEST_PG_DSN override when set (portable test-host provisioning).
+    # 6.9A-R3: the role user follows the DSN userinfo as well.
     host, port = _test_pg_endpoint()
-    return f"postgresql://fie@/{name}?host={host}&port={port}"
+    return f"postgresql://{_test_pg_user()}@/{name}?host={host}&port={port}"
 
 
 @unittest.skipUnless(PG_OK, PG_SKIP_REASON)
@@ -96,7 +114,8 @@ class RawLayerPostgresTests(unittest.TestCase):
     @classmethod
     def _ADMIN_DSN(cls) -> str:
         host, port = _test_pg_endpoint()
-        return f"postgresql://fie@/postgres?host={host}&port={port}"
+        return (f"postgresql://{_test_pg_user()}@/postgres"
+                f"?host={host}&port={port}")
 
     @classmethod
     def _admin(cls, sql: str) -> None:
