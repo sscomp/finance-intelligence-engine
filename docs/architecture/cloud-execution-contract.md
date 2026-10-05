@@ -78,10 +78,18 @@ tests 本身 bind ephemeral 端口，非必要）、`FIE_VENV_DIR`、`FIE_PYTHON
   1. discovery first（`FIE_TEST_PG_BIN` > `/usr/lib/postgresql/<N>/bin` > PATH `initdb`）；
   2. 無系統 tooling 時 → **portable distribution** 自 Maven Central，
      version pinned `18.4.0`（== Production major.minor）、published sha256
-     sidecar 驗證、cache 於 `$HOME/.cache/fie/test-postgres`（每次 HIT 重新
-     驗證 jar sha256）、no sudo、no interactive prompt、no global daemon、
-     no system PG config mutation（**Codex Cloud 上沒有 `initdb`/`pg_ctl`
-     的 R2 根因就此補齊**）；
+     sidecar 驗證、cache 經 **R4-R1 canonical writable-runtime resolver**
+     （`FIE_TEST_PG_CACHE_DIR` explicit override（不可用 → fail-closed 97）
+     > `XDG_CACHE_HOME` > `$HOME/.cache/fie/test-postgres`（probe-proven；
+     `$HOME` 存在≠可寫 — R4 root cause）> job-local temp fallback
+     （`${TMPDIR:-/tmp}` 下 per-invocation `mktemp -d` 唯一、marker-proven；
+     `$HOME/.cache` 不可寫的 managed filesystem（如 Codex Cloud）不需要 owner
+     端環境自訂即可取得）；每次 HIT 重新驗證 jar sha256；cold acquisition
+     走 `.partial.*`/`.stage.*` → validate → atomic promotion；persistent
+     cache 以 flock serialize）、no sudo、no interactive prompt、no global
+     daemon、no system PG config mutation（**Codex Cloud 上沒有
+     `initdb`/`pg_ctl` 的 R2 根因就此補齊；R4 的 cache-path blocker
+     已於 R4-R1 修補**）；
   3. platform 支援面：Linux x86_64/aarch64；其他 →
      `POSTGRESQL_PLATFORM_UNSUPPORTED`（exit 90），**fail-closed，無 fallback，
      永不降級到 Production**；

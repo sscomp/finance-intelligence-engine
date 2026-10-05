@@ -50,22 +50,40 @@ TEST_CLOUD = REPO / "scripts" / "test-cloud.sh"
 BOOTSTRAP = REPO / "scripts" / "bootstrap.sh"
 VENV_PY = REPO / ".venv" / "bin" / "python3"
 
-# The portable acquisition cache — SAME resolution as the provisioner's
-# `_portable_pg_cache_dir` (explicit override wins, else ~/.cache/…).
+# The portable acquisition cache reference for test children. The override
+# is set ONLY when it is actually usable (R4-R1: an unusable explicit
+# override is a fail-closed hard contract — forcing one on a managed
+# filesystem would break every portable-legged child instead of letting the
+# canonical resolver inside each child pick its documented fallback).
 _CACHE_DIR = os.environ.get("FIE_TEST_PG_CACHE_DIR",
                             str(Path.home() / ".cache" / "fie"
                                 / "test-postgres"))
 
 
+def _path_probe_writable(d):
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        probe = d / ".test-writable-probe"
+        probe.write_text("x", encoding="ascii")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
 def _child_env(blob=None):
-    """Realistic execution env: no operator FIE_* / PGPASSWORD leaks, and
-    a deterministic portable-cache location for the child."""
+    """Realistic execution env: no operator FIE_* / PGPASSWORD leaks, and a
+    deterministic portable-cache location for the child — but only when
+    that override location is usable (otherwise the child gets NO override
+    and resolves its own cache through the canonical resolver)."""
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": "/tmp",
         "PWD": str(REPO),
-        "FIE_TEST_PG_CACHE_DIR": _CACHE_DIR,
     }
+    if os.environ.get("FIE_TEST_PG_CACHE_DIR") or \
+            _path_probe_writable(Path(_CACHE_DIR)):
+        env["FIE_TEST_PG_CACHE_DIR"] = _CACHE_DIR
     if blob:
         env.update(blob)
     return env

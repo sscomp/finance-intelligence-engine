@@ -67,6 +67,12 @@ cleanup() {
         fie_test_pg_stop >/dev/null 2>&1 \
             || echo "test-cloud: WARNING — teardown of self-provisioned cluster reported failure" >&2
     fi
+    # R4-R1: a temp-mode (job-local) portable cache created by THIS scope is
+    # job-owned ephemeral runtime state — remove it ONLY after the job
+    # cluster is stopped (the provisioner's cleanup removes ONLY the dir it
+    # created and marker-proves; a persistent cache is never touched).
+    fie_test_pg_cache_cleanup >/dev/null 2>&1 \
+        || echo "test-cloud: WARNING — temp-mode cache cleanup reported failure" >&2
 }
 trap cleanup EXIT
 
@@ -193,6 +199,7 @@ else
         tests.phase3.test_raw_layer_contract_matrix \
         tests.test_rehearsal_wrapper_guard \
         tests.test_cloud_pg_provisioning \
+        tests.test_cloud_pg_cache_resolver \
         tests.test_rehearsal_guard_zero_write_invariant \
         tests.test_wrapper_guard_68a \
         tests.test_db_target_identity

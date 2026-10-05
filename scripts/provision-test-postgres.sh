@@ -10,7 +10,7 @@
 #   * standalone script   scripts/provision-test-postgres.sh --ensure-cache
 #                         scripts/provision-test-postgres.sh --start
 #                         scripts/provision-test-postgres.sh --stop <dir>
-#                         scripts/provision-test-postgres.sh --run <child…>
+#                         scripts/provision-test-postgres.sh --run [--force-portable] <child…>
 #
 # Contract (ABACUS_FIE_6_9A_R3 §6 — MUST-holds):
 #   * NEVER reads/uses/falls back to a Production DSN, the fie_prod data
@@ -50,6 +50,7 @@ _PROVISIONER_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-.}")" && pwd -P)"
 
 PG_GUARD_EXIT=78               # shared fail-closed exit class (6.8A)
 PG_EXIT_PLATFORM=90            # POSTGRESQL_PLATFORM_UNSUPPORTED
+PG_EXIT_CACHE_PATH=97          # POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE
 PG_EXIT_ARTIFACT=91            # POSTGRESQL_PORTABLE_ARTIFACT_UNAVAILABLE
 PG_EXIT_INTEGRITY=92           # POSTGRESQL_PORTABLE_ARTIFACT_INTEGRITY_FAILED
 PG_EXIT_INITDB=93              # POSTGRESQL_INITDB_FAILED
@@ -65,10 +66,149 @@ _pg_repo_root() {
 
 _random_hex() { python3 -c 'import secrets,sys; sys.stdout.write(secrets.token_hex(int(sys.argv[1])))' "${1-8}"; }
 
-# ---------------------------------------------------------------- acquisition
-_portable_pg_cache_dir() {
-    printf '%s' "${FIE_TEST_PG_CACHE_DIR:-${HOME:-/tmp}/.cache/fie/test-postgres}"
+# ---------------------------------------------------------------- canonical cache resolver (R4-R1)
+# ONE canonical writable-runtime resolver (ABACUS_FIE_6_9A_R4_R1 §6). The R4
+# defect: the shipped default cache root was `${HOME}/.cache/...` and a mere
+# `mkdir` failure there collapsed into POSTGRESQL_PLATFORM_UNSUPPORTED (exit
+# 90) — "$HOME is set" was treated as evidence of writability. In some
+# managed job filesystems HOME exists but the default cache location is on a
+# read-only filesystem (R4 blocker: `/home/agent/.cache` EROFS/EROFS-equivalent).
+# Resolution PROBES actual usability (creatable + write + unlink probe), so:
+#
+#   1. explicit FIE_TEST_PG_CACHE_DIR override — HARD contract: usable or
+#      fail closed (exit 97), NEVER a silent fallback;
+#   2. XDG_CACHE_HOME (only when defined) — `.../fie/test-postgres`;
+#   3. `${HOME}/.cache/fie/test-postgres` — only when probe-proven usable;
+#   4. isolated job-local temp fallback — `mktemp`-allocated FIE-owned
+#      directory under `${TMPDIR:-/tmp}` (unique per invocation, i.e.
+#      collision-safe for concurrent jobs; NEVER a static `/tmp/fie`).
+#
+# Sourceable-shape contract (globals set by the resolver):
+#   PG_CACHE_DIR            resolved cache root (probe-proven usable)
+#   PG_CACHE_MODE           explicit | xdg | home | temp
+#   PG_CACHE_PERSISTENT     yes (reusable across jobs) | no (job-local temp)
+#   PG_CACHE_TEMP_CREATED   set ONLY when THIS invocation created a temp dir
+#   PG_CACHE_TRACE          ';'-joined per-candidate rejection reasons
+#                           (class labels only; no paths, no values)
+#
+# TEMP-mode dirs carry a `fie_cache.owner` marker (format
+# `fie-6-9a-cache-v1`): they are reusable within this shell scope only
+# (memoized resolution), and `fie_test_pg_cache_cleanup` removes ONLY a dir
+# THIS invocation created and marker-proves — cleanup never touches a
+# persistent cache or a foreign temp dir.
+PG_CACHE_TEMP_CREATED=""
+
+_cache_trace_add() {  # <reason> (class labels only)
+    _FIE_CACHE_TRACE="${_FIE_CACHE_TRACE:+${_FIE_CACHE_TRACE};}${1}"
 }
+
+_cache_dir_usable_probe() {  # <label> <dir>: 0 iff creatable AND writable
+    local label="$1" dir="$2" probe
+    if [ -e "${dir}" ] && [ ! -d "${dir}" ]; then
+        _cache_trace_add "${label}:file-occupies-path"; return 1
+    fi
+    if ! mkdir -p -- "${dir}" 2>/dev/null; then
+        _cache_trace_add "${label}:not-creatable"; return 1
+    fi
+    probe="$(mktemp -q "${dir}/.fie-writable-probe.XXXXXX" 2>/dev/null)" || {
+        _cache_trace_add "${label}:not-writable"; return 1
+    }
+    rm -f -- "${probe}"
+    return 0
+}
+
+_fie_test_pg_cache_resolve() {  # sets PG_CACHE_DIR/MODE/PERSISTENT (+ trace)
+    local cand
+    _FIE_CACHE_TRACE=""
+    # In-scope memo: a dir resolved by THIS shell scope stays valid while it
+    # remains usable; the TEMP-mode memo gives one acquisition per scope
+    # (test-cloud / --run provision exactly once per scope).
+    if [ -n "${_FIE_CACHE_RESOLVED_DIR:-}" ] &&
+        _cache_dir_usable_probe memo "${_FIE_CACHE_RESOLVED_DIR}"; then
+        PG_CACHE_DIR="${_FIE_CACHE_RESOLVED_DIR}"
+        PG_CACHE_MODE="${_FIE_CACHE_RESOLVED_MODE}"
+        PG_CACHE_PERSISTENT="${_FIE_CACHE_RESOLVED_PERSISTENT}"
+        return 0
+    fi
+    if [ -n "${FIE_TEST_PG_CACHE_DIR:-}" ]; then
+        # 1. explicit override — hard contract; unusable => fail closed
+        if _cache_dir_usable_probe override "${FIE_TEST_PG_CACHE_DIR}"; then
+            PG_CACHE_DIR="${FIE_TEST_PG_CACHE_DIR}"
+            PG_CACHE_MODE="explicit"
+            PG_CACHE_PERSISTENT="yes"
+        else
+            _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE explicit FIE_TEST_PG_CACHE_DIR override is not creatable/writable on this filesystem (value withheld); refusing to fall back (override is a hard contract)"
+            return "${PG_EXIT_CACHE_PATH}"
+        fi
+    elif [ -n "${XDG_CACHE_HOME:-}" ] &&
+        _cache_dir_usable_probe xdg "${XDG_CACHE_HOME%/}/fie/test-postgres"; then
+        # 2. XDG cache (probe-proven usable)
+        PG_CACHE_DIR="${XDG_CACHE_HOME%/}/fie/test-postgres"
+        PG_CACHE_MODE="xdg"
+        PG_CACHE_PERSISTENT="yes"
+    elif [ -n "${HOME:-}" ] &&
+        _cache_dir_usable_probe home "${HOME%/}/.cache/fie/test-postgres"; then
+        # 3. HOME cache — only when actually unusable rejects fall through;
+        #    "$HOME is set" is NOT evidence of writability (R4 root cause)
+        PG_CACHE_DIR="${HOME%/}/.cache/fie/test-postgres"
+        PG_CACHE_MODE="home"
+        PG_CACHE_PERSISTENT="yes"
+    else
+        # 4. isolated job-local temp fallback
+        local tmproot="${TMPDIR:-/tmp}"
+        if [ ! -d "${tmproot}" ] ||
+            ! _cache_dir_usable_probe temp-root "${tmproot}"; then
+            _cache_trace_add "temp-root-unusable"
+            _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE no creatable/writable cache-runtime candidate exists on this filesystem (rejected: ${_FIE_CACHE_TRACE}); provisioning refused"
+            return "${PG_EXIT_CACHE_PATH}"
+        fi
+        cand="$(mktemp -d "${tmproot%/}/fie-pgcache.XXXXXX" 2>/dev/null)" || {
+            _cache_trace_add "temp-unique-alloc-failed"
+            _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE no creatable/writable cache-runtime candidate exists on this filesystem (rejected: ${_FIE_CACHE_TRACE}); provisioning refused"
+            return "${PG_EXIT_CACHE_PATH}"
+        }
+        chmod 700 "${cand}" 2>/dev/null || true
+        (umask 077 && printf 'format=fie-6-9a-cache-v1\ncreated_utc=%s\nephemeral=yes\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)") > "${cand}/fie_cache.owner"
+        PG_CACHE_DIR="${cand}"
+        PG_CACHE_MODE="temp"
+        PG_CACHE_PERSISTENT="no"
+        PG_CACHE_TEMP_CREATED="${cand}"
+    fi
+    _FIE_CACHE_RESOLVED_DIR="${PG_CACHE_DIR}"
+    _FIE_CACHE_RESOLVED_MODE="${PG_CACHE_MODE}"
+    _FIE_CACHE_RESOLVED_PERSISTENT="${PG_CACHE_PERSISTENT}"
+    echo "provision-test-postgres: cache resolver: mode=${PG_CACHE_MODE} persistent=${PG_CACHE_PERSISTENT}${_FIE_CACHE_TRACE:+ (rejected: ${_FIE_CACHE_TRACE})}" >&2
+    return 0
+}
+
+# TEMP-mode cache cleanup: removes ONLY the temp dir THIS invocation created,
+# and only when the marker proves it is FIE-owned (ownership unprovable => refuse).
+fie_test_pg_cache_cleanup() {
+    local dir="${PG_CACHE_TEMP_CREATED:-}"
+    [ -n "${dir}" ] || return 0
+    if [ ! -d "${dir}" ]; then
+        PG_CACHE_TEMP_CREATED=""
+        return 0
+    fi
+    if ! grep -q "^format=fie-6-9a-cache-v1$" "${dir}/fie_cache.owner" 2>/dev/null; then
+        _die "POSTGRESQL_TEARDOWN_FAILED temp cache ${dir##*/} lacks the FIE ownership marker; refusing removal (ownership unprovable)"
+        return "${PG_EXIT_TEARDOWN}"
+    fi
+    if ! rm -rf -- "${dir}" 2>/dev/null; then
+        _die "POSTGRESQL_TEARDOWN_FAILED temp cache cleanup failed"
+        return "${PG_EXIT_TEARDOWN}"
+    fi
+    if [ -d "${dir}" ]; then
+        _die "POSTGRESQL_TEARDOWN_FAILED temp cache still present after cleanup"
+        return "${PG_EXIT_TEARDOWN}"
+    fi
+    PG_CACHE_TEMP_CREATED=""
+    echo "provision-test-postgres: temp-mode cache removed (job-owned ephemeral only)"
+    return 0
+}
+
+# ---------------------------------------------------------------- acquisition
 
 _portable_pg_arch() {
     case "$(uname -m)" in
@@ -111,12 +251,149 @@ _cache_sha_verify() {  # <cachedir>: stored jar vs stored sidecar (quiet)
         sha256sum -c --status - >/dev/null 2>&1)
 }
 
+# R4-R1: only FIE portable-artifact-class names may live in a cache dir that
+# the cold path will create/replace entries in. ANY other (foreign) entry
+# makes the cache dir unprovable-to-own: fail closed, never delete anything.
+_cache_dir_entries_check() {  # <cachedir>: prints "OK" or "FOREIGN|<class>"
+    python3 - "$1" <<'PY'
+import re, sys
+allowed = re.compile(
+    r"(portable-postgres\.jar|artifact\.sha256|\.acquire\.lock|"
+    r"fie_cache\.(owner|format)|\.fie-writable-probe\.[A-Za-z0-9]{6}|"
+    r"\.partial\.\d+\.[0-9a-f]{8}\.(jar|sha256)|\.stage\.\d+\.[0-9a-f]{8}|"
+    r"embedded-postgres-binaries-[A-Za-z0-9._-]+\.txz)"
+    r"\Z").match
+for name in sorted(_ for _ in __import__("os").listdir(sys.argv[1])):
+    if name in ("bin", "lib", "share"):
+        continue
+    if not allowed(name):
+        print(f"FOREIGN|{name}")
+        sys.exit(0)
+print("OK")
+PY
+}
+
+# Cold-path acquire. Caller holds the acquisition lock (persistent caches
+# with flock available) or has an exclusive temp dir. Atomic-promotion
+# contract (R4-R1 §6.4): download to a NEVER-final `.partial.*` name, verify
+# sha256, extract/validate in a `.stage.*` dir, then promote bin/, lib/,
+# share/ first and the verified jar + sidecar LAST (completeness markers) —
+# an interrupted promotion is never mistaken for a valid cache entry.
+_cache_cold_acquire() {  # <cachedir> <base> <arch> <ver> <locked 0|1>
+    local cachedir="$1" base="$2" arch="$3" ver="$4" locked="$5"
+    local url sha_txt archive stage partial sidecar_tmp entry tmp_rnd
+    tmp_rnd="$( _random_hex 8)"
+    if _cache_complete "${cachedir}"; then  # re-check: an earlier lock waiter may have finished
+        if _cache_sha_verify "${cachedir}"; then
+            printf '%s\n' "${cachedir}"
+            return 0
+        fi
+        _die "POSTGRESQL_PORTABLE_ARTIFACT_INTEGRITY_FAILED cached artifact failed re-verification; refusing reuse"
+        return "${PG_EXIT_INTEGRITY}"
+    fi
+    case "$(_cache_dir_entries_check "${cachedir}")" in
+        OK) : ;;
+        FOREIGN*)
+            _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE resolved cache dir already contains non-portable-artifact content (name withheld); refusing to modify or clean anything (ownership unprovable)"
+            return "${PG_EXIT_CACHE_PATH}"
+            ;;
+    esac
+    url="${base}/embedded-postgres-binaries-${arch}/${ver}/embedded-postgres-binaries-${arch}-${ver}.jar"
+    sha_txt="$(_pg_download_to_stdout "${url}.sha256")" || {
+        _die "POSTGRESQL_PORTABLE_ARTIFACT_UNAVAILABLE published sha256 sidecar not reachable (network/404${FIE_TEST_PG_TEST_BASE_URL:+, test-url-override}); acquisition refused, no fallback"
+        return "${PG_EXIT_ARTIFACT}"
+    }
+    if ! printf '%s' "${sha_txt}" | grep -qE '^[0-9a-fA-F]{64}$'; then
+        _die "POSTGRESQL_PORTABLE_ARTIFACT_INTEGRITY_FAILED published sha256 sidecar has unexpected form"
+        return "${PG_EXIT_INTEGRITY}"
+    fi
+    echo "provision-test-postgres: acquiring portable PostgreSQL ${ver} (${arch}) into ${PG_CACHE_MODE}-mode cache" >&2
+    stage="${cachedir}/.stage.$$.${tmp_rnd}"
+    if ! mkdir -- "${stage}" 2>/dev/null; then
+        _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cannot create acquisition stage dir in cache"
+        return "${PG_EXIT_CACHE_PATH}"
+    fi
+    partial="${cachedir}/.partial.$$.${tmp_rnd}.jar"
+    sidecar_tmp="${cachedir}/.partial.$$.${tmp_rnd}.sha256"
+    printf '%s\n' "${sha_txt}" > "${sidecar_tmp}"
+    if ! _pg_download_to_file "${url}" "${partial}"; then
+        rm -f -- "${partial}" "${sidecar_tmp}"; rm -rf -- "${stage}"
+        _die "POSTGRESQL_PORTABLE_ARTIFACT_UNAVAILABLE artifact not reachable (network/404${FIE_TEST_PG_TEST_BASE_URL:+, test-url-override}); acquisition refused, no fallback"
+        return "${PG_EXIT_ARTIFACT}"
+    fi
+    if ! printf '%s  %s\n' "${sha_txt}" "$(basename -- "${partial}")" |
+            (cd "${cachedir}" && sha256sum -c --status >/dev/null 2>&1); then
+        rm -f -- "${partial}" "${sidecar_tmp}"; rm -rf -- "${stage}"
+        _die "POSTGRESQL_PORTABLE_ARTIFACT_INTEGRITY_FAILED downloaded artifact does not match the published sha256 sidecar; refusing install"
+        return "${PG_EXIT_INTEGRITY}"
+    fi
+    archive="$(python3 - "${partial}" "${stage}" <<'PY'
+import sys, zipfile
+jar, stage = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(jar) as f:
+    names = [n for n in f.namelist() if n.endswith(".txz") and "/" not in n]
+if len(names) != 1:
+    sys.exit(2)
+with zipfile.ZipFile(jar) as f:
+    f.extract(names[0], stage)
+print(names[0])
+PY
+    )" || {
+        rm -f -- "${partial}" "${sidecar_tmp}"; rm -rf -- "${stage}"
+        _die "POSTGRESQL_PORTABLE_ARTIFACT_INTEGRITY_FAILED jar archive members unexpected"
+        return "${PG_EXIT_INTEGRITY}"
+    }
+    if ! tar -xJf "${stage}/${archive}" -C "${stage}"; then
+        rm -f -- "${partial}" "${sidecar_tmp}"; rm -rf -- "${stage}"
+        _die "POSTGRESQL_PORTABLE_ARTIFACT_INTEGRITY_FAILED txz extraction failed"
+        return "${PG_EXIT_INTEGRITY}"
+    fi
+    rm -f -- "${stage}/${archive}"
+    if ! "${stage}/bin/initdb" --version >/dev/null 2>&1 ||
+        ! "${stage}/bin/pg_ctl" --version >/dev/null 2>&1; then
+        rm -f -- "${partial}" "${sidecar_tmp}"; rm -rf -- "${stage}"
+        _die "POSTGRESQL_PORTABLE_ARTIFACT_INTEGRITY_FAILED extracted portable binaries did not validate; installation refused"
+        return "${PG_EXIT_INTEGRITY}"
+    fi
+    # ---- promotion (validate-then-atomically-place) ---------------------
+    for entry in bin lib share; do
+        if [ -e "${stage}/${entry}" ]; then
+            if [ "${locked}" -eq 1 ] && [ -e "${cachedir}/${entry}" ]; then
+                rm -rf -- "${cachedir}/${entry}"   # stale crashed-promotion leftovers; lock proves exclusivity
+            fi
+            if [ -e "${cachedir}/${entry}" ]; then
+                rm -f -- "${partial}" "${sidecar_tmp}"; rm -rf -- "${stage}"
+                _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cache already contains '${entry}' and no acquisition lock is available; refusing to overwrite (ownership unprovable)"
+                return "${PG_EXIT_CACHE_PATH}"
+            fi
+            mv -- "${stage}/${entry}" "${cachedir}/${entry}"
+        fi
+    done
+    mv -- "${partial}" "${cachedir}/portable-postgres.jar"
+    mv -- "${sidecar_tmp}" "${cachedir}/artifact.sha256"
+    rmdir -- "${stage}" 2>/dev/null || rm -rf -- "${stage}"
+    if ! "${cachedir}/bin/initdb" --version >/dev/null 2>&1 ||
+        ! "${cachedir}/bin/pg_ctl" --version >/dev/null 2>&1 ||
+        [ ! -f "${cachedir}/portable-postgres.jar" ]; then
+        _die "POSTGRESQL_PORTABLE_ARTIFACT_INTEGRITY_FAILED installed portable binaries did not validate"
+        rm -rf -- "${cachedir}/bin" "${cachedir}/lib" "${cachedir}/share"
+        rm -f -- "${cachedir}/portable-postgres.jar" "${cachedir}/artifact.sha256"
+        return "${PG_EXIT_INTEGRITY}"
+    fi
+    echo "provision-test-postgres: portable install verified (sha256 sidecar-checked, promoted atomically): ${cachedir}" >&2
+    echo "provision-test-postgres: $("${cachedir}/bin/initdb" --version 2>/dev/null | head -1)" >&2
+    printf '%s\n' "${cachedir}"
+    return 0
+}
+
 # Acquire/verify the pinned portable PostgreSQL distribution. Prints the
 # install dir to stdout. Idempotent: a cache HIT re-verifies the stored jar
-# sha256 every time and uses no network.
+# sha256 every time and uses no network. Cache/runtime path comes from the
+# ONE canonical resolver (R4-R1 §6); cold acquisitions into a PERSISTENT
+# cache are serialized by flock so concurrent jobs cannot race promotion;
+# temp-mode caches are unique per invocation (exclusive by construction).
 _fie_test_pg_ensure_cache() {
-    local cachedir base arch ver url sha_txt archive
-    cachedir="$(_portable_pg_cache_dir)"
+    local cachedir base arch ver rc
     base="${FIE_TEST_PG_TEST_BASE_URL:-${PORTABLE_PG_BASE_URL}}"
     arch="$(_portable_pg_arch)"
     ver="${PORTABLE_PG_VERSION}"
@@ -134,74 +411,41 @@ _fie_test_pg_ensure_cache() {
             return "${PG_EXIT_PLATFORM}"
         }
     done
+    PG_CACHE_DIR=""; PG_CACHE_MODE=""; PG_CACHE_PERSISTENT=""; _FIE_CACHE_TRACE=""
+    if ! _fie_test_pg_cache_resolve; then
+        return "${PG_EXIT_CACHE_PATH}"
+    fi
+    cachedir="${PG_CACHE_DIR}"
     if _cache_complete "${cachedir}"; then
         if _cache_sha_verify "${cachedir}"; then
+            echo "provision-test-postgres: portable cache HIT (stored jar sha256 re-verified; no network): ${cachedir}" >&2
             printf '%s\n' "${cachedir}"
             return 0
         fi
         _die "POSTGRESQL_PORTABLE_ARTIFACT_INTEGRITY_FAILED cached artifact failed re-verification; refusing reuse"
         return "${PG_EXIT_INTEGRITY}"
     fi
-    echo "provision-test-postgres: acquiring portable PostgreSQL ${ver} (${arch}) from Maven Central" >&2
-    if ! mkdir -p "${cachedir}"; then
-        _die "POSTGRESQL_PLATFORM_UNSUPPORTED cannot create cache dir (path withheld)"
-        return "${PG_EXIT_PLATFORM}"
+    if [ "${PG_CACHE_PERSISTENT}" = "yes" ]; then
+        if command -v flock >/dev/null 2>&1; then
+            if ! { exec 9>>"${cachedir}/.acquire.lock"; } 2>/dev/null; then
+                _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cannot open cache acquisition lock file"
+                return "${PG_EXIT_CACHE_PATH}"
+            fi
+            if ! flock -w 300 9; then
+                exec 9>&- 9<&-
+                _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cache acquisition lock unavailable after 300s; refusing unsynchronized destructive promotion"
+                return "${PG_EXIT_CACHE_PATH}"
+            fi
+            _cache_cold_acquire "${cachedir}" "${base}" "${arch}" "${ver}" 1
+            rc=$?
+            exec 9>&- 9<&-
+            return "${rc}"
+        fi
+        _cache_cold_acquire "${cachedir}" "${base}" "${arch}" "${ver}" 0
+        return $?
     fi
-    url="${base}/embedded-postgres-binaries-${arch}/${ver}/embedded-postgres-binaries-${arch}-${ver}.jar"
-    sha_txt="$(_pg_download_to_stdout "${url}.sha256")" || {
-        _die "POSTGRESQL_PORTABLE_ARTIFACT_UNAVAILABLE published sha256 sidecar not reachable (network/404${FIE_TEST_PG_TEST_BASE_URL:+, test-url-override}); acquisition refused, no fallback"
-        return "${PG_EXIT_ARTIFACT}"
-    }
-    if ! printf '%s' "${sha_txt}" | grep -qE '^[0-9a-fA-F]{64}$'; then
-        _die "POSTGRESQL_PORTABLE_ARTIFACT_INTEGRITY_FAILED published sha256 sidecar has unexpected form"
-        return "${PG_EXIT_INTEGRITY}"
-    fi
-    _pg_download_to_file "${url}" "${cachedir}/portable-postgres.jar" || {
-        _die "POSTGRESQL_PORTABLE_ARTIFACT_UNAVAILABLE artifact not reachable (network/404${FIE_TEST_PG_TEST_BASE_URL:+, test-url-override}); acquisition refused, no fallback"
-        return "${PG_EXIT_ARTIFACT}"
-    }
-    if ! (cd "${cachedir}" &&
-          printf '%s  portable-postgres.jar\n' "${sha_txt}" |
-          sha256sum -c >/dev/null 2>&1); then
-        _die "POSTGRESQL_PORTABLE_ARTIFACT_INTEGRITY_FAILED downloaded artifact does not match the published sha256 sidecar; refusing install"
-        rm -f -- "${cachedir}/portable-postgres.jar"
-        return "${PG_EXIT_INTEGRITY}"
-    fi
-    printf '%s\n' "${sha_txt}" > "${cachedir}/artifact.sha256" || {
-        _die "POSTGRESQL_PLATFORM_UNSUPPORTED cannot write artifact.sha256 into cache (path withheld)"
-        return "${PG_EXIT_PLATFORM}"
-    }
-    archive="$(
-        cd "${cachedir}" && python3 - "${cachedir}" <<'PY'
-import sys, zipfile
-jar = zipfile.ZipFile(sys.argv[1] + "/portable-postgres.jar")
-names = [n for n in jar.namelist() if n.endswith(".txz") and "/" not in n]
-if len(names) != 1:
-    sys.exit(2)
-jar.extract(names[0], sys.argv[1])
-print(names[0])
-PY
-    )" || {
-        rm -f -- "${cachedir}/portable-postgres.jar"
-        _die "POSTGRESQL_PORTABLE_ARTIFACT_INTEGRITY_FAILED jar archive members unexpected"
-        return "${PG_EXIT_INTEGRITY}"
-    }
-    tar -xJf "${cachedir}/${archive}" -C "${cachedir}" || {
-        rm -f -- "${cachedir}/portable-postgres.jar" "${cachedir}/${archive}"
-        _die "POSTGRESQL_PORTABLE_ARTIFACT_INTEGRITY_FAILED txz extraction failed"
-        return "${PG_EXIT_INTEGRITY}"
-    }
-    rm -f -- "${cachedir}/${archive}"
-    "${cachedir}/bin/initdb" --version >/dev/null 2>&1 &&
-        "${cachedir}/bin/pg_ctl" --version >/dev/null 2>&1 || {
-        _die "POSTGRESQL_PORTABLE_ARTIFACT_INTEGRITY_FAILED installed portable binaries did not validate"
-        rm -rf -- "${cachedir}"
-        return "${PG_EXIT_INTEGRITY}"
-    }
-    echo "provision-test-postgres: portable install verified: ${cachedir}" >&2
-    echo "provision-test-postgres: $("${cachedir}/bin/initdb" --version 2>/dev/null | head -1)" >&2
-    printf '%s\n' "${cachedir}"
-    return 0
+    # temp mode: unique mktemp dir => exclusive by construction
+    _cache_cold_acquire "${cachedir}" "${base}" "${arch}" "${ver}" 1
 }
 
 # ---------------------------------------------------------------- discovery
@@ -453,11 +697,39 @@ fie_test_pg_start() {  # [--force-portable]; sets FIE_TEST_PG_JOB_DIR + globals
             mode="discovered"
         else
             echo "provision-test-postgres: no preinstalled server tooling found; portable path ($(_portable_pg_arch))"
-            bindir="$(_fie_test_pg_ensure_cache)" && mode="portable" || return $?
+            local rc_cap capf
+            capf="$(mktemp "${TMPDIR:-/tmp}/fie-pgbindircap.XXXXXX")" || {
+                _die "POSTGRESQL_START_FAILED cannot create bin-dir capture file"; return "${PG_EXIT_START}"; }
+            if _fie_test_pg_ensure_cache > "${capf}"; then
+                # NOT command substitution: the resolver contract variables
+                # (PG_CACHE_DIR/PG_CACHE_TEMP_CREATED) must survive into this
+                # scope — the temp-mode cache cleanup depends on them.
+                bindir="$(<"${capf}")"
+                rm -f -- "${capf}"
+                mode="portable"
+            else
+                rc_cap=$?
+                rm -f -- "${capf}"
+                return "${rc_cap}"
+            fi
         fi
     else
         echo "provision-test-postgres: --force-portable (system discovery skipped; test-only contract)"
-        bindir="$(_fie_test_pg_ensure_cache)" && mode="portable" || return $?
+        local rc_cap capf
+        capf="$(mktemp "${TMPDIR:-/tmp}/fie-pgbindircap.XXXXXX")" || {
+            _die "POSTGRESQL_START_FAILED cannot create bin-dir capture file"; return "${PG_EXIT_START}"; }
+        if _fie_test_pg_ensure_cache > "${capf}"; then
+            # NOT command substitution: the resolver contract variables
+            # (PG_CACHE_DIR/PG_CACHE_TEMP_CREATED) must survive into this
+            # scope — the temp-mode cache cleanup depends on them.
+            bindir="$(<"${capf}")"
+            rm -f -- "${capf}"
+            mode="portable"
+        else
+            rc_cap=$?
+            rm -f -- "${capf}"
+            return "${rc_cap}"
+        fi
     fi
     # The portable path is an INSTALL ROOT (bin/ beneath it); discovery is a
     # DIR with initdb+pg_ctl directly. Normalize: everything downstream is a
@@ -622,6 +894,10 @@ _provisioner_main() {
     case "${action}" in
         --ensure-cache)
             _fie_test_pg_ensure_cache ;;
+        --resolve-cache)
+            _fie_test_pg_cache_resolve || return $?
+            printf 'CACHE_DIR=%s\nCACHE_MODE=%s\nCACHE_PERSISTENT=%s\n' \
+                "${PG_CACHE_DIR}" "${PG_CACHE_MODE}" "${PG_CACHE_PERSISTENT}" ;;
         --start)
             shift
             fie_test_pg_start "$@" ;;
@@ -631,22 +907,27 @@ _provisioner_main() {
         --run)
             shift
             [ -n "${1:-}" ] || { _die "no child command for --run"; return 2; }
-            fie_test_pg_start || return $?
-            trap 'fie_test_pg_stop >/dev/null 2>&1 || true' EXIT
+            run_force=""
+            [ "${1:-}" = "--force-portable" ] && { run_force="--force-portable"; shift; }
+            [ -n "${1:-}" ] || { _die "no child command for --run"; return 2; }
+            fie_test_pg_start ${run_force:+${run_force}} || return $?
+            trap 'fie_test_pg_stop >/dev/null 2>&1 || true; fie_test_pg_cache_cleanup >/dev/null 2>&1 || true' EXIT
             export FIE_TEST_PG_DSN
             echo "provision-test-postgres: synthetic DSN exported to child scope only (no production fallback possible)"
             "${@}"
             rc=$?
             fie_test_pg_stop >/dev/null 2>&1 || true
+            fie_test_pg_cache_cleanup >/dev/null 2>&1 || true
             return "${rc}"
             ;;
         ""|-h|--help|*)
             _die "unknown/missing action '${action}' (fail closed)"
             printf 'USAGE:\n' >&2
             printf '  scripts/provision-test-postgres.sh --ensure-cache\n' >&2
+            printf '  scripts/provision-test-postgres.sh --resolve-cache\n' >&2
             printf '  scripts/provision-test-postgres.sh --start [--force-portable]\n' >&2
             printf '  scripts/provision-test-postgres.sh --stop <job-dir>\n' >&2
-            printf '  scripts/provision-test-postgres.sh --run <child…>\n' >&2
+            printf '  scripts/provision-test-postgres.sh --run [--force-portable] <child…>\n' >&2
             return 2
             ;;
     esac

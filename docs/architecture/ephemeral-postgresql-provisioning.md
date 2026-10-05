@@ -17,7 +17,7 @@
 scripts/provision-test-postgres.sh --ensure-cache
 scripts/provision-test-postgres.sh --start [--force-portable]
 scripts/provision-test-postgres.sh --stop <job-dir>
-scripts/provision-test-postgres.sh --run <child…>
+scripts/provision-test-postgres.sh --run [--force-portable] <child…>
 
 # sourceable library
 . scripts/provision-test-postgres.sh && fie_test_pg_start && fie_test_pg_stop
@@ -38,8 +38,37 @@ scripts/provision-test-postgres.sh --run <child…>
 | Source | Maven Central(reachable、documented、`https://repo1.maven.org/maven2/io/zonky/test/postgres`) |
 | Integrity | 先取 published `.jar.sha256` sidecar(64-hex 形式驗證)→ 下載 jar → `sha256sum -c` → 安裝後 `initdb --version` / `pg_ctl --version` 驗證;**cache 每次 HIT 重新驗證 stored jar sha256** |
 | Arch/OS detect | `uname -s`==Linux、`uname -m` ∈ {x86_64→amd64, aarch64→arm64v8};任一不符 → `POSTGRESQL_PLATFORM_UNSUPPORTED`(exit 90),fail-closed,無 fallback |
-| Cache | `$HOME/.cache/fie/test-postgres`(可 `FIE_TEST_PG_CACHE_DIR` 覆寫);單一 install root(cold path 下載 jar → txz → 移除中間物) |
+| Cache | R4-R1 canonical resolver(見 §2.5):explicit `FIE_TEST_PG_CACHE_DIR` override(不可用 → fail-closed 97,無 fallback)> XDG > HOME > job-local temp fallback |
 | 禁止 | sudo / interactive prompt / global daemon / system PostgreSQL configuration mutation / operator-HOME(帳號)依賴 |
+
+## 2.5 R4-R1 cache-runtime resolution contract
+
+§2.1 observed R4 blocker: Codex Cloud managed filesystem 限制寫入,`$HOME`
+存在但 `$HOME/.cache` 不可寫 → 舊的 cache 收縮契約(`mkdir` 失敗 →
+`POSTGRESQL_PLATFORM_UNSUPPORTED` exit 90)在最終可用 temp root 存在時仍然
+fail — 分類錯誤(見 §11 distinctions)且無 fallback。R4-R1 修復:
+**ONE canonical resolver**(`_fie_test_pg_cache_resolve`,存在於本
+provisioner,bootstrap/test wrappers 皆不得複製 path-selection 邏輯):
+
+| 優先序 | 候選 | 契約 |
+|---|---|---|
+| 1 | `FIE_TEST_PG_CACHE_DIR` explicit override | **hard contract**:probe 不可用 → `POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE`(exit 97)fail-closed,**無 fallback**;value 永不列印 |
+| 2 | `XDG_CACHE_HOME` (定義時) | `<XDG>/fie/test-postgres`;probe-proven |
+| 3 | `${HOME}/.cache/fie/test-postgres` | `$HOME` 被設定**不是**可寫證明;probe-proven |
+| 4 | job-local temp fallback | `${TMPDIR:-/tmp}` 下 `mktemp -d` 配置的 FIE-owned dir(0700 + `fie_cache.owner` marker `format=fie-6-9a-cache-v1`);**每 invocation 唯一 → 並行 job 不碰撞;禁止 static `/tmp/fie`** |
+
+解析 = **probe 證明實際可用性**(parent-creatable + write+unlink probe),
+不是路徑存在性。temp-mode cache 只在 scope 內 memo reuse(test-cloud / `--run`
+每 scope 一次 acquisition)、marker-proven 由建立者 cleanup
+(`fie_test_pg_cache_cleanup`;測於 ownership unprovable 時 refuse exit 96)。
+
+Cold acquisition(R4-R1 强化,R3 完整性模型不變):下載到**永不見終態的
+`.partial.*` 名**→ 已驗 sha256 → extract/validate 於 `.stage.*` →
+promotion 順序 bin/lib/share 先、verified jar+sidecar 後(完整性 marker)→
+**中斷的 promotion 永遠不會成為可信 cache entry**。PERSISTENT cache 的 cold
+acquisition 以 flock serialize;cache root 含**非 artifact-class 內容 →
+exit 97 fail-closed,永不修改/清除他人內容(ownership unprovable)**。
+Cache HIT 每次重驗 stored jar sha256(無網路)。
 
 ## 3. Job-owned provisioning identity（§6.2 — MUST-holds）
 
@@ -90,6 +119,7 @@ stop A 之後 B 依然服務。
 | 94 | `POSTGRESQL_START_FAILED` |
 | 95 | `POSTGRESQL_READINESS_FAILED` |
 | 96 | `POSTGRESQL_TEARDOWN_FAILED` |
+| 97 | `POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE`(R4-R1:cache-runtime 路徑契約失敗 — override 不可用 / 無可寫候選 / cache root 含非 artifact 內容;**不**折疊進 90) |
 | 2 | usage(unknown/missing action) |
 
 `test-cloud.sh` 對 provisioning 失敗的下游語意:PG legs **skip-with-reason**
@@ -132,9 +162,33 @@ Remediation 是 **repository-ready / re-entry-ready**。在未來全新的 Codex
 job 獨立 rerun 全套 validation 之前,Codex Cloud **NOT VALIDATED**。本文與
 cloud-execution-contract.md 都**不**使用「Codex Cloud supported」或等效詞彙。
 
+## 11. R4 blocker classification discipline (R4-R1)
+
+舊分類 `POSTGRESQL_PLATFORM_UNSUPPORTED` 只指 **OS/arch/tooling** 不符
+(uname、tar/xz 缺失)。R4 觀察到的 `mkdir` EROFS/EACCES 是 **cache-runtime
+路徑契約**問題,不得折疊進平台分類。獨立審查者必須能區分五類failure:
+(1) PostgreSQL runtime/platform 不相容;(2) portable artifact
+acquisition/cache-path 不相容(R4 實際類型,exit 97);
+(3) download/network 失敗(91);(4) checksum/artifact-integrity 失敗(92);
+(5) PostgreSQL startup/readiness 失敗(93/94/95)。
+
 ---
 
 *Change record: Phase 6.9A-R3(2026-10-05)— one canonical repository-owned
 ephemeral PostgreSQL provisioning boundary;replaces the R2 inline/best-effort
 provisioning;R2 verdict `CLOUD_POSTGRESQL_PROVISIONING_BLOCKED` closed at
 repository level, cloud level remains NOT VALIDATED until fresh re-entry.*
+
+*Change record: Phase 6.9A-R4-R1(2026-10-05)— canonical writable-runtime
+cache resolver(§2.5);exit 97 `POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE`;
+atomic promotion + flock serialization + ownership-proven cleanup;remediates
+the R4 Codex Cloud cache-path blocker at repository level.*
+
+---
+
+*Change record: (R4 blocker reference) 6.9A-R4 fresh Codex Cloud acceptance
+job stopped at portable-acquisition cache mkdir (`/home/agent/.cache/fie`
+read-only managed filesystem) with the pre-R4-R1 exit-90 contract;the R4
+failure class is the cache-path contract (§11 distinctions), NOT a
+PostgreSQL platform incompatibility;remediated here; authoritative cloud
+acceptance is a NEW fresh job from the published remediation HEAD.*
