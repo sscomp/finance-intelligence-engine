@@ -30,6 +30,16 @@ cd -- "${PROJECT_ROOT}" || {
     echo "run.sh: failed to cd to ${PROJECT_ROOT}" >&2
     exit 5
 }
+# 2026-10-05 (6.8C production hygiene): the default above is the operator-
+# provisioned production venv on the A3 host. On any other environment the
+# default path is absent — fail fast and legibly here (before the DB guard)
+# instead of surfacing a bare "python3: not found" several steps later.
+# Recovery is configuration only: export FIE_PYTHON=<venv>/bin/python3.
+if [ ! -x "${PYTHON_BIN}" ]; then
+    echo "run.sh: FIE_PYTHON interpreter not executable: ${PYTHON_BIN};" \
+        "set FIE_PYTHON (e.g. the repository venv) and retry" >&2
+    exit 78
+fi
 
 # --- 2026-10-04 (incident closure WO): fail-closed rehearsal DB-target guard ---
 # Resolve the intelligence-store seed target BEFORE any write (including
@@ -49,6 +59,17 @@ cd -- "${PROJECT_ROOT}" || {
 # env, restart the FIE service; the SQLite-era literal defaults below this
 # stanza become effective again.
 WRAPPER_ENV="${FIE_WRAPPER_ENV:-/home/ubuntu/fie-67b-upgrade/fie-wrapper-pg.env}"
+# 2026-10-05 (6.8C production hygiene): the wrapper env file is an
+# OPERATOR-OWNED 0600 asset outside git (production contract, WO §23) — it is
+# not a repository defect that it is missing on non-operator environments.
+# Make the situation legible when absent, then keep going: DB-target
+# resolution below still fails closed (exit 78) if the production contract
+# cannot be satisfied. Template with synthetic placeholders:
+# examples/fie-wrapper.env.example.
+if [ ! -f "${WRAPPER_ENV}" ] && [ -z "${FIE_WRAPPER_ENV:-}" ]; then
+    echo "run.sh: wrapper env file not found: ${WRAPPER_ENV}" >&2
+    echo "run.sh: (operator bootstrap: FIE_WRAPPER_ENV=<0600 env file>; see examples/fie-wrapper.env.example for the documented shape)" >&2
+fi
 # 2026-10-05 (6.8A incident lesson): an ambient FIE_SERVICE_ENV declaration
 # (e.g. a test harness exporting FIE_SERVICE_ENV=test) MUST survive the
 # wrapper env file sourcing — the file's own declaration (production, for
@@ -64,7 +85,12 @@ if [ -f "${WRAPPER_ENV}" ]; then
 fi
 
 . "${REPO_ROOT}/scripts/rehearsal_db_guard.sh"
-fie_wrapper_seed_db_guard "/home/ubuntu/macro-report/metadata/intelligence_store.db"
+# 2026-10-05 (6.8C production hygiene): the accepted D5 production fallback
+# default is the intelligence store INSIDE the project root. It used to be
+# spelled as an absolute operator-host literal; it is now derived from
+# PROJECT_ROOT (identical on the operator host, portable elsewhere). The
+# path is still PRODUCTION_ONLY: rehearsal-class service envs refuse it.
+fie_wrapper_seed_db_guard "${PROJECT_ROOT}/metadata/intelligence_store.db"
 
 # Step 1: existing morning-brief generation. Failure must fail the script.
 "${PYTHON_BIN}" "${PROJECT_ROOT}/macro_daily.py" 2>&1

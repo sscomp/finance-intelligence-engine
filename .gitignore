@@ -72,3 +72,23 @@ dist/
 /:memory:
 # Deliberate /dev/null sentinel symlink produced by rehearsal tooling.
 /metadata/reports/artifacts_will_fail
+
+# --- Phase 6.8C repository productionization hygiene ---------------
+# No tracked file ends in these patterns (verified before adding; tracked
+# .example fixtures like examples/fie-wrapper.env.example are NOT matched).
+# SQLite journal sidecar of already-ignored *.db files.
+*.db-journal
+# Secret-bearing file classes stay out of git by default; any tracked
+# exception must be an explicit, reviewed add with synthetic placeholders
+# only (e.g. *.env.example-style templates end in .example and still track).
+.env
+*.env
+!*.env.example
+*.passphrase
+*.secret
+*.token
+# Extra tooling caches seen in cloud/CI environments.
+.ruff_cache/
+# Cloud-agent working dirs (never runtime state of this repository).
+.claude/
+.codex/
