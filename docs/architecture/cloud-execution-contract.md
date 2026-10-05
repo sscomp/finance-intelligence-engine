@@ -1,4 +1,4 @@
-# Cloud Execution Contract (Phase 6.8C; updated 6.9A-R3)
+# Cloud Execution Contract (Phase 6.8C; updated 6.9A-R3, 6.9A-R4-R2-R1)
 
 > **Status**: `REPOSITORY_EXECUTION_READY — NOT AN INTEGRATION`
 > `CODEX_CLOUD_INTEGRATION_IMPLEMENTED=false` · `CODEX_CLOUD_RUNTIME_ENABLED=false` · `CODEX_CLOUD_DEPLOYED=false`
@@ -28,6 +28,23 @@
 | 完整性 | clone 後 `git rev-parse HEAD` 必須等於本次 publication 記錄的 `remote_after_sha`（見 work order receipt） |
 
 ## 2. Bootstrap（canonical entrypoint）
+
+**6.9A-R4-R2-R1 Python 解析契約（ONE contract）**：`scripts/fie_python_resolver.sh`
+是 **唯一** 的 interpreter 解析實作（static contract test pin 全部 consumer）：
+
+```text
+1. FIE_PYTHON explicit override   — hard contract：設了但不可用
+                                    （不存在/非執行檔/<3.11）→ exit 78
+                                    "refusing to substitute"，永不靜默替換
+2. $VIRTUAL_ENV/bin/python3
+3. <repo>/.venv/bin/python3
+4. PATH python3（需 ≥ 3.11，child 內 probe）
+5. fail closed（exit 78 + 診斷）
+```
+
+wrappers（run.sh / run_weekly.sh / run_monthly.sh）一律經由此 contract 解析
+interpreter — **不再**依賴任何 operator-host interpreter 路徑
+（R4-R2 blocker #1 根因移除；operator 建議以 `FIE_PYTHON` pin 目標 interpreter）。
 
 ```bash
 bash scripts/bootstrap.sh --all
@@ -116,6 +133,21 @@ bash scripts/test-cloud.sh --full   # full hermetic regression + 負向控制
 - `scripts/cloud_negative_controls.py` 在 entrypoint 內**實際執行**（8 個負向控制：
   missing target / production DSN 注入 / alias 等價 / 矛盾 target / SQLite fallback
   拒絕 / DSN-free contract / unknown service env / shell guard exit 78）。
+- **6.9A-R4-R2-R1 scrubbed-child 網路上下文契約**：測試 child 一律以
+  **explicit allowlist** 受網路上下文（`HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY`
+  大小寫共 8 名 + `SSL_CERT_FILE`/`SSL_CERT_DIR`/`REQUESTS_CA_BUNDLE`/
+  `CURL_CA_BUNDLE`），**沒有 blanket env 繼承**；secret boundary denylist
+  （PGPASSWORD/POSTGRES_PASSWORD/DATABASE_URL/FIE_INTELLIGENCE_DB/FIE_DB_PATH/
+  FIE_DATABASE_URL/FIE_DB_TARGET_*/FIE_TEST_PG_DSN/token/雲端憑證類）永不
+  進入 child；值一律 opaque，redaction helper 永不攜帶任何值。實作與測試共用
+  ONE helper：`tests/cloud_child_env.py`（N1–N8 執行證明：scrubbed child +
+  approved context ⇒ sidecar 取得成功；缺 CA ⇒ 91；缺 no_proxy（blackhole
+  proxy）⇒ 91）。
+- **6.9A-R4-R2-R1 cache visibility**：測試側**唯一** cache 解析途徑是
+  `tests/cloud_child_env.py::canonical_cache_state()`（執行 provisioner 的
+  `--cache-state`），與 runtime 同源 — 持久 cache 位元組級一致（NC16）。
+- focused 清單含 `tests.test_bootstrap_cli_contract`（NC03 zero-arg /
+  unknown-option fail-closed）。
 - 進入點保證：exit code 忠實反映 unittest 結果、failure 可見、無 mandatory test
   隱藏 skip、無 Production mutation、ephemeral resources 由 trap 清理。
 

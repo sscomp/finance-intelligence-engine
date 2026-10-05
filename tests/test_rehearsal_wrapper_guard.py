@@ -84,9 +84,20 @@ def _fixture_wrapper_env(tmp: Path, intelligence_db: str = "") -> str:
 
 
 def _make_stub_python(tmp: Path) -> str:
-    """Step-1 interpreter stub: sentinel + exit 42, never touches DBs."""
+    """Step-1 interpreter stub: sentinel + exit 42, never touches DBs.
+
+    6.9A-R4-R2-R1 Task B: the canonical resolver's version probe runs the
+    override as `<stub> -c '<version script>'` — a probe pass (exit 0) is
+    what makes the override USABLE; the sentinel/42 semantics hold for every
+    real invocation (this mirrors the R4-R2 blocker #1 shape, where a
+    wrapper-die on interpreter check masked everything downstream)."""
     stub = tmp / "stub_python.sh"
-    stub.write_text("#!/bin/bash\necho STUB_STEP1_SENTINEL\nexit 42\n")
+    stub.write_text(
+        "#!/bin/bash\n"
+        "# version probe (canonical resolver contract) → usable\n"
+        'if [ "${1:-}" = "-c" ]; then exit 0; fi\n'
+        "echo STUB_STEP1_SENTINEL\n"
+        "exit 42\n")
     stub.chmod(0o755)
     return str(stub)
 

@@ -44,48 +44,58 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# 6.9A-R4-R2-R1 Task C/D: ONE helper for scrubbed-child env construction and
+# for canonical cache-state resolution — the provisioning tests no longer
+# own a second resolution engine (no $HOME/.cache assumption).
+from tests import cloud_child_env as _cce
+
 REPO = Path(__file__).resolve().parents[1]
 PROVISIONER = REPO / "scripts" / "provision-test-postgres.sh"
 TEST_CLOUD = REPO / "scripts" / "test-cloud.sh"
 BOOTSTRAP = REPO / "scripts" / "bootstrap.sh"
 VENV_PY = REPO / ".venv" / "bin" / "python3"
 
-# The portable acquisition cache reference for test children. The override
-# is set ONLY when it is actually usable (R4-R1: an unusable explicit
-# override is a fail-closed hard contract — forcing one on a managed
-# filesystem would break every portable-legged child instead of letting the
-# canonical resolver inside each child pick its documented fallback).
-_CACHE_DIR = os.environ.get("FIE_TEST_PG_CACHE_DIR",
-                            str(Path.home() / ".cache" / "fie"
-                                / "test-postgres"))
+_CACHE_STATE: dict | None = None
 
 
-def _path_probe_writable(d):
-    try:
-        d.mkdir(parents=True, exist_ok=True)
-        probe = d / ".test-writable-probe"
-        probe.write_text("x", encoding="ascii")
-        probe.unlink()
-        return True
-    except OSError:
-        return False
+def _active_cache_state(force=False):
+    """The ACTIVE cache state, resolved by EXECUTING the shipped canonical
+    resolver (``--cache-state``) through the shared Task D helper — never
+    re-derived from $HOME here (R4-R2 blocker #3: 8 portable-path helpers
+    inspected an unreachable HOME cache while the runtime selected an
+    isolated temp cache)."""
+    global _CACHE_STATE
+    if _CACHE_STATE is None or force:
+        try:
+            _CACHE_STATE = _cce.canonical_cache_state(force_refresh=True)
+        except RuntimeError as exc:
+            _CACHE_STATE = {"resolve_error": str(exc), "dir": "",
+                            "mode": "", "persistent": False, "warm": False,
+                            "lock_class": "UNKNOWN"}
+    return dict(_CACHE_STATE)
+
+
+def _portable_cache_dir():
+    """Usable portable-cache override for test children ("" = none)."""
+    override = os.environ.get("FIE_TEST_PG_CACHE_DIR", "")
+    if override and _cce.cache_ready(Path(override)):
+        return override
+    st = _active_cache_state()
+    if st["warm"] and st["mode"] in ("explicit", "xdg", "home") and st["dir"]:
+        return st["dir"]
+    return ""
 
 
 def _child_env(blob=None):
-    """Realistic execution env: no operator FIE_* / PGPASSWORD leaks, and a
-    deterministic portable-cache location for the child — but only when
-    that override location is usable (otherwise the child gets NO override
-    and resolves its own cache through the canonical resolver)."""
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "HOME": "/tmp",
-        "PWD": str(REPO),
-    }
-    if os.environ.get("FIE_TEST_PG_CACHE_DIR") or \
-            _path_probe_writable(Path(_CACHE_DIR)):
-        env["FIE_TEST_PG_CACHE_DIR"] = _CACHE_DIR
-    if blob:
-        env.update(blob)
+    """Scrubbed test child (R4-R2 Task C): explicit seed + the explicitly
+    allowlisted network-runtime context (cloud_child_env is the ONE policy;
+    no blanket inheritance — proxy/CA context may be credential-bearing and
+    is carried only under its canonical name), plus a portable-cache
+    override ONLY when actually usable (R4-R1 hard-contract rule)."""
+    env = _cce.child_env("/tmp", None, blob, parent_env=os.environ)
+    cache_dir = _portable_cache_dir()
+    if cache_dir:
+        env["FIE_TEST_PG_CACHE_DIR"] = cache_dir
     return env
 
 
@@ -111,7 +121,12 @@ def _bash_stdout_exit(probe_text, blob=None, timeout=60):
 
 
 def _cache_warm():
-    return (Path(_CACHE_DIR) / "bin" / "initdb").is_file()
+    """Task D — the ACTIVE canonically resolved cache is the ONLY reference
+    for warm-gating portable-legged tests (never $HOME/.cache directly)."""
+    st = _active_cache_state()
+    if st.get("resolve_error") or not st.get("dir"):
+        return False
+    return _cce.cache_ready(Path(st["dir"]))
 
 
 def _bootstrap_contract_runner():
@@ -371,14 +386,87 @@ class _FakeToolingStub(unittest.TestCase):
                          f"{leftovers}")
 
 
-@unittest.skipUnless(
-    _cache_warm(),
-    "portable acquisition cache cold — warm it with "
-    "'scripts/provision-test-postgres.sh --ensure-cache' (test-cloud warms "
-    "it automatically; the cache-cold acquisition itself is proven in the "
-    "network-true evidence layer, not in this offline suite)")
+class PortableContractStaticTests(_Isolated):
+    """NC9/NC13 + teardown ownership refusal — STATIC probes that do NOT
+    depend on a warm portable cache (6.9A-R4-R2-R1 Task D3: these were
+    wrongly warm-gated before, producing wrong skips on cold-cache
+    runners)."""
+
+    def test_loopback_listener_contract_is_pinned(self):
+        """NC9 — server-side contract pin: loopback listener + executed
+        per-line bind proof; a 0.0.0.0 listener must fail start."""
+        src = PROVISIONER.read_text(encoding="utf-8")
+        self.assertIn("listen_addresses=127.0.0.1", src)
+        self.assertIn("_loopback_bind_proof", src)
+
+    def test_teardown_refuses_dir_without_ownership_marker(self):
+        with tempfile.TemporaryDirectory(prefix="fie-nc-teardown-") as td:
+            dirp = Path(td) / "pretend-job"
+            (dirp / "pgdata").mkdir(parents=True)
+            (dirp / "pgdata" / "postmaster.pid").write_text(
+                "", encoding="utf-8")
+            rc, _, err = provisioner_run("--stop", str(dirp), timeout=60)
+            self.assertNotEqual(rc, 0)
+            self.assertIn("ownership marker absent", err)
+            self.assertEqual(rc, 96, msg=f"expected TEARDOWN 96, got {rc}")
+            # The pretend dir is left untouched for diagnosis.
+            self.assertTrue((dirp).exists())
+
+    def test_exported_dsn_parseable_by_runtime_contract(self):
+        """NC13 — the shape the provisioner exports (passwordless socket
+        form) must be parseable by phase3.runtime_contract."""
+        src = PROVISIONER.read_text(encoding="utf-8")
+        # Pin the exported shape against accidental password embedding:
+        self.assertIn('?host=${jobdir}&port=${port}', src)
+        self.assertIn('export FIE_TEST_PG_DSN=%q', src)
+
+
 class PortableLeggedTests(_Isolated):
-    """NC4/NC9–NC13b — exercised through the PRE-WARMED cache only."""
+    """NC4/NC10/NC11/NC13b/NC13-run — exercised through the PRE-WARMED
+    portable cache (R4-R2 Task D3 warm-gate redesign):
+
+    * the warm gate resolves the ACTIVE canonically resolved cache — never
+      $HOME/.cache (the R4-R2 blocker #3 wrong-skip defect: the OLD gate
+      inspected a HOME cache the runtime does not use);
+    * when the gate is cold AND real acquisition is allowed
+      (FIE_TEST_PG_ALLOW_REAL_ACQUISITION=1 — test-cloud's default), the
+      shared helper performs ONE network-true warm attempt (temp mode gets
+      a helper-allocated job-local cache under an explicit override; that
+      job-local dir is removed again in tearDownClass);
+    * when cold and not allowed → ONE attributed skip for the class with
+      the helper's classification string (never silent);
+    * static cache-independent probes live in PortableContractStaticTests.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._warmer = _cce.WarmPortableCache()
+        cls._warmer.__enter__()
+        if not cls._warmer.dir or not _cce.cache_ready(cls._warmer.dir):
+            raise unittest.SkipTest(
+                cls._warmer.classification or "portable acquisition cache "
+                "cold — warm it with 'scripts/provision-test-postgres.sh "
+                "--ensure-cache' (test-cloud warms it automatically; the "
+                "cache-cold acquisition itself is proven in the network-true "
+                "evidence layer, not in this offline suite)")
+        cls.warmer = cls._warmer
+        # All legged children pin the warmed cache under its canonical
+        # explicit-override contract.
+        cls._prior_override = os.environ.get("FIE_TEST_PG_CACHE_DIR", "")
+        os.environ["FIE_TEST_PG_CACHE_DIR"] = cls._warmer.dir
+        _CACHE_STATE = None  # reset module memo: resolve the warmed dir
+        globals()["_CACHE_STATE"] = None
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            os.environ["FIE_TEST_PG_CACHE_DIR"] = cls._prior_override
+            if not cls._prior_override:
+                os.environ.pop("FIE_TEST_PG_CACHE_DIR", None)
+        finally:
+            cls._warmer.__exit__()
+        super().tearDownClass()
 
     def test_missing_tooling_selects_portable_path(self):
         """NC4b — when server discovery MISSES, ``fie_test_pg_start`` must
@@ -437,25 +525,8 @@ class PortableLeggedTests(_Isolated):
         finally:
             provisioner_run("--stop", jobdir, timeout=60)
 
-    def test_loopback_listener_contract_is_pinned(self):
-        """NC9 — server-side contract pin: loopback listener + executed
-        per-line bind proof; a 0.0.0.0 listener must fail start."""
-        src = PROVISIONER.read_text(encoding="utf-8")
-        self.assertIn("listen_addresses=127.0.0.1", src)
-        self.assertIn("_loopback_bind_proof", src)
-
-    def test_teardown_refuses_dir_without_ownership_marker(self):
-        with tempfile.TemporaryDirectory(prefix="fie-nc-teardown-") as td:
-            dirp = Path(td) / "pretend-job"
-            (dirp / "pgdata").mkdir(parents=True)
-            (dirp / "pgdata" / "postmaster.pid").write_text(
-                "", encoding="utf-8")
-            rc, _, err = provisioner_run("--stop", str(dirp), timeout=60)
-            self.assertNotEqual(rc, 0)
-            self.assertIn("ownership marker absent", err)
-            self.assertEqual(rc, 96, msg=f"expected TEARDOWN 96, got {rc}")
-            # The pretend dir is left untouched for diagnosis.
-            self.assertTrue((dirp).exists())
+    # (NC9 loopback pin / NC13 teardown-refusal / NC13 static DSN-shape
+    # probes moved to PortableContractStaticTests — cache-INDEPENDENT.)
 
     def test_teardown_stops_only_the_job_cluster(self):
         """NC13b — two-cluster contract: stopping job A must leave job B
@@ -485,14 +556,6 @@ class PortableLeggedTests(_Isolated):
         # Idempotent second stop for job B.
         rc, _, err2 = provisioner_run("--stop", jobB, timeout=60)
         self.assertEqual(rc, 0, msg=f"second stop must be idempotent: {err2}")
-
-    def test_exported_dsn_parseable_by_runtime_contract(self):
-        """NC13 — the shape the provisioner exports (passwordless socket
-        form) must be parseable by phase3.runtime_contract."""
-        src = PROVISIONER.read_text(encoding="utf-8")
-        # Pin the exported shape against accidental password embedding:
-        self.assertIn('?host=${jobdir}&port=${port}', src)
-        self.assertIn('export FIE_TEST_PG_DSN=%q', src)
 
     @unittest.skipUnless(VENV_PY.exists(), "repo .venv absent")
     def test_exported_dsn_connects(self):

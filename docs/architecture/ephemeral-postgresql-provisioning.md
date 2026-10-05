@@ -70,7 +70,34 @@ acquisition 以 flock serialize;cache root 含**非 artifact-class 內容 →
 exit 97 fail-closed,永不修改/清除他人內容(ownership unprovable)**。
 Cache HIT 每次重驗 stored jar sha256(無網路)。
 
-## 3. Job-owned provisioning identity（§6.2 — MUST-holds）
+## 2.7 R4-R2-R1 additions（lock ownership / cleanup / acquisition robustness）
+
+`.acquire.lock` 契約(R4-R2-R1 起;取代「路徑存在性」形狀的裸 lock):
+
+| 項目 | 契約 |
+|---|---|
+| Ownership metadata | `format=fie-6-9a-acquire-lock-v1` + `invocation` / `pid` / `created_utc` / `cache_mode`,**在持有 flock 之下寫入**(LK1) |
+| Classification(非變更性) | `ABSENT` / `STALE_JOB_OWNED`(fie metadata + flock free)/ `ACTIVE`(任何 live flock holder)/ `UNKNOWN`(不可解析內容,含 legacy 0-byte lock);`fie_test_pg_cache_lock_classify` 只讀 |
+| Stale 處理 | fie-owned stale lock 的移除要求 fd 開啟、flock 取得、marker 判讀、readlink 活性確認與 `unlink` **全部在同一 shell**(子 shell 持有的 fd 對 caller 不可見 — 6.9A-R4-R2-R1 修復) |
+
+Cleanup(R4-R2-R1 修復:cleanup-only 呼叫也會先解析 active cache):
+
+```text
+job-owned stale  → 安全移除(僅 flock-proven-dead + metadata-proven)
+ACTIVE           → 原樣保留(絕不從 live holder 下抽走)
+UNKNOWN          → exit 96,保留 + 明示回報(ambiguous residue 永不自動刪除)
+temp-mode(scope 內)→ cleanup 解析後僅移除本 invocation 配置的 dir
+```
+
+併發/健狀契約:
+
+- cold acquisition 以 flock `-w 300` serialize;fd 9 指到的 lock 被並行
+  維護替換時,以 `readlink /proc/self/fd/N` 的活路徑/`(deleted)` marker
+  偵測並重試(**不可**以 inode-stat 比較 — 在部份 kernel(本 host 實測
+  6.17)/proc fd 解析不自跟 inode 而致偽差異);
+- POSIX null-`exec` 規則:`exec 9>>file 2>/dev/null`(無命令)對 shell
+  的重導是**永久**的 — 開鎖探測必須保持 `{ exec 9>>f; } 2>/dev/null`
+  群組形狀,診斷輸出(含 fail-closed 訊息)不得被靜默(回歸測試 pin)。
 
 | 項目 | 契約 |
 |---|---|

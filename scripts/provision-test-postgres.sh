@@ -60,6 +60,17 @@ PG_EXIT_TEARDOWN=96            # POSTGRESQL_TEARDOWN_FAILED
 
 _die() { printf 'provision-test-postgres: %s\n' "${1}" >&2; }
 
+# ONE canonical interpreter resolution contract (6.9A-R4-R2-R1 Task B):
+# fie_python_candidates / fie_python_version_ok come from the shared
+# resolver library — no repository-local ordering engine here.
+ife_python_resolver_lib="${_PROVISIONER_LIB_DIR}/fie_python_resolver.sh"
+if [ ! -f "${ife_python_resolver_lib}" ]; then
+    _die "POSTGRESQL_PLATFORM_UNSUPPORTED canonical resolver library missing: scripts/fie_python_resolver.sh"
+    exit 5
+fi
+. "${ife_python_resolver_lib}"
+unset ife_python_resolver_lib
+
 _pg_repo_root() {
     printf '%s' "$(dirname -- "${_PROVISIONER_LIB_DIR}")"
 }
@@ -96,6 +107,21 @@ _random_hex() { python3 -c 'import secrets,sys; sys.stdout.write(secrets.token_h
 # (memoized resolution), and `fie_test_pg_cache_cleanup` removes ONLY a dir
 # THIS invocation created and marker-proves — cleanup never touches a
 # persistent cache or a foreign temp dir.
+#
+# Lock ownership contract (ABACUS_FIE_6_9A_R4_R2_R1 Task E): `.acquire.lock`
+# in a persistent cache carries ownership metadata (format
+# `fie-6-9a-acquire-lock-v1` + invocation id / pid / created_utc), written
+# under the held flock. Classification (fie_test_pg_cache_lock_classify):
+#
+#   ABSENT            no lock file
+#   ACTIVE            flock is held by a live acquirer (never touched)
+#   STALE_JOB_OWNED   fie-format metadata AND flock-free — safe stale-lock
+#                     protocol: cleanup holds the flock, re-proves the
+#                     marker, then removes it (flock/dead-owner proof + the
+#                     acquirers' inode-verification loop make removal race-
+#                     free);
+#   UNKNOWN legacy-empty/foreign/empty — fail closed: preserved and
+#                     reported (e.g. the pre-R4-R2 0-byte locks)
 PG_CACHE_TEMP_CREATED=""
 
 _cache_trace_add() {  # <reason> (class labels only)
@@ -184,31 +210,143 @@ _fie_test_pg_cache_resolve() {  # sets PG_CACHE_DIR/MODE/PERSISTENT (+ trace)
 
 # TEMP-mode cache cleanup: removes ONLY the temp dir THIS invocation created,
 # and only when the marker proves it is FIE-owned (ownership unprovable => refuse).
+# 6.9A-R4-R2-R1 (Task E): additionally cleans ONLY proven job-owned stale
+# acquisition-lock residue in the RESOLVED persistent cache (metadata +
+# flock-free proof); ACTIVE/UNKNOWN/legacy-empty locks are preserved and
+# reported (fail closed), never destructively removed.
 fie_test_pg_cache_cleanup() {
     local dir="${PG_CACHE_TEMP_CREATED:-}"
-    [ -n "${dir}" ] || return 0
-    if [ ! -d "${dir}" ]; then
-        PG_CACHE_TEMP_CREATED=""
-        return 0
+    if [ -n "${dir}" ]; then
+        if [ ! -d "${dir}" ]; then
+            PG_CACHE_TEMP_CREATED=""
+        elif ! grep -q "^format=fie-6-9a-cache-v1$" "${dir}/fie_cache.owner" 2>/dev/null; then
+            _die "POSTGRESQL_TEARDOWN_FAILED temp cache ${dir##*/} lacks the FIE ownership marker; refusing removal (ownership unprovable)"
+            return "${PG_EXIT_TEARDOWN}"
+        elif ! rm -rf -- "${dir}" 2>/dev/null; then
+            _die "POSTGRESQL_TEARDOWN_FAILED temp cache cleanup failed"
+            return "${PG_EXIT_TEARDOWN}"
+        elif [ -d "${dir}" ]; then
+            _die "POSTGRESQL_TEARDOWN_FAILED temp cache still present after cleanup"
+            return "${PG_EXIT_TEARDOWN}"
+        else
+            PG_CACHE_TEMP_CREATED=""
+            echo "provision-test-postgres: temp-mode cache removed (job-owned ephemeral only)"
+        fi
     fi
-    if ! grep -q "^format=fie-6-9a-cache-v1$" "${dir}/fie_cache.owner" 2>/dev/null; then
-        _die "POSTGRESQL_TEARDOWN_FAILED temp cache ${dir##*/} lacks the FIE ownership marker; refusing removal (ownership unprovable)"
-        return "${PG_EXIT_TEARDOWN}"
+    # Task E: stale job-owned acquisition-lock residue in a resolved
+    # persistent cache ( fie-format + flock-free => the locking invocation
+    # is provably dead; the acquirers' readlink-deleted-marker loop makes
+    # removal race-free). Everything else is preserved.
+    # A cleanup-only invocation (run without a prior in-scope resolution)
+    # still OWNS this residue check: resolve the cache through the ONE
+    # canonical resolver first (R4-R2 blocker #3: no $HOME re-derivation).
+    if [ -z "${PG_CACHE_DIR:-}" ]; then
+        PG_CACHE_DIR=""; PG_CACHE_MODE=""; PG_CACHE_PERSISTENT=""
+        _FIE_CACHE_TRACE=""
+        if _fie_test_pg_cache_resolve; then
+            if [ "${PG_CACHE_MODE}" = "temp" ]; then
+                # This cleanup invocation just allocated a job-local temp
+                # cache it never used — remove it immediately (own marker).
+                rm -rf -- "${PG_CACHE_DIR}" 2>/dev/null || true
+                PG_CACHE_TEMP_CREATED=""
+                PG_CACHE_DIR=""; PG_CACHE_MODE=""; PG_CACHE_PERSISTENT=""
+            fi
+        else
+            # Resolution failed (e.g. unusable explicit override): the same
+            # fail-closed contract as provisioning (value withheld).
+            PG_CACHE_DIR=""; PG_CACHE_MODE=""; PG_CACHE_PERSISTENT=""
+            return "${PG_EXIT_CACHE_PATH}"
+        fi
     fi
-    if ! rm -rf -- "${dir}" 2>/dev/null; then
-        _die "POSTGRESQL_TEARDOWN_FAILED temp cache cleanup failed"
-        return "${PG_EXIT_TEARDOWN}"
+    if [ -n "${PG_CACHE_DIR:-}" ] && [ "${PG_CACHE_PERSISTENT:-no}" = "yes" ]; then
+        case "$(fie_test_pg_cache_lock_classify "${PG_CACHE_DIR}")" in
+            LOCK_CLASS=STALE_JOB_OWNED)
+                if _fie_cache_lock_remove_if_stale_owned "${PG_CACHE_DIR}"; then
+                    echo "provision-test-postgres: job-owned stale .acquire.lock removed (metadata + dead-owner proven)"
+                else
+                    _die "POSTGRESQL_TEARDOWN_FAILED job-owned stale .acquire.lock removal failed (preserved; nothing foreign touched)"
+                    return "${PG_EXIT_TEARDOWN}"
+                fi
+                ;;
+            LOCK_CLASS=UNKNOWN)
+                _die "POSTGRESQL_TEARDOWN_FAILED cache acquisition lock ownership UNKNOWN (legacy/empty form; preserved and reported, removed by nothing)"
+                return "${PG_EXIT_TEARDOWN}"
+                ;;
+            LOCK_CLASS=ACTIVE|LOCK_CLASS=ABSENT) : ;;
+        esac
     fi
-    if [ -d "${dir}" ]; then
-        _die "POSTGRESQL_TEARDOWN_FAILED temp cache still present after cleanup"
-        return "${PG_EXIT_TEARDOWN}"
-    fi
-    PG_CACHE_TEMP_CREATED=""
-    echo "provision-test-postgres: temp-mode cache removed (job-owned ephemeral only)"
     return 0
 }
 
 # ---------------------------------------------------------------- acquisition
+
+# Lock ownership metadata (R4-R2 Task E). Written UNDER the held flock so
+# the metadata provably belongs to the locking invocation.
+_fie_cache_lock_write_metadata() {  # <lockfile>
+    : > "${1}"
+    printf 'format=fie-6-9a-acquire-lock-v1\ninvocation=%s\npid=%s\ncreated_utc=%s\ncache_mode=%s\n' \
+        "$( _random_hex 12)" "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "${PG_CACHE_MODE:-}" >> "${1}"
+}
+
+# Classify a cache's .acquire.lock WITHOUT mutating anything. Prints
+# "LOCK_CLASS=<class>" (ABSENT|UNKNOWN|ACTIVE|STALE_JOB_OWNED) on stdout,
+# "0" proven-safe-to-remove; every non-empty class carries the field so it
+# is usable from `--cache-state` and from the cleanup contract.
+fie_test_pg_cache_lock_classify() {  # <cachedir>
+    local cachedir="$1" lock="${1}/.acquire.lock" fmt
+    if [ ! -f "${lock}" ]; then printf 'LOCK_CLASS=ABSENT\n'; return 0; fi
+    fmt="$(grep -m1 '^format=' "${lock}" 2>/dev/null || true)"
+    # Probe: is the flock currently free? (advisory lock on a fresh fd)
+    if ( exec 8>>"${lock}" && flock -n 8 ) 2>/dev/null; then
+        :
+    else
+        printf 'LOCK_CLASS=ACTIVE\n'
+        return 0
+    fi
+    if [ "${fmt}" = "format=fie-6-9a-acquire-lock-v1" ] &&
+        [ -n "$(grep -m1 '^invocation=' "${lock}" 2>/dev/null | cut -d= -f2)" ]; then
+        printf 'LOCK_CLASS=STALE_JOB_OWNED\n'
+        return 0
+    fi
+    printf 'LOCK_CLASS=UNKNOWN\n'
+    return 0
+}
+
+# Safe stale-lock removal (flock-proven dead owner): hold the flock, prove
+# the fie ownership marker, and prove our open fd still resolves to the
+# LIVE path (readlink — no "(deleted)" suffix; stat -c %i on /proc/self/fd/N
+# does NOT follow to the target inode on every kernel), then unlink.
+# Never touches ACTIVE or UNKNOWN locks (fail closed: preserved + reported).
+_fie_cache_lock_remove_if_stale_owned() {  # <cachedir>; 0 removed / 1 kept
+    # ALL steps run in THIS shell (the fd, the flock, the marker check, the
+    # unlink): a subshell-held fd is invisible to the caller's checks, and
+    # the flock must still be HELD at unlink time to exclude new acquirers.
+    local lock="${1}/.acquire.lock" fd_target fmt
+    if ! { exec 8>>"${lock}"; } 2>/dev/null; then
+        return 1
+    fi
+    if ! { flock -n 8; } 2>/dev/null; then
+        exec 8>&- 8<&-
+        return 1
+    fi
+    fmt="$(grep -m1 '^format=' "${lock}" 2>/dev/null || true)"
+    if [ "${fmt}" != "format=fie-6-9a-acquire-lock-v1" ]; then
+        exec 8>&- 8<&-
+        return 1
+    fi
+    fd_target="$(readlink "/proc/self/fd/8" 2>/dev/null || true)"
+    if [ "${fd_target}" != "${lock}" ]; then
+        # our flock is against a replaced/dead inode — leave the LIVE file
+        # to the acquirers' retry loop
+        exec 8>&- 8<&-
+        return 1
+    fi
+    local rc=0
+    rm -f -- "${lock}" || rc=1
+    exec 8>&- 8<&-
+    return "${rc}"
+}
 
 _portable_pg_arch() {
     case "$(uname -m)" in
@@ -427,15 +565,49 @@ _fie_test_pg_ensure_cache() {
     fi
     if [ "${PG_CACHE_PERSISTENT}" = "yes" ]; then
         if command -v flock >/dev/null 2>&1; then
+            # Acquire + inode-verify loop (R4-R2 Task E protocol): a cleanup
+            # may have unlinked the lock file between our open and our flock;
+            # an acquirer discovering it holds a DELETED inode retries so
+            # mutual exclusion is always against the live path inode.
+            local lock_target="" tries=0
+            # NOTE: the null-command `exec` applies redirections PERMANENTLY
+            # — keep the probe inside a `{ ...; } 2>/dev/null` group so the
+            # shell's own stderr (diagnostics!) is never silenced.
             if ! { exec 9>>"${cachedir}/.acquire.lock"; } 2>/dev/null; then
                 _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cannot open cache acquisition lock file"
                 return "${PG_EXIT_CACHE_PATH}"
             fi
-            if ! flock -w 300 9; then
+            while : ; do
+                tries=$(( tries + 1 ))
+                if ! flock -w 300 9; then
+                    exec 9>&- 9<&-
+                    _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cache acquisition lock unavailable after 300s; refusing unsynchronized destructive promotion"
+                    return "${PG_EXIT_CACHE_PATH}"
+                fi
+                # Deleted-inode detection via the /proc magic-symlink marker
+                # (R4-R2 Task E): stat -c %i /proc/self/fd/N does NOT resolve
+                # to the target inode on every kernel — the portable,
+                # exact test is readlink's "(deleted)" suffix. Our flock may
+                # be against a lock file that a concurrent maintenance
+                # unlinked between our open and our flock; retry then, so
+                # mutual exclusion is always against the LIVE path inode.
+                lock_target="$(readlink "/proc/self/fd/9" 2>/dev/null || true)"
+                if [ "${lock_target}" = "${cachedir}/.acquire.lock" ]; then
+                    break
+                fi
+                if [ "${tries}" -ge 25 ]; then
+                    exec 9>&- 9<&-
+                    _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cache acquisition lock kept being replaced during acquisition (concurrent maintenance); refusing acquisition"
+                    return "${PG_EXIT_CACHE_PATH}"
+                fi
                 exec 9>&- 9<&-
-                _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cache acquisition lock unavailable after 300s; refusing unsynchronized destructive promotion"
-                return "${PG_EXIT_CACHE_PATH}"
-            fi
+                if ! { exec 9>>"${cachedir}/.acquire.lock"; } 2>/dev/null; then
+                    _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cannot reopen cache acquisition lock file"
+                    return "${PG_EXIT_CACHE_PATH}"
+                fi
+            done
+            # Ownership metadata is written UNDER the held flock (Task E).
+            _fie_cache_lock_write_metadata "${cachedir}/.acquire.lock" || true
             _cache_cold_acquire "${cachedir}" "${base}" "${arch}" "${ver}" 1
             rc=$?
             exec 9>&- 9<&-
@@ -556,14 +728,18 @@ _fie_test_pg_identity_guard() {
 
 # ---------------------------------------------------------------- readiness
 _pg_py() {
-    local py venv
+    local py
     if [ -n "${FIE_TEST_PG_PYTHON:-}" ]; then printf '%s\n' "${FIE_TEST_PG_PYTHON}"; return 0; fi
-    venv="$(_pg_repo_root)/.venv/bin/python3"
-    for py in "${FIE_PYTHON:-}" "${venv}" "python3"; do
+    # 6.9A-R4-R2-R1 (Task B): the candidate ORDER is the ONE canonical
+    # resolver contract; read line-wise (paths with spaces are safe); the
+    # psycopg-capability check below is the reason this consumer iterates
+    # instead of taking the first candidate.
+    while IFS= read -r py; do
         [ -n "${py}" ] || continue
         command -v "${py}" >/dev/null 2>&1 || continue
+        fie_python_version_ok "${py}" >/dev/null 2>&1 || continue
         "${py}" -c 'import psycopg' >/dev/null 2>&1 && { printf '%s\n' "${py}"; return 0; }
-    done
+    done < <(fie_python_candidates)
     _die "POSTGRESQL_READINESS_FAILED no interpreter with the psycopg client is available (run scripts/bootstrap.sh --all first)"
     return "${PG_EXIT_READINESS}"
 }
@@ -897,7 +1073,31 @@ _provisioner_main() {
         --resolve-cache)
             _fie_test_pg_cache_resolve || return $?
             printf 'CACHE_DIR=%s\nCACHE_MODE=%s\nCACHE_PERSISTENT=%s\n' \
-                "${PG_CACHE_DIR}" "${PG_CACHE_MODE}" "${PG_CACHE_PERSISTENT}" ;;
+                "${PG_CACHE_DIR}" "${PG_CACHE_MODE}" "${PG_CACHE_PERSISTENT}"
+            # Standalone standalone resolution is OBSERVATION-ONLY: a
+            # temp-mode dir resolved here exists only for this invocation —
+            # clean it up instead of leaking it (R4-R2 Task D/C10).
+            fie_test_pg_cache_cleanup >/dev/null 2>&1 || true ;;
+        --cache-state)
+            # Structured cache-state API (R4-R2 Task D3): the one source of
+            # truth tests may use to see the ACTIVE cache. Never a second
+            # resolution engine in the test helpers.
+            _fie_test_pg_cache_resolve || return $?
+            local _warm _cls
+            if [ -x "${PG_CACHE_DIR}/bin/initdb" ] &&
+               [ -x "${PG_CACHE_DIR}/bin/pg_ctl" ] &&
+               [ -x "${PG_CACHE_DIR}/bin/postgres" ] &&
+               [ -f "${PG_CACHE_DIR}/portable-postgres.jar" ] &&
+               [ -f "${PG_CACHE_DIR}/artifact.sha256" ]; then
+                _warm=true
+            else
+                _warm=false
+            fi
+            printf 'CACHE_DIR=%s\nCACHE_MODE=%s\nCACHE_PERSISTENT=%s\nCACHE_WARM=%s\n' \
+                "${PG_CACHE_DIR}" "${PG_CACHE_MODE}" "${PG_CACHE_PERSISTENT}" "${_warm}"
+            fie_test_pg_cache_lock_classify "${PG_CACHE_DIR}" 2>/dev/null ||
+                printf 'LOCK_CLASS=UNKNOWN\n'
+            fie_test_pg_cache_cleanup >/dev/null 2>&1 || true ;;
         --start)
             shift
             fie_test_pg_start "$@" ;;
@@ -925,6 +1125,7 @@ _provisioner_main() {
             printf 'USAGE:\n' >&2
             printf '  scripts/provision-test-postgres.sh --ensure-cache\n' >&2
             printf '  scripts/provision-test-postgres.sh --resolve-cache\n' >&2
+            printf '  scripts/provision-test-postgres.sh --cache-state\n' >&2
             printf '  scripts/provision-test-postgres.sh --start [--force-portable]\n' >&2
             printf '  scripts/provision-test-postgres.sh --stop <job-dir>\n' >&2
             printf '  scripts/provision-test-postgres.sh --run [--force-portable] <child…>\n' >&2

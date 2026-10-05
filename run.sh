@@ -22,24 +22,29 @@ set -u  # fail on unset vars; do NOT set -e — we propagate each step's exit co
 #                      FIE_PYTHON=/path/to/venv/bin/python)
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="${FIE_PROJECT_ROOT:-$REPO_ROOT}"
-# 2026-10-04 (Abacus 6.7B cutover): the invoking Hermes agent shells do not
-# activate the venv, so "python3" resolves to the bare system interpreter
-# without yfinance/PyYAML. Default to the provisioned production venv instead.
-PYTHON_BIN="${FIE_PYTHON:-/home/ubuntu/macro-venv/bin/python3}"
+# 2026-10-04 (Abacus 6.7B cutover) → 2026-10-05 (6.9A-R4-R2-R1 Task B):
+# interpreter resolution is the ONE canonical repository contract
+# (scripts/fie_python_resolver.sh): explicit FIE_PYTHON (hard contract) >
+# the active venv > the repository .venv > PATH python3; fail closed (78)
+# when none is usable. The historical operator-host default
+# (/home/ubuntu/macro-venv/bin/python3) is deliberately ABSENT from the
+# contract: on any other host it was an unusable pre-guard failure for
+# every wrapper path (R4-R2 blocker #1 — 18 focused-suite wrapper records).
+# A host that wants the historical interpreter pins it via FIE_PYTHON.
+. "${REPO_ROOT}/scripts/fie_python_resolver.sh"
+PYTHON_BIN=""
+fie_resolve_python || PYTHON_RESOLVE_RC=$?
+PYTHON_BIN="${FIE_PYTHON_BIN:-}"
+if [ "${PYTHON_RESOLVE_RC:-0}" -ne 0 ]; then
+    echo "run.sh: python interpreter resolution failed (canonical resolver" \
+        "diagnostics above; exit ${PYTHON_RESOLVE_RC}); set FIE_PYTHON" \
+        "(e.g. the repository venv interpreter) and retry" >&2
+    exit 78
+fi
 cd -- "${PROJECT_ROOT}" || {
     echo "run.sh: failed to cd to ${PROJECT_ROOT}" >&2
     exit 5
 }
-# 2026-10-05 (6.8C production hygiene): the default above is the operator-
-# provisioned production venv on the A3 host. On any other environment the
-# default path is absent — fail fast and legibly here (before the DB guard)
-# instead of surfacing a bare "python3: not found" several steps later.
-# Recovery is configuration only: export FIE_PYTHON=<venv>/bin/python3.
-if [ ! -x "${PYTHON_BIN}" ]; then
-    echo "run.sh: FIE_PYTHON interpreter not executable: ${PYTHON_BIN};" \
-        "set FIE_PYTHON (e.g. the repository venv) and retry" >&2
-    exit 78
-fi
 
 # --- 2026-10-04 (incident closure WO): fail-closed rehearsal DB-target guard ---
 # Resolve the intelligence-store seed target BEFORE any write (including

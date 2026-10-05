@@ -24,21 +24,24 @@ set -u  # fail on unset vars; do NOT set -e — we propagate each step's exit co
 #                      FIE_PYTHON=/path/to/venv/bin/python)
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="${FIE_PROJECT_ROOT:-$REPO_ROOT}"
-# 2026-10-04 (Abacus 6.7B cutover): pin the provisioned production venv —
-# the invoking Hermes agent shell does not activate it (see run.sh).
-PYTHON_BIN="${FIE_PYTHON:-/home/ubuntu/macro-venv/bin/python3}"
+# 2026-10-04 (Abacus 6.7B cutover) → 2026-10-05 (6.9A-R4-R2-R1 Task B):
+# interpreter resolution is the ONE canonical repository contract
+# (scripts/fie_python_resolver.sh) — mirrors run.sh; no operator-host
+# fallback path (R4-R2 blocker #1).
+. "${REPO_ROOT}/scripts/fie_python_resolver.sh"
+PYTHON_BIN=""
+fie_resolve_python || PYTHON_RESOLVE_RC=$?
+PYTHON_BIN="${FIE_PYTHON_BIN:-}"
+if [ "${PYTHON_RESOLVE_RC:-0}" -ne 0 ]; then
+    echo "run_weekly.sh: python interpreter resolution failed (canonical" \
+        "resolver diagnostics above; exit ${PYTHON_RESOLVE_RC}); set" \
+        "FIE_PYTHON (e.g. the repository venv interpreter) and retry" >&2
+    exit 78
+fi
 cd -- "${PROJECT_ROOT}" || {
     echo "run_weekly.sh: failed to cd to ${PROJECT_ROOT}" >&2
     exit 5
 }
-# 2026-10-05 (6.8C production hygiene): fail fast and legibly when the
-# operator-production venv default is absent on a non-operator environment
-# (recovery: export FIE_PYTHON=<venv>/bin/python3).
-if [ ! -x "${PYTHON_BIN}" ]; then
-    echo "run_weekly.sh: FIE_PYTHON interpreter not executable: ${PYTHON_BIN};" \
-        "set FIE_PYTHON (e.g. the repository venv) and retry" >&2
-    exit 78
-fi
 
 # --- 2026-10-04 (incident closure WO): fail-closed rehearsal DB-target guard ---
 # Resolve the intelligence-store seed target BEFORE any write (including

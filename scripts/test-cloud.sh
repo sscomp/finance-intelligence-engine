@@ -36,11 +36,16 @@ cd -- "${REPO}" || { echo "test-cloud: cannot cd ${REPO}" >&2; exit 5; }
 MODE="focused"
 [ -n "${1:-}" ] && [ "${1}" = "--full" ] && MODE="full"
 
-# Interpreter: explicit FIE_PYTHON wins; else the canonical .venv created by
-# scripts/bootstrap.sh; else bare python3 (and the deps check below decides).
-PY_BIN="${FIE_PYTHON:-}"
-[ -z "${PY_BIN}" ] && [ -x "${REPO}/.venv/bin/python3" ] && PY_BIN="${REPO}/.venv/bin/python3"
-[ -z "${PY_BIN}" ] && PY_BIN="python3"
+# Interpreter: the ONE canonical resolver (6.9A-R4-R2-R1 Task B) — explicit
+# FIE_PYTHON (hard contract) > active venv > repo .venv > PATH python3.
+. "${REPO}/scripts/fie_python_resolver.sh"
+PY_BIN=""
+fie_resolve_python || PY_RESOLVE_RC=$?
+PY_BIN="${FIE_PYTHON_BIN:-}"
+[ "${PY_RESOLVE_RC:-0}" -ne 0 ] && {
+    echo "test-cloud: python interpreter resolution failed (canonical resolver diagnostics above)" >&2
+    exit 3
+}
 if ! "${PY_BIN}" -c 'import sys; assert sys.version_info >= (3, 11)' 2>/dev/null; then
     echo "test-cloud: python3 >= 3.11 required (run scripts/bootstrap.sh first)" >&2
     exit 3
@@ -178,6 +183,18 @@ DUMP_TARGET="sqlite-only (PG legs skipped by documented reason)"
 [ -n "${FIE_TEST_PG_DSN:-}" ] && DUMP_TARGET="isolated (${FIE_TEST_PG_DSN%%\?*}…)"
 echo "test-cloud: postgres test target = ${DUMP_TARGET}"
 
+# ---- portable distribution cache policy (6.9A-R4-R2-R1, Tasks C/D) --------
+# The portable-legged contract tests run against the ACTIVE canonically
+# resolved cache (tests/cloud_child_env.py is the only helper that resolves
+# it — no second resolution engine). When the active cache is cold through
+# unusable-HOME/XDG (isolated temp mode, per-invocation), ONE explicit
+# job-local cache is warmed under this policy and exported for the suite:
+#   FIE_TEST_PG_ALLOW_REAL_ACQUISITION=1 (test-cloud default) — the helper
+#     may perform ONE network-true warm acquisition; failure ⇒ the
+#     portable-legged tests skip with explicit attribution (never silent).
+#   =0 (suite-direct default) — fully offline; cold cache ⇒ attributed skips.
+export FIE_TEST_PG_ALLOW_REAL_ACQUISITION="${FIE_TEST_PG_ALLOW_REAL_ACQUISITION:-1}"
+
 # ---- negative controls (executed, not read; WO Task G) -------------------
 if ! "${PY_BIN}" scripts/cloud_negative_controls.py; then
     echo "test-cloud: FAIL — runtime negative controls" >&2
@@ -197,9 +214,13 @@ else
         tests.phase3.persistence.test_rehearsal_db_target_guard \
         tests.phase3.persistence.test_67b_r4_sqlite_policy \
         tests.phase3.test_raw_layer_contract_matrix \
+        tests.test_bootstrap_cli_contract \
         tests.test_rehearsal_wrapper_guard \
         tests.test_cloud_pg_provisioning \
         tests.test_cloud_pg_cache_resolver \
+        tests.test_python_resolver_contract \
+        tests.test_cloud_child_network_context \
+        tests.test_pg_cache_lock_ownership \
         tests.test_rehearsal_guard_zero_write_invariant \
         tests.test_wrapper_guard_68a \
         tests.test_db_target_identity

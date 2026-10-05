@@ -295,7 +295,7 @@ python -m phase3.cli --help
 > | `FIE_ARTIFACT_DIR` | 報告 artifact 輸出 | `<專案根>/metadata/reports/artifacts` |
 > | `FIE_DB_PATH` | 歷史資料庫 raw target（SQLite 路徑或 PG DSN；cutover 後生產值為 PG DSN） | （6.8A 起：**無任何預設**；未指定屬 fail-closed） |
 > | `FIE_DATABASE_URL` | intelligence target 指定（SQLite 路徑或 `postgres://` DSN） | （6.8A 起：**無任何預設**；未指定屬 fail-closed） |
-> | `FIE_PYTHON` | wrapper 使用的直譯器 | `python3` |
+> | `FIE_PYTHON` | wrapper 使用的直譯器（6.9A-R4-R2-R1 起：**hard contract** — 設定但不可用 → fail-closed 78；未設定時由 canonical resolver 解析：`$VIRTUAL_ENV` > repo `.venv` > PATH `python3`） | `python3`（未設定時可攜解析） |
 > | `FIE_TELEGRAM_CHAT_ID` / `FIE_TELEGRAM_SECONDARY_CHAT_ID` | 派送 chat ID（個人資料，不落盤） | 無 |
 >
 > **⚠️ 6.8A normalization（2026-10-05，current state）**：上表「預設」欄位的 SQLite
@@ -513,6 +513,14 @@ python -m phase3.cli cross-layer-impact --node "score:macro:global" --db-path /t
 > canonical provisioner 以 pinned、sha256-verified 的 portable PostgreSQL
 > distribution 起出真實 ephemeral cluster（首次取得需 Maven Central 網路；
 > cached 之後離線）。
+> **6.9A-R4-R2-R1**：interpreter 解析走 ONE canonical resolver
+> （`scripts/fie_python_resolver.sh`：explicit `FIE_PYTHON` hard contract >
+> `$VIRTUAL_ENV` > repo `.venv` > PATH `python3`；不可用 → exit 78）— 不依賴
+> operator-host interpreter 路徑；scrubbed test child 以 explicit allowlist
+> 受網路上下文（無 blanket 繼承），secret boundary denylist 永不進 child；
+> 測試側 cache 解析與 runtime 同源（`tests/cloud_child_env.py::canonical_cache_state()`）。
+> portable cache 的 acquisition lock 帶所有權 metadata（LK1）；cleanup 對
+> ACTIVE 保留、對 UNKNOWN fail-closed 96（保留 + 回報）。
 > `FIE_HTTP_PORT=18720` 等覆寫**僅**在服務並存主機上需要；transport tests 本身
 > bind ephemeral 端口，可攜環境不須設定。
 
