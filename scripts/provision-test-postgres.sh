@@ -848,6 +848,100 @@ with open(f"{jobdir}/manifest.json", "w") as f:
 PY
 }
 
+# ---------------------------------------------------------------- ownership registry (R4-R3-R1)
+# Creation-time ownership registry (ONE canonical implementation:
+# scripts/resource_ownership.py). Recorded AT PROVISIONING TIME — teardown
+# and evidence generation never infer ownership after the fact:
+#   job_dir / pgdata_dir / auth_password / log files   (removable paths)
+#   postgres_server process  (pid + start ticks + command signature —
+#                            identity evidence stronger than a bare PID)
+#   socket_dir (= job dir), port, version, mode
+#   cache_dir (TEMP: job-owned removable; PERSISTENT: borrowed evidence only)
+#   lock file (.acquire.lock) of a persistent cache (metadata-proven)
+_pg_write_ownership_registry() {  # <jobdir> <mode> <bindir> [cache_lock] [cache_dir] [cache_temp_created] [cache_mode] [cache_persistent]
+    python3 - "${_PROVISIONER_LIB_DIR}" "${_PROVISIONER_LIB_DIR}/resource_ownership.py" "$@" <<'PY'
+def main():
+    import json, os, sys
+    # Module import by absolute path AND as scripts.resource_ownership (the
+    # namespace-package identity tests import) — the registry FORMAT and
+    # the teardown-evidence semantics belong to that ONE implementation.
+    scripts_dir, module_path = sys.argv[1:3]
+    sys.path.insert(0, scripts_dir)
+    import argparse  # kept import surface minimal on purpose
+    from pathlib import Path
+    if str(Path(scripts_dir).parent) not in sys.path:
+        sys.path.insert(0, str(Path(scripts_dir).parent))
+    from scripts.resource_ownership import (
+        CACHE_MARKER_FORMAT, new_registry, record_resource, write_registry)
+    jobdir, mode, bindir = sys.argv[3:6]
+    cache_lock = sys.argv[6] if len(sys.argv) > 6 else ""
+    cache_dir = sys.argv[7] if len(sys.argv) > 7 else ""
+    cache_temp = sys.argv[8] if len(sys.argv) > 8 else ""
+    cache_state = dict(zip(("cache_mode", "cache_persistent"),
+                           (sys.argv[9:11] if len(sys.argv) > 10
+                            else ("", ""))))
+    registry = new_registry(
+        json.load(open(f"{jobdir}/manifest.json"))["job_id"])
+    # Removable job dirs + the identity marker files that prove them.
+    record_resource(registry, "job_dir", path=jobdir,
+                    marker="pgdata/fie_ephemeral_pg.owner",
+                    metadata={"server_mode": mode})
+    record_resource(registry, "pgdata_dir", path=f"{jobdir}/pgdata")
+    record_resource(registry, "auth_password", path=f"{jobdir}/auth.password")
+    for name in ("initdb.log", "pg.log", "pg_ctl_start.log",
+                 "readiness.json", "bind_proof.txt", "test_pg.env"):
+        p = f"{jobdir}/{name}"
+        if os.path.exists(p):
+            record_resource(registry, "log_file", path=p, removable=True)
+    record_resource(registry, "socket_dir", path=jobdir,
+                    metadata={"purpose": "postgres unix socket directory"})
+    if cache_dir:
+        # discovered system tooling: the job created NO cache dir — record
+        # nothing (nothing job-owned to tear down)
+        record_resource(registry, "cache_dir",
+                        path=cache_dir,
+                        removable=bool(cache_temp),
+                        metadata={"mode": cache_state.get("cache_mode", ""),
+                                  "persistable":
+                                      cache_state.get("cache_persistent", ""),
+                                  "temp_created": bool(cache_temp)})
+    if cache_lock and os.path.exists(cache_lock):
+        record_resource(registry, "lock_file", path=cache_lock,
+                        marker=".acquire.lock",
+                        removable=True,
+                        metadata={"format": "fie-6-9a-acquire-lock-v1"})
+    # The long-lived server process itself: identity evidence read from
+    # postmaster.pid (pid / data_dir / start timestamp) + /proc cmdline.
+    pm_pid, pm_data_dir = "0", ""
+    try:
+        lines = open(f"{jobdir}/pgdata/postmaster.pid").read().splitlines()
+        pm_pid, pm_data_dir = lines[0], lines[1]
+    except (OSError, IndexError):
+        pass
+    proc = {"pid": int(pm_pid) if pm_pid.isdigit() else None,
+            "data_dir": pm_data_dir,
+            "start_ticks": None, "command_signature": ""}
+    if proc["pid"]:
+        try:
+            base = f"/proc/{proc['pid']}"
+            import time as _t
+            stat = open(f"{base}/stat").read()
+            fields = stat[stat.rindex(")") + 2:].split()
+            proc["start_ticks"] = int(fields[19])
+            proc["command_signature"] = " ".join(
+                open(f"{base}/cmdline", "rb").read().decode(
+                    "utf-8", "replace").split("\0")).strip()
+        except (OSError, IndexError, ValueError):
+            pass
+    record_resource(registry, "postgres_server", process=proc,
+                    path=jobdir,
+                    marker="pgdata/fie_ephemeral_pg.owner",
+                    metadata={"bindir": bindir, "mode": mode})
+    write_registry(registry, f"{jobdir}/ownership_registry.json")
+main()
+PY
+}
+
 # ---------------------------------------------------------------- start/stop
 _pg_cleanup_failed_job() {  # <jobdir> <bindir>: deterministic owned-state cleanup
     local jobdir="$1" bindir="$2"
@@ -1006,6 +1100,15 @@ PY
         _die "POSTGRESQL_START_FAILED manifest write failed; owned state removed"
         return "${PG_EXIT_START}"
     }
+    _pg_write_ownership_registry "${jobdir}" "${mode}" "${bindir}" \
+        "${PG_CACHE_DIR:+${PG_CACHE_DIR}/.acquire.lock}" \
+        "${PG_CACHE_DIR:-}" "${PG_CACHE_TEMP_CREATED:-}" \
+        "${PG_CACHE_MODE:-}" "${PG_CACHE_PERSISTENT:-}" || {
+        "${bindir}/pg_ctl" -m fast stop -D "${jobdir}/pgdata" >/dev/null 2>&1 || true
+        rm -rf -- "${jobdir}"
+        _die "POSTGRESQL_START_FAILED ownership registry write failed; owned state removed"
+        return "${PG_EXIT_TEARDOWN}"
+    }
     FIE_TEST_PG_JOB_DIR="${jobdir}"
     FIE_TEST_PG_MODE="${mode}"
     FIE_TEST_PG_BIN_DIR="${bindir}"
@@ -1023,6 +1126,16 @@ PY
 
 # Stop ONLY the job-owned cluster and remove ONLY its job dir. Idempotent;
 # refuses (exit 96) any dir whose ownership cannot be proven.
+_pg_stop_verify_stopped() {  # args: <pgdata> <observer_pid>; registry on stdin
+    python3 "${_PROVISIONER_LIB_DIR}/resource_ownership.py" verify-stopped \
+        --data-dir "$1" --observer "$2"
+}
+
+_pg_stop_evidence_emit() {  # args: <jobdir>; registry on stdin
+    python3 "${_PROVISIONER_LIB_DIR}/resource_ownership.py" stop-evidence \
+        --job-dir "$1" --removed-dir "$1"
+}
+
 fie_test_pg_stop() {
     local dir
     if [ -n "${1:-}" ]; then dir="$1"; else dir="${FIE_TEST_PG_JOB_DIR:-}"; fi
@@ -1051,14 +1164,32 @@ fie_test_pg_stop() {
     [ -n "${marker_bin}" ] && [ -x "${marker_bin}/pg_ctl" ] || {
         marker_bin="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("bin_dir",""))' "${dir}/manifest.json" 2>/dev/null || true)"
     }
+    local reg_json=""
+    if [ -f "${dir}/ownership_registry.json" ]; then
+        reg_json="$(cat "${dir}/ownership_registry.json")"
+    fi
     if [ -n "${marker_bin}" ] && [ -x "${marker_bin}/pg_ctl" ]; then
         "${marker_bin}/pg_ctl" -D "${pgdata}" -m fast stop \
             > "${dir}/pg_ctl_stop.log" 2>&1 || true
+    fi
+    # Ownership-proven stopped-state verification (R4-R3-R1): the registry's
+    # server process (and any child attributable ONLY by this job's data-dir
+    # command signature) must be ENDED before the job dir is removed. A
+    # still-live job-owned server after 'pg_ctl fast stop' is a failed
+    # teardown — fail closed, PRESERVE, never escalate to arbitrary kills
+    # (no pkill/killall/wildcard: that would touch foreign processes).
+    if [ -n "${reg_json}" ] &&
+        ! printf '%s' "${reg_json}" | _pg_stop_verify_stopped "${pgdata}" "$$"; then
+        _die "POSTGRESQL_TEARDOWN_FAILED registry-proven postgres processes remain alive after the granted stop mechanism (preserved; no kill outside pg_ctl)"
+        return "${PG_EXIT_TEARDOWN}"
     fi
     rm -rf -- "${dir}" || true
     if [ -d "${dir}" ]; then
         _die "POSTGRESQL_TEARDOWN_FAILED job dir still present after cleanup"
         return "${PG_EXIT_TEARDOWN}"
+    fi
+    if [ -n "${reg_json}" ]; then
+        printf '%s' "${reg_json}" | _pg_stop_evidence_emit "${dir}"
     fi
     echo "provision-test-postgres: stopped and removed ONLY job-owned state ($(date -u +%H:%M:%SZ))"
     return 0

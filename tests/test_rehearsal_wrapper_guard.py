@@ -355,20 +355,85 @@ class WrapperNegativeTests(unittest.TestCase):
                     assert_target_absent=False)
 
     def test_g6_host_wrapper_env_file_signature_rejected(self):
-        # Host-specific variant of the G6 signature: with the default
-        # wrapper env file in place (FIE_WRAPPER_ENV unset), whatever
-        # FIE_INTELLIGENCE_DB it declares must not reach a test-mode
-        # pipeline. When the wrapper env file is absent the wrapper hits
-        # the missing-target refusal instead — both are rc 78 refusals,
-        # so this holds on every host; skip only when NEITHER path exists.
-        if not Path(WRAPPERS_DEFAULT_ENV).exists():
-            self.skipTest(
-                "host wrapper env file absent; G6 signature covered by "
-                "test_g6_wrapper_env_prod_dsn_before_guard_rejected")
-        self._assert_refused("run.sh", {"FIE_SERVICE_ENV": "test"},
-                             assert_target_absent=False)
-        self._assert_refused("run_weekly.sh", {"FIE_SERVICE_ENV": "test"},
-                             assert_target_absent=False)
+        # HERMETIC (R4-R3-R1 Task B) — the former host-conditional variant
+        # skipped when the operator-host wrapper env file was absent; the
+        # invariant is now exercised with repository-owned synthetic
+        # fixtures through the documented FIE_WRAPPER_ENV injection
+        # boundary, so this test EXECUTES on every host (no skip, no
+        # xfail, no weakened assertion). Security property preserved:
+        # a wrapper env file whose declared FIE_INTELLIGENCE_DB resolves
+        # to a Production-equivalent identity is REJECTED fail-closed
+        # (rc 78) in test/staging mode BEFORE any protected execution;
+        # malformed and empty declarations fail closed likewise; the
+        # host's own wrapper env file (present or absent) is never
+        # consulted while FIE_WRAPPER_ENV is set.
+        prod = _ensure_prod_store_for_runtime(self, "run.sh")
+        prod_sha_before = _sha256(prod)
+        contract = _fixture_prod_contract(self.tmp)
+        stub = _make_stub_python(self.tmp)
+        fixtures = (
+            # production-equivalent DSN declared by the wrapper env file
+            ("fixture-wrapper-prod-signature.env",
+             f"export FIE_INTELLIGENCE_DB='{FIXTURE_PROD_DSN}'\n",
+             "Production-equivalent PostgreSQL target", "test"),
+            ("fixture-wrapper-prod-signature.env",
+             f"export FIE_INTELLIGENCE_DB='{FIXTURE_PROD_DSN}'\n",
+             "Production-equivalent PostgreSQL target", "staging"),
+            # malformed (whitespace-bearing) declaration
+            ("fixture-wrapper-malformed.env",
+             "export FIE_INTELLIGENCE_DB='my store.db'\n",
+             "malformed FIE_INTELLIGENCE_DB", "test"),
+        )
+        for name, body, expect_msg, mode in fixtures:
+            env_file = _make_env_file(self.tmp, name, body)
+            for wrapper in WRAPPERS:
+                result = _run_wrapper(wrapper, {
+                    "FIE_SERVICE_ENV": mode,
+                    "FIE_WRAPPER_ENV": env_file,
+                    "FIE_PRODUCTION_DB_CONTRACT": contract,
+                    "FIE_PYTHON": stub})
+                self.assertNotEqual(result.returncode, 0,
+                                    f"{wrapper}/{name}: wrapper env-file "
+                                    f"signature unexpectedly accepted "
+                                    f"(stdout: {result.stdout[-400:]})")
+                self.assertEqual(result.returncode, REFUSAL_RC,
+                                 f"{wrapper}/{name}: refusal must exit 78")
+                self.assertIn(GUARD_CODE, result.stderr, result.stderr)
+                self.assertIn(expect_msg, result.stderr, result.stderr)
+                # Protected execution NEVER proceeds after rejection.
+                self.assertNotIn("STUB_STEP1_SENTINEL", result.stdout,
+                                 f"{wrapper}/{name}: Step 1 ran after a "
+                                 "signature rejection")
+        # Missing signature: an env file that declares NOTHING must fail
+        # closed in rehearsal mode (missing-target refusal).
+        empty_env = _make_env_file(self.tmp, "fixture-wrapper-empty.env", "")
+        for wrapper in WRAPPERS:
+            result = _run_wrapper(wrapper, {
+                "FIE_SERVICE_ENV": "test",
+                "FIE_WRAPPER_ENV": empty_env,
+                "FIE_PRODUCTION_DB_CONTRACT": contract,
+                "FIE_PYTHON": stub})
+            self.assertEqual(result.returncode, REFUSAL_RC, result.stderr)
+            self.assertIn(GUARD_CODE, result.stderr)
+            self.assertNotIn("STUB_STEP1_SENTINEL", result.stdout)
+        # Valid signature, accepted ONLY where appropriate: a wrapper env
+        # file declaring a PROVEN non-Production target proceeds to Step 1
+        # (stubbed; sentinel + exit 42) with zero writes anywhere.
+        safe_env = _make_env_file(self.tmp, "fixture-wrapper-safe.env",
+                                  f"export FIE_INTELLIGENCE_DB='{FIXTURE_SAFE_PG_DSN}'\n")
+        for wrapper in WRAPPERS:
+            result = _run_wrapper(wrapper, {
+                "FIE_SERVICE_ENV": "test",
+                "FIE_WRAPPER_ENV": safe_env,
+                "FIE_PRODUCTION_DB_CONTRACT": contract,
+                "FIE_PYTHON": stub})
+            self.assertNotIn(GUARD_CODE, result.stderr, result.stderr)
+            self.assertIn("STUB_STEP1_SENTINEL", result.stdout)
+            self.assertEqual(result.returncode, 42,
+                             f"{wrapper}: stub sentinel exit expected")
+        self.assertEqual(_sha256(prod), prod_sha_before,
+                         "production store changed during the env-file "
+                         "signature contract")
 
     def test_g6_alias_dsn_forms_of_prod_identity_rejected(self):
         # Alternate PostgreSQL DSN spellings resolving to the SAME

@@ -34,7 +34,14 @@ set -u
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd -- "${REPO}" || { echo "test-cloud: cannot cd ${REPO}" >&2; exit 5; }
 MODE="focused"
-[ -n "${1:-}" ] && [ "${1}" = "--full" ] && MODE="full"
+UNITS=" "
+for arg in ${1:-} ${2:-}; do
+    case "${arg}" in
+        -v|--verbose) UNITS=" -v " ;;
+        --full) MODE="full" ;;
+        *) echo "test-cloud: unknown option '${arg}'" >&2; exit 5 ;;
+    esac
+done
 
 # Interpreter: the ONE canonical resolver (6.9A-R4-R2-R1 Task B) — explicit
 # FIE_PYTHON (hard contract) > active venv > repo .venv > PATH python3.
@@ -204,11 +211,11 @@ fi
 # ---- tests ---------------------------------------------------------------
 if [ "${MODE}" = "full" ]; then
     echo "test-cloud: full hermetic regression (unittest discover)"
-    "${PY_BIN}" -m unittest discover -s tests --top-level-dir=.
+    "${PY_BIN}" -m unittest discover${UNITS}-s tests --top-level-dir=.
     RC=$?
 else
     echo "test-cloud: focused cloud-readiness set"
-    "${PY_BIN}" -m unittest \
+    "${PY_BIN}" -m unittest${UNITS}\
         tests.phase3.test_runtime_contract \
         tests.phase3.persistence.test_backend_contract \
         tests.phase3.persistence.test_rehearsal_db_target_guard \
@@ -223,7 +230,8 @@ else
         tests.test_pg_cache_lock_ownership \
         tests.test_rehearsal_guard_zero_write_invariant \
         tests.test_wrapper_guard_68a \
-        tests.test_db_target_identity
+        tests.test_db_target_identity \
+        tests.test_resource_ownership_contract
     RC=$?
 fi
 
