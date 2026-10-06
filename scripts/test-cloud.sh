@@ -289,5 +289,14 @@ if [ "${RC}" -eq 0 ]; then
     fi
 else
     echo "test-cloud: FAIL (${MODE}) rc=${RC}" >&2
+    # WO 6.9A-R4-R7-R1 §8: a failing test run is classified, not collapsed.
+    # If the failure is attributable to tracked repository code →
+    # FIE_DEFECT; if it is an external/transient cloud failure (network,
+    # host resources) unrelated to tracked code → ENVIRONMENTAL_TRANSIENT;
+    # attribution is evidence-based, never assumed.
+    echo "test-cloud: classification — failures attributable to tracked " \
+         "repository code: FAILURE_CLASSIFICATION=FIE_DEFECT; external/" \
+         "transient cloud failure not attributable to tracked code: " \
+         "FAILURE_CLASSIFICATION=ENVIRONMENTAL_TRANSIENT" >&2
 fi
 exit "${RC}"

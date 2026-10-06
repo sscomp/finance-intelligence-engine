@@ -230,6 +230,63 @@ O8 platform provenance 缺席非 failure、O9 矛盾 freshness evidence 阻擋�
 assertion 永不合成、O11 mandatory failure 阻止全部 workload、O12 receipt null
 語意保留。
 
+## 5B. Platform boundary realignment（6.9A-R4-R7-R1）
+
+**Codex Cloud validation is a clean-room execution acceptance of the published
+FIE revision.** The guest environment demonstrates that the published revision
+bootstraps, provisions its isolated runtime dependencies, executes its
+acceptance workload, preserves Production safety, and tears down without
+job-owned residue. It does **not** certify hidden Codex Cloud control-plane
+provenance (job identity, scheduler/container creation, UI-session novelty)
+unless such provenance is explicitly exposed by the platform as a trustworthy
+machine-readable primitive.
+
+### Three authorities
+
+| Authority | Examples | Contract role |
+|---|---|---|
+| Platform / Owner | owner intentionally launched a new Codex Cloud job; control-plane job identity; scheduler/container provenance; infrastructure freshness guarantees | recorded as **operator context only**; MUST NOT become a guest-runtime blocking assertion while no trustworthy guest-observable primitive exists |
+| Guest / runtime | exact Git HEAD; clean working tree; environment/path/cache state; bootstrap result; portable PostgreSQL behavior; loopback binding; test outcomes; Production DSN availability/use; resource ownership; teardown; residual processes/files/locks/cache | **valid automated acceptance gates** |
+| Production | Production DSN / database | **independently protected** — never used, contacted, mutated, deployed to or depended upon by the acceptance job; protected by TWO separate controls below |
+
+### Two separate Production controls（取代先前過載的 PRE 概念）
+
+- **Gate A — Pre-bootstrap Production access safety preflight**（bootstrap
+  之前；stdlib-only 非接觸式檢查）：證明 bootstrap context 不含 actionable
+  Production 目標（`BOOTSTRAP_PRODUCTION_DSN_AVAILABLE=false`），且實作不會為了
+  證明「沒有接觸」而接觸 Production；分類 `PRODUCTION_SAFETY_BLOCK` fail-closed。
+- **Gate B — Canonical PRE/POST fingerprint**：在 bootstrap 建立了
+  fingerprint 所需的 canonical runtime **之後**、acceptance workload 之前擷取
+  PRE；在全部 workload 之後、closure 之前擷取 POST 並要求 PRE==POST
+  （不一致 = `PRODUCTION_SAFETY_BLOCK` hard stop）。target 一律是
+  `SYNTHETIC_HERMETIC_PRODUCTION_SHAPED_FIXTURE`（canonical zero-write
+  fixture），**每次擷取的 target identity 皆被明示宣告**，無 silent
+  substitution。
+
+### Provenance receipt fields（§5.3 三欄語意）
+
+| 欄位 | 語意 |
+|---|---|
+| `CLOUD_JOB_OPERATOR_CONTEXT` | **informational operator context**（預設 "owner-launched fresh Codex Cloud acceptance job"）；僅供 receipt 記錄，**永遠不是** pass 條件也不是 platform proof |
+| `RUNTIME_FRESHNESS_CONSISTENCY_VERIFIED` | `true\|false` — 觀測到的 runtime 與**所需 clean-room 條件一致**而已；**不是** FIE 對「新 Codex Cloud job 被建立」的 control-plane 證明 |
+| `PLATFORM_FRESH_JOB_PROVENANCE_AVAILABLE` | `false`（本契約不假設 platform provenance primitive）；**其缺席本身永遠不使 acceptance 失敗**，分類為 `PLATFORM_CAPABILITY_UNAVAILABLE`（informational）。若平台未來暴露可信原語，可加入為 optional stronger check，不改變基準 acceptance 定義 |
+| `OWNER_FRESH_JOB_ASSERTION` | operator 斷言：`true` \| `false` \| **`NOT_RUNTIME_AUTHORITATIVE`**（absent 時的明示代表值）；程式碼**永不**從 env heuristics、PID、時間戳、filesystem age、cache state、git state 或 operator 輸入字串合成此值。runtime freshness 矛盾**即使** operator 斷言為 true 也依然 fail-closed |
+
+### Failure classification（§8 — 分類，不塌縮）
+
+每個 fail-closed 拒絕都攜帶明示分類（banner `[CLASSIFICATION]` + JSON
+`failure_classification`）：
+
+```text
+FIE_DEFECT                        — tracked FIE 實作/runtime/test 缺陷阻止 acceptance
+ACCEPTANCE_CONTRACT_DEFECT        — 順序矛盾/非法 transition/前置不滿足（ORDERING_PREREQUISITE）
+PLATFORM_CAPABILITY_UNAVAILABLE   — 平台事實無法從 guest 權威觀測（informational，永不轉為 FIE_DEFECT、永不阻擋）
+ENVIRONMENTAL_TRANSIENT           — 外部/暫時性 Cloud 失敗，不可歸因於 tracked code
+PRODUCTION_SAFETY_BLOCK           — 可能暴露/接觸/更動 Production 的任何條件（即時 hard stop）
+RUNTIME_CLEAN_ROOM_CONTRADICTION  — 繼承殘留/矛盾 clean-room 證據（環境條件，非 tracked FIE 缺陷）
+PASS                              — 所有 required observable gates 通過
+```
+
 ## 6. Artifact outputs / exit status
 
 | 項目 | 契約 |
@@ -256,6 +313,12 @@ NETWORK ACCESS（測試）                        = 不需要（suite determinis
 任何 gate failure（bootstrap、preflight、negative controls、tests）→
 exit code 非零、stderr 明示原因；execution environment 不得「人工補齊」後宣稱
 PASS（G7 紀律）。缺陷回報 owner，不得 push / deploy / 改寫歷史。
+（6.9A-R4-R7-R1）所有拒絕一律**攜帶明示 failure classification**（見 §5B），
+不塌縮為 generic remediation：`PRODUCTION_SAFETY_BLOCK`（Production 暴露/接觸）、
+`ACCEPTANCE_CONTRACT_DEFECT`（順序/契約矛盾）、`FIE_DEFECT`（tracked code 缺陷）、
+`ENVIRONMENTAL_TRANSIENT`（外部暫時性）、`RUNTIME_CLEAN_ROOM_CONTRADICTION`
+（clean-room 矛盾）、`PLATFORM_CAPABILITY_UNAVAILABLE`（informational，
+永不阻擋也永不轉為 FIE_DEFECT）。
 
 ## 9. Network assumptions
 
@@ -300,4 +363,14 @@ Phase 6.9A-R4-R6-R1（2026-10-06）— §5A added: corrected acceptance ordering
 state machine + acceptance-context gate in scripts/test-cloud.sh +
 fresh-job provenance contract（owner assertion nullable、never synthesized;
 platform provenance assumed absent）. Root cause：R4-R6 的 pre-bootstrap
-fingerprint 要求與 canonical SQL client 之間的依賴循環。*
+fingerprint 要求與 canonical SQL client 之間的依賴循環。
+Phase 6.9A-R4-R7-R1（2026-10-06）— §5B added: platform boundary realignment.
+Codex Cloud = clean-room EXECUTION acceptance only; platform/control-plane
+provenance is not guest authority (owner assertion → informational,
+NOT_RUNTIME_AUTHORITATIVE when absent; CLOUD_JOB_OPERATOR_CONTEXT /
+RUNTIME_FRESHNESS_CONSISTENCY_VERIFIED / PLATFORM_FRESH_JOB_PROVENANCE_
+AVAILABLE 三欄語意; provenance 缺席分類 PLATFORM_CAPABILITY_UNAVAILABLE，
+永不阻擋)。Production protection split into two separate controls
+（Gate A pre-bootstrap access-safety preflight; Gate B canonical PRE/POST
+fingerprint after bootstrap, target identity declared per capture）。
+failure classification taxonomy added（§8/§5B）。*

@@ -6,12 +6,20 @@ Covers O1-O12 of the corrected acceptance sequence:
     preflight -> bootstrap -> PRE fingerprint -> acceptance workloads
               -> POST fingerprint -> match -> cleanup -> seal
 
+Plus the 6.9A-R4-R7-R1 platform-boundary realignment coverage (WO §5.1/
+§5.3/§8, Tasks C/D/E): provenance authority split (operator context is
+informational only; absent owner assertion = NOT_RUNTIME_AUTHORITATIVE,
+never synthesized, never blocking; platform provenance absence is
+never a failure), and the §8 failure classification taxonomy on every
+fail-closed path.
+
 All fixtures are synthetic (obviously-synthetic DSNs/names, temp state
 files); no real credential, no Production contact, no network.
 """
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import stat
@@ -19,7 +27,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
@@ -643,6 +653,208 @@ class ReceiptCompletenessTests(unittest.TestCase):
         # the state-machine module can never produce a PASS-like value
         # for a stage it did not run: transition requires strict chain
         self.assertEqual(ac.CHAIN[0], "INIT")
+
+
+def _first_json(text: str) -> dict:
+    """Extract the first JSON document from mixed CLI output (the
+    acceptance contract prefixes plain 'state -> state' lines before the
+    result JSON on some paths)."""
+    start = text.index("{")
+    doc, _end = json.JSONDecoder().raw_decode(text[start:])
+    return doc
+
+
+class PlatformBoundaryRealignmentTests(_StateHarness):
+    """6.9A-R4-R7-R1 §5.1/§5.3 — provenance authority split (Task C).
+
+    Owner/platform assertions are informational ONLY: an absent owner
+    assertion must not block an otherwise valid run, and NO provenance
+    value (owner assertion or operator context) can convert a runtime
+    whose observed state contradicts the clean-room conditions into PASS.
+    """
+
+    def _contradiction_scope(self) -> str:
+        # Minimal deterministic clean-room contradiction: a predecessor
+        # remediation artifact in the job root (no processes spawned —
+        # O9/O9b cover the process-residue path separately).
+        d = tempfile.mkdtemp(prefix="fie-acc-boundary-")
+        self.addCleanup(_rm_tree, d)
+        (Path(d) / "ABACUS_FIE_6_9A_R4_R5_R1_EVIDENCE").mkdir()
+        (Path(d) / "ABACUS_FIE_6_9A_R4_R5_R1_EVIDENCE" / "note.md") \
+            .write_text("predecessor residue (synthetic fixture)\n")
+        return ["--job-root", d, "--tmpdir", d]
+
+    def test_owner_assertion_true_cannot_rescue_contradictions(self):
+        # Task C regression 3: no fake/provided provenance value can
+        # convert a noncompliant runtime into PASS — even the strongest
+        # owner assertion ("true") leaves contradicting runtime evidence
+        # fail-closed.
+        out = _run_subproc(["provenance"] + self._contradiction_scope(),
+                           extra_env={"FIE_OWNER_FRESH_JOB_ASSERTION":
+                                      "true"})
+        self.assertEqual(out.returncode, ac.FAIL_CLOSED_EXIT, out.stdout)
+        doc = json.loads(out.stdout)
+        self.assertFalse(doc["runtime_freshness_consistency_verified"])
+        self.assertEqual(doc["fresh_codex_cloud_job_provenance"],
+                         "RUNTIME_CONTRADICTIONS_BLOCK_ACCEPTANCE")
+        self.assertTrue(doc["owner_fresh_job_assertion"])  # recorded, powerless
+
+    def test_operator_context_is_informational_and_never_blocking(self):
+        # The operator context string is recorded for the receipt and can
+        # never act as proof: an asserted-true-styled context plus a
+        # runtime contradiction still fails closed.
+        out = _run_subproc(
+            ["provenance"] + self._contradiction_scope(),
+            extra_env={"FIE_CLOUD_JOB_OPERATOR_CONTEXT":
+                       "operator context: this session claims fresh"})
+        self.assertEqual(out.returncode, ac.FAIL_CLOSED_EXIT, out.stdout)
+        doc = json.loads(out.stdout)
+        self.assertEqual(doc["cloud_job_operator_context"],
+                         "operator context: this session claims fresh")
+        self.assertFalse(doc["runtime_freshness_consistency_verified"])
+
+    def test_platform_provenance_absence_is_informational_only(self):
+        fresh = ["--job-root", tempfile.mkdtemp(prefix="fie-acc-fresh-"),
+                 "--tmpdir", tempfile.mkdtemp(prefix="fie-acc-fresh-")]
+        self.addCleanup(_rm_tree, fresh[1])
+        self.addCleanup(_rm_tree, fresh[3])
+        out = _run_subproc(["provenance"] + fresh)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        doc = json.loads(out.stdout)
+        self.assertFalse(doc["platform_fresh_job_provenance_available"])
+        self.assertIn("PLATFORM_CAPABILITY_UNAVAILABLE",
+                      doc["platform_fresh_job_provenance_classification"])
+        # recorded classification is explicitly non-blocking and is never
+        # converted into FIE_DEFECT:
+        self.assertIn("never fails acceptance", doc[
+            "platform_fresh_job_provenance_classification"])
+
+    def test_runtime_freshness_semantics_are_limited_to_what_they_prove(self):
+        # §5.1: the freshness field means ONLY "observed runtime is
+        # consistent with the required clean-room conditions" — the
+        # declaration rides every provenance result.
+        fresh = ["--job-root", tempfile.mkdtemp(prefix="fie-acc-fresh-"),
+                 "--tmpdir", tempfile.mkdtemp(prefix="fie-acc-fresh-")]
+        self.addCleanup(_rm_tree, fresh[1])
+        self.addCleanup(_rm_tree, fresh[3])
+        out = _run_subproc(["provenance"] + fresh)
+        doc = json.loads(out.stdout)
+        self.assertIn("NOT a control-plane proof",
+                      doc["runtime_freshness_semantics"])
+        self.assertIn("clean-room conditions",
+                      doc["runtime_freshness_semantics"])
+
+    def test_operator_context_default_shape(self):
+        fresh = ["--job-root", tempfile.mkdtemp(prefix="fie-acc-fresh-"),
+                 "--tmpdir", tempfile.mkdtemp(prefix="fie-acc-fresh-")]
+        self.addCleanup(_rm_tree, fresh[1])
+        self.addCleanup(_rm_tree, fresh[3])
+        doc = json.loads(_run_subproc(["provenance"] + fresh).stdout)
+        self.assertEqual(doc["cloud_job_operator_context"],
+                         ac.OPERATOR_CONTEXT_DEFAULT)
+        self.assertIn("informational", doc[
+            "cloud_job_operator_context_authority"])
+
+
+class FailureClassificationTests(_StateHarness):
+    """6.9A-R4-R7-R1 §8 — every fail-closed refusal classifies (Task D)."""
+
+    def _subproc_banner(self, args, extra_env=None):
+        out = _run_subproc(args, extra_env=extra_env)
+        combined = out.stdout + out.stderr
+        return out, combined
+
+    def test_preflight_blocker_classified_production_safety_block(self):
+        out, combined = self._subproc_banner(
+            ["preflight"], extra_env={
+                "FIE_INTELLIGENCE_DB": SYNTHETIC_PROD_DSN})
+        self.assertEqual(out.returncode, ac.FAIL_CLOSED_EXIT)
+        self.assertIn("[PRODUCTION_SAFETY_BLOCK]", out.stderr)
+        self.assertEqual(
+            json.loads(out.stdout)["failure_classification"],
+            "PRODUCTION_SAFETY_BLOCK")
+
+    def test_preflight_clean_classified_pass(self):
+        out, _ = self._subproc_banner(["preflight"])
+        self.assertEqual(out.returncode, 0)
+        self.assertEqual(
+            json.loads(out.stdout)["failure_classification"], "PASS")
+
+    def test_illegal_transition_classified_acceptance_contract_defect(self):
+        out, _ = self._subproc_banner(
+            ["transition", "PRE_FINGERPRINT_CAPTURED",
+             "--state-file", self.state_file])
+        self.assertEqual(out.returncode, ac.FAIL_CLOSED_EXIT)
+        # ordering contradiction detected by the verifier; the banner
+        # classification is ACCEPTANCE_CONTRACT_DEFECT and the refusal
+        # remains an ORDERING_PREREQUISITE — never a Production claim.
+        self.assertIn("[ACCEPTANCE_CONTRACT_DEFECT]", out.stderr)
+        self.assertIn("ORDERING_PREREQUISITE", out.stderr)
+        self.assertEqual(
+            ac.load_state(Path(self.state_file))["state"], "INIT")
+
+    def test_pre_post_mismatch_classified_production_safety_block(self):
+        # POST fingerprint comparison against a PRE that no longer matches
+        # → PRODUCTION_SAFETY_BLOCK hard stop (Task E: PRE/POST mismatch).
+        # The canonical capture is mocked at THIS boundary only; the real
+        # mismatch-detection control path (exact key-space comparison →
+        # classified refusal) is the thing under test.
+        self.advance(*ac.CHAIN[1:ac.CHAIN.index("FULL_REGRESSION_PASSED") + 1])
+        doc = ac.load_state(Path(self.state_file))
+        doc.setdefault("stage_records", {})["pre_fingerprint"] = {
+            "at_utc": "2000-01-01T00:00:00Z",
+            "fingerprints": {"pg:fixture_digest": "aaa"}}
+        ac.save_state(Path(self.state_file), doc)
+        divergent = {"fingerprints": {"pg:fixture_digest": "aaa",
+                                      "pg:extra_key": "zzz"},
+                     "teardown_evidence": {"cleaned": True}}
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        with mock.patch.object(ac, "_canonical_fingerprint",
+                               return_value=divergent):
+            with redirect_stdout(buf_out):
+                with self.assertRaises(ac.ContractError) as ctx:
+                    ac.cmd_fingerprint(ac._Args(stage="POST",
+                                                state_file=self.state_file))
+        self.assertEqual(ctx.exception.classification,
+                         "PRODUCTION_SAFETY_BLOCK")
+        printed = _first_json(buf_out.getvalue())
+        self.assertFalse(printed["PRODUCTION_FINGERPRINT_MATCH"])
+        self.assertEqual(printed["failure_classification"],
+                         "PRODUCTION_SAFETY_BLOCK")
+        self.assertIn("pg:extra_key", printed["keys_only_in_post"])
+
+    def test_fingerprint_target_identity_declared_on_both_captures(self):
+        # §5.2: no silent substitution — both PRE and POST captures declare
+        # the canonical SYNTHETIC hermetic fixture target identity (real
+        # command path exercised; only the PG-backed capture is mocked).
+        self.advance(*ac.CHAIN[1:ac.CHAIN.index("BOOTSTRAP_PASSED") + 1])
+        record = {"fingerprints": {"pg:fixture_digest": "aaa"},
+                  "teardown_evidence": {"cleaned": True}}
+        buf = io.StringIO()
+        with mock.patch.object(ac, "_canonical_fingerprint",
+                               return_value=record):
+            with redirect_stdout(buf):
+                rc = ac.cmd_fingerprint(ac._Args(stage="PRE",
+                                                 state_file=self.state_file))
+        self.assertEqual(rc, 0)
+        printed = _first_json(buf.getvalue())
+        self.assertTrue(printed["PRE_FINGERPRINT_CAPTURED"])
+        self.assertEqual(printed["fingerprint_target_class"],
+                         ac.FINGERPRINT_TARGET_CLASS)
+        self.assertIn("synthetic", printed["fingerprint_target_note"])
+        self.assertIn("NOT real Production", printed["fingerprint_target_note"])
+        self.assertEqual(printed["failure_classification"], "PASS")
+
+    def test_docs_declare_clean_room_boundary(self):
+        # Task I: the canonical documentation states the clean-room
+        # acceptance definition and the realigned provenance terms.
+        schema = (REPO / "docs" / "architecture" /
+                  "cloud-execution-contract.md").read_text()
+        self.assertIn("clean-room execution acceptance", schema)
+        self.assertIn("NOT_RUNTIME_AUTHORITATIVE", schema)
+        self.assertIn("PLATFORM_CAPABILITY_UNAVAILABLE", schema)
+        self.assertIn("PLATFORM_FRESH_JOB_PROVENANCE_AVAILABLE", schema)
+        self.assertIn("never synthesized", schema)
 
 
 if __name__ == "__main__":

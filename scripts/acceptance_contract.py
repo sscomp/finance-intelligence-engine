@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Acceptance ordering contract (6.9A-R4-R6-R1).
+"""Acceptance ordering contract (6.9A-R4-R6-R1; realigned 6.9A-R4-R7-R1).
 
 ONE canonical implementation of the corrected Codex Cloud acceptance
 sequence:
@@ -15,6 +15,17 @@ remediating the R4-R6 ordering defect:
     after the canonical bootstrap provisions it — a dependency cycle
     that stopped the fresh Cloud run (FAIL_NEEDS_REMEDIATION,
     "psycopg unavailable ... PRE fingerprint before bootstrap").
+
+6.9A-R4-R7-R1 platform-boundary realignment: Codex Cloud is a
+clean-room EXECUTION acceptance environment only. Platform/control-plane
+facts (job identity, scheduler/container provenance) are not observable
+from the guest runtime and MUST NOT become guest-blocking assertions;
+Provenance is split into operator context (informational) vs runtime
+freshness consistency (machine-verifiable) vs platform provenance
+(assumed unavailable; its absence never blocks). Every fail-closed
+refusal carries an explicit failure classification (WO §8) — ordering
+refusals are ACCEPTANCE_CONTRACT_DEFECT-shaped, Production exposure is
+PRODUCTION_SAFETY_BLOCK — so failures are classified, not collapsed.
 
 Subcommands (stdlib-only module: importing this file must never require
 psycopg, PostgreSQL or application dependencies, so the PRE-BOOTSTRAP
@@ -33,8 +44,10 @@ preflight can run in a cold fresh environment):
                  existing canonical implementation (the hermetic
                  Production-shaped zero-write fixture + the canonical
                  portable SQL client) — no second algorithm.
-  provenance     fresh-job provenance contract: owner assertion (never
-                 synthesized) + runtime freshness consistency.
+  provenance     fresh-job provenance contract: operator context
+                 (informational), owner assertion (never synthesized,
+                 NOT_RUNTIME_AUTHORITATIVE when absent), runtime
+                 freshness consistency, platform provenance capability.
 
 State file: JSON, job-local (path via --state-file or
 FIE_ACCEPTANCE_STATE_FILE). Illegal transitions and preconditions fail
@@ -74,6 +87,23 @@ CHAIN = (
 USAGE_EXIT = 5
 FAIL_CLOSED_EXIT = 78
 
+# WO §8 failure semantics: every fail-closed refusal carries ONE explicit
+# classification. PLATFORM_CAPABILITY_UNAVAILABLE is RECORDING-only
+# (absent platform provenance never blocks); the others appear on
+# fail-closed paths. RUNTIME_CLEAN_ROOM_CONTRADICTION covers inherited
+# residue / contradicting clean-room evidence — an environment condition
+# reported by the verifer, not attributable to tracked FIE code, and NOT
+# silently downgradable to FIE_DEFECT.
+FAILURE_CLASSES = (
+    "FIE_DEFECT",
+    "ACCEPTANCE_CONTRACT_DEFECT",
+    "PLATFORM_CAPABILITY_UNAVAILABLE",
+    "ENVIRONMENTAL_TRANSIENT",
+    "PRODUCTION_SAFETY_BLOCK",
+    "RUNTIME_CLEAN_ROOM_CONTRADICTION",
+    "PASS",
+)
+
 # §7: names whose PRESENCE with a value in the bootstrap context must be
 # classified. Existence of a DSN-SHAPED value is fail-closed; a valueless
 # name is not, and mere metadata references are classified explicitly
@@ -102,10 +132,19 @@ class AcceptanceContractViolation(RuntimeError):
 
 
 class ContractError(AcceptanceContractViolation):
-    """Fail-closed refusal. Raised as a plain exception; main() prints the
-    diagnostic and exits 78. (Extending SystemExit directly was rejected:
-    SystemExit initialized with a string exits 1, silently downgrading the
-    fail-closed contract.)"""
+    """Fail-closed refusal with an explicit §8 failure classification.
+    Raised as a plain exception; main() prints the diagnostic (with the
+    classification) and exits 78. (Extending SystemExit directly was
+    rejected: SystemExit initialized with a string exits 1, silently
+    downgrading the fail-closed contract.)"""
+
+    def __init__(self, message: str,
+                 classification: str = "ACCEPTANCE_CONTRACT_DEFECT") -> None:
+        if classification not in FAILURE_CLASSES:
+            raise ValueError(f"unknown failure classification: "
+                             f"{classification}")
+        super().__init__(message)
+        self.classification = classification
 
 
 # ---------------------------------------------------------------- state
@@ -273,6 +312,8 @@ def cmd_preflight(args) -> int:
 
     result = {
         "pre_bootstrap_production_access_preflight": not blockers,
+        "failure_classification": ("PRODUCTION_SAFETY_BLOCK" if blockers
+                                   else "PASS"),
         "bootstrap_production_dsn_available": bool(
             classification["forbidden_carriers_with_values"]
             or classification["production_shaped_value_present"]),
@@ -288,7 +329,8 @@ def cmd_preflight(args) -> int:
     }
     print(json.dumps(result, indent=1))
     if blockers:
-        raise ContractError("; ".join(blockers))
+        raise ContractError("; ".join(blockers),
+                            classification="PRODUCTION_SAFETY_BLOCK")
     if not args.state_file and not os.environ.get("FIE_ACCEPTANCE_STATE_FILE"):
         return 0
     path = state_path(args)
@@ -387,11 +429,36 @@ def _canonical_fingerprint() -> dict:
     return {"fingerprints": digests, "teardown_evidence": ev}
 
 
+# §5.2: the fingerprint target identity is DECLARED in every capture —
+# the canonical implementation is, and has always been, the hermetic
+# Production-shaped zero-write SYNTHETIC fixture (never real Production).
+# The synthetic nature is recorded here so no capture can silently
+# substitute, and so a receipt reader cannot mistake it for a real
+# Production snapshot.
+FINGERPRINT_TARGET_CLASS = "SYNTHETIC_HERMETIC_PRODUCTION_SHAPED_FIXTURE"
+FINGERPRINT_TARGET_NOTE = (
+    "canonical zero-write hermetic Production-shaped fixture "
+    "(tests.test_rehearsal_guard_zero_write_invariant, via "
+    "scripts/sql_exec.py); target is synthetic, NOT real Production; "
+    "the distinction is declared, never silently substituted")
+
+
 def cmd_fingerprint(args) -> int:
     path = state_path(args)
     if args.stage == "PRE":
         require_state(path, "BOOTSTRAP_PASSED")
-        record = _canonical_fingerprint()
+        try:
+            record = _canonical_fingerprint()
+        except AcceptanceContractViolation:
+            raise
+        except Exception as exc:
+            raise ContractError(
+                f"canonical fingerprint path failed: {exc} "
+                "(this is a runtime dependency/implementation failure "
+                "of the fingerprint mechanism itself, classified "
+                "FIE_DEFECT; the preflight note about missing psycopg "
+                "applies to PRE-BOOTSTRAP only)",
+                classification="FIE_DEFECT") from exc
         doc = load_state(path)
         doc.setdefault("stage_records", {})["pre_fingerprint"] = {
             "at_utc": _now_utc(), **record}
@@ -399,7 +466,10 @@ def cmd_fingerprint(args) -> int:
         cmd_transition(_Args(new_state="PRE_FINGERPRINT_CAPTURED",
                              marker="fingerprint PRE", state_file=path))
         print(json.dumps({"PRE_FINGERPRINT_CAPTURED": True,
+                          "failure_classification": "PASS",
                           "pre_fingerprint_after_bootstrap": True,
+                          "fingerprint_target_class": FINGERPRINT_TARGET_CLASS,
+                          "fingerprint_target_note": FINGERPRINT_TARGET_NOTE,
                           "fingerprint_algorithm": "canonical zero-write "
                           "hermetic fixture path "
                           "(tests.test_rehearsal_guard_zero_write_invariant, "
@@ -407,16 +477,23 @@ def cmd_fingerprint(args) -> int:
         return 0
     # POST
     require_state(path, "FULL_REGRESSION_PASSED")
-    record = _canonical_fingerprint()
+    try:
+        post_record = _canonical_fingerprint()
+    except AcceptanceContractViolation:
+        raise
+    except Exception as exc:
+        raise ContractError(
+            f"canonical fingerprint path failed: {exc}",
+            classification="FIE_DEFECT") from exc
     doc = load_state(path)
     doc.setdefault("stage_records", {})["post_fingerprint"] = {
-        "at_utc": _now_utc(), **record}
+        "at_utc": _now_utc(), **post_record}
     save_state(path, doc)
     cmd_transition(_Args(new_state="POST_FINGERPRINT_CAPTURED",
                          marker="fingerprint POST", state_file=path))
     pre = doc["stage_records"].get("pre_fingerprint", {}).get(
         "fingerprints", {})
-    post = record["fingerprints"]
+    post = post_record["fingerprints"]
     # exact comparison over the shared key space (no masking/normalizing)
     mismatches = sorted(
         k for k in set(pre) & set(post) if pre[k] != post[k])
@@ -425,6 +502,10 @@ def cmd_fingerprint(args) -> int:
     match = not mismatches and not keys_only_pre and not keys_only_post
     print(json.dumps({"POST_FINGERPRINT_CAPTURED": True,
                       "PRODUCTION_FINGERPRINT_MATCH": match,
+                      "failure_classification": ("PRODUCTION_SAFETY_BLOCK"
+                                                 if not match else "PASS"),
+                      "fingerprint_target_class": FINGERPRINT_TARGET_CLASS,
+                      "fingerprint_target_note": FINGERPRINT_TARGET_NOTE,
                       "PRE_FINGERPRINT_ALGORITHM": "canonical zero-write "
                       "hermetic fixture path",
                       "POST_FINGERPRINT_ALGORITHM": "canonical zero-write "
@@ -435,7 +516,8 @@ def cmd_fingerprint(args) -> int:
                       "keys_only_in_post": keys_only_post}, indent=1))
     if not match:
         raise ContractError(
-            f"PRE != POST fingerprint ({'mismatched: ' + '/'.join(mismatches) if mismatches else 'key-space changed'})")
+            f"PRE != POST fingerprint ({'mismatched: ' + '/'.join(mismatches) if mismatches else 'key-space changed'})",
+            classification="PRODUCTION_SAFETY_BLOCK")
     cmd_transition(_Args(new_state="FINGERPRINT_MATCHED",
                          marker="fingerprint match", state_file=path))
     return 0
@@ -518,9 +600,32 @@ def _worktree_signal(
     return ([note], []) if require_clean else ([], [note])
 
 
+# §5.3 provenance receipt fields. The operator context is INFORMATIONAL
+# provenance recorded for the receipt — it is never consulted as a pass
+# condition, never treated as platform proof, and cannot rescue a runtime
+# whose observed state contradicts the clean-room conditions.
+OPERATOR_CONTEXT_DEFAULT = "owner-launched fresh Codex Cloud acceptance job"
+OPERATOR_CONTEXT_ENV = "FIE_CLOUD_JOB_OPERATOR_CONTEXT"
+
+# §5.1: an owner fresh-job assertion, when absent, is represented for
+# reporting compatibility as an explicit non-authoritative state — never
+# inferred from env heuristics, PIDs, timestamps, filesystem age, cache
+# state, git checkout state, or operator-entered strings masquerading as
+# platform proof.
+OWNER_ASSERTION_NOT_RUNTIME_AUTHORITATIVE = "NOT_RUNTIME_AUTHORITATIVE"
+
+# §5.1 semantics declaration: what runtime freshness consistency means,
+# and only that.
+RUNTIME_FRESHNESS_SEMANTICS = (
+    "runtime_freshness_consistency_verified means ONLY that the observed "
+    "runtime is consistent with the required clean-room conditions; it is "
+    "NOT a control-plane proof that a new Codex Cloud job was created")
+
+
 def cmd_provenance(args) -> int:
-    """Fresh-job provenance: owner assertion (never synthesized) +
-    machine-verifiable runtime freshness consistency. The PG-process
+    """Fresh-job provenance: operator context (informational) + owner
+    assertion (never synthesized; NOT_RUNTIME_AUTHORITATIVE when absent)
+    + machine-verifiable runtime freshness consistency. The PG-process
     residue scan is anchored by ownership TIME (state-file job_start_utc
     or --job-start-utc): marker-carrying PG-family processes that predate
     the job start are inherited residue (contradiction); ones created
@@ -534,6 +639,12 @@ def cmd_provenance(args) -> int:
         owner_assertion = False
     else:
         owner_assertion = None  # absent — never synthesized (O10)
+    assertion_authority = (
+        ("OPERATOR_ASSERTED" if owner_assertion is not None
+         else OWNER_ASSERTION_NOT_RUNTIME_AUTHORITATIVE))
+    # informational only — never read as proof, never a pass condition
+    operator_context = (os.environ.get(OPERATOR_CONTEXT_ENV, "")
+                        or OPERATOR_CONTEXT_DEFAULT)
 
     contradictions: list[str] = []
     observations: list[str] = []
@@ -617,15 +728,22 @@ def cmd_provenance(args) -> int:
 
     runtime_ok = not contradictions
     provenance = ("OWNER_ASSERTED_RUNTIME_CONSISTENT"
-                  if owner_assertion and runtime_ok else
+                  if owner_assertion is True and runtime_ok else
                   "RUNTIME_CONSISTENT_OWNER_ASSERTION_ABSENT" if runtime_ok
                   else "RUNTIME_CONTRADICTIONS_BLOCK_ACCEPTANCE")
     print(json.dumps({
         "fresh_codex_cloud_job_provenance": provenance,
+        "cloud_job_operator_context": operator_context,
+        "cloud_job_operator_context_authority": "operator-provided "
+        "context for the receipt only (informational; never a pass "
+        "condition and never platform proof)",
         "owner_fresh_job_assertion": owner_assertion,
+        "owner_fresh_job_assertion_authority": assertion_authority,
         "owner_assertion_source": "env FIE_OWNER_FRESH_JOB_ASSERTION "
-        "(operator-provided; never synthesized by code)",
+        "(operator-provided; never synthesized by code; absent is "
+        "reported as NOT_RUNTIME_AUTHORITATIVE)",
         "runtime_freshness_consistency_verified": runtime_ok,
+        "runtime_freshness_semantics": RUNTIME_FRESHNESS_SEMANTICS,
         "runtime_contradictions": contradictions,
         "runtime_observations": observations,
         "job_start_anchor_utc": (args.job_start_utc
@@ -633,12 +751,17 @@ def cmd_provenance(args) -> int:
                                  (json.loads(Path(sp).read_text()).get(
                                      "job_start_utc", "") if sp else "")),
         "platform_fresh_job_provenance_available": False,
+        "platform_fresh_job_provenance_classification":
+            "PLATFORM_CAPABILITY_UNAVAILABLE (informational; no "
+            "trustworthy guest-observable provenance primitive assumed; "
+            "its absence alone never fails acceptance)",
         "platform_note": "no platform /new provenance API is assumed; "
         "its absence is not itself a failure (WO §11)",
     }, indent=1))
     if not runtime_ok:
         raise ContractError("runtime freshness contradictions: "
-                            + "; ".join(contradictions[:8]))
+                            + "; ".join(contradictions[:8]),
+                            classification="RUNTIME_CLEAN_ROOM_CONTRADICTION")
     return 0
 
 
@@ -677,7 +800,11 @@ def main(argv: list[str]) -> int:
     try:
         return args.fn(args)
     except AcceptanceContractViolation as exc:
-        print(f"acceptance-contract: FAIL_CLOSED — {exc}", file=sys.stderr)
+        # §8: the refusal carries its explicit failure classification in
+        # the banner — never a generic unspecified failure.
+        cls = getattr(exc, "classification", "ACCEPTANCE_CONTRACT_DEFECT")
+        print(f"acceptance-contract: FAIL_CLOSED [{cls}] — {exc}",
+              file=sys.stderr)
         return FAIL_CLOSED_EXIT
 
 
