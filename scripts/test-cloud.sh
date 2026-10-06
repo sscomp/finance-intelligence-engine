@@ -66,12 +66,45 @@ fi
 # ---- scrubbed, contract-declared environment -----------------------------
 CALLER_TEST_PG_DSN="${FIE_TEST_PG_DSN:-}"
 CALLER_FORCE_PORTABLE="${FIE_TEST_PG_FORCE_PORTABLE:-}"
+# 6.9A-R4-R6-R1: an ACCEPTANCE-job context is declared by setting
+# FIE_ACCEPTANCE_STATE_FILE (state machine file). Captured before the
+# scrub, re-exported after; callers that do NOT set it get byte-identical
+# legacy behavior (developer runs are not acceptance jobs).
+CALLER_ACCEPTANCE_STATE_FILE="${FIE_ACCEPTANCE_STATE_FILE:-}"
 for v in $(env | grep -oE '^FIE_[A-Za-z0-9_]+' | tr '\n' ' '); do unset "${v}" || true; done
 unset PGPASSWORD 2>/dev/null || true
+if [ -n "${CALLER_ACCEPTANCE_STATE_FILE}" ]; then
+    export FIE_ACCEPTANCE_STATE_FILE="${CALLER_ACCEPTANCE_STATE_FILE}"
+fi
 export FIE_SERVICE_ENV=test
 export FIE_HTTP_PORT="${FIE_HTTP_PORT:-18720}"
 export PYTHONPATH="${REPO}"
 export ARTIFACT_DIR=""
+
+# ---- acceptance ordering gate (6.9A-R4-R6-R1) -----------------------------
+# In an acceptance-job context ONLY: pre-bootstrap Production access
+# safety preflight (stdlib-only; proves the test profile received no
+# Production DSN) then the ordering prerequisite — the PRE fingerprint
+# MUST already be captured (state >= PRE_FINGERPRINT_CAPTURED) before any
+# acceptance workload runs; --full additionally requires the preceding
+# stages. Without the state file nothing here executes.
+if [ -n "${CALLER_ACCEPTANCE_STATE_FILE}" ]; then
+    if ! "${PY_BIN}" scripts/acceptance_contract.py preflight; then
+        echo "test-cloud: FAIL_CLOSED — pre-bootstrap production access " \
+             "preflight refused the acceptance context (O11: no " \
+             "acceptance workload may run)" >&2
+        exit 78
+    fi
+    REQUIRED_STATE="PRE_FINGERPRINT_CAPTURED"
+    [ "${MODE}" = "full" ] && REQUIRED_STATE="FAILURE_INJECTION_PASSED"
+    if ! "${PY_BIN}" scripts/acceptance_contract.py require-state \
+            "${REQUIRED_STATE}"; then
+        echo "test-cloud: FAIL_CLOSED — acceptance workload started " \
+             "before the PRE fingerprint (${REQUIRED_STATE} prerequisite)" \
+             "(O4)" >&2
+        exit 78
+    fi
+fi
 
 EPHEMERAL=0
 cleanup() {
@@ -232,12 +265,28 @@ else
         tests.test_wrapper_guard_68a \
         tests.test_db_target_identity \
         tests.test_resource_ownership_contract \
-        tests.test_fixture_lifecycle_exception_safety
+        tests.test_fixture_lifecycle_exception_safety \
+        tests.test_acceptance_ordering_contract
     RC=$?
 fi
 
 if [ "${RC}" -eq 0 ]; then
     echo "test-cloud: PASS (${MODE})"
+    # 6.9A-R4-R6-R1: record the passing stage in the acceptance state
+    # machine (focused -> FOCUSED_PASSED; full -> FULL_REGRESSION_PASSED,
+    # which its position in the chain already requires to follow the FI
+    # stage). A recording failure is itself a contract violation.
+    if [ -n "${CALLER_ACCEPTANCE_STATE_FILE}" ]; then
+        NEW_STATE="FOCUSED_PASSED"
+        [ "${MODE}" = "full" ] && NEW_STATE="FULL_REGRESSION_PASSED"
+        if ! "${PY_BIN}" scripts/acceptance_contract.py transition \
+                --marker "test-cloud ${MODE}" "${NEW_STATE}"; then
+            echo "test-cloud: FAIL_CLOSED — could not record ${NEW_STATE} " \
+                 "in the acceptance state machine (illegal transition " \
+                 "indicates an ordering defect)" >&2
+            exit 78
+        fi
+    fi
 else
     echo "test-cloud: FAIL (${MODE}) rc=${RC}" >&2
 fi

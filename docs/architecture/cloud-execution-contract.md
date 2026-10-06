@@ -160,6 +160,76 @@ bash scripts/test-cloud.sh --full   # full hermetic regression + 負向控制
 - 進入點保證：exit code 忠實反映 unittest 結果、failure 可見、無 mandatory test
   隱藏 skip、無 Production mutation、ephemeral resources 由 trap 清理。
 
+## 5A. Acceptance ordering contract（6.9A-R4-R6-R1）
+
+**Root cause being remediated（R4-R6 FAIL_NEEDS_REMEDIATION）**：predecessor WO
+要求在 **bootstrap 之前** 取得 canonical PRE Production fingerprint，但 canonical
+fingerprint 路徑經 `scripts/sql_exec.py`（psycopg），而 psycopg 只能由 canonical
+bootstrap（`--all`）provision——依賴循環使 fresh Cloud run 停擺。修正**不是**
+削弱 fingerprint、不是 host psql 替代、不是 ad-hoc pip install，而是**修正順序**：
+
+```text
+A. git/environment baseline
+B. PRE-BOOTSTRAP PRODUCTION ACCESS SAFETY PREFLIGHT   （stdlib-only，無 psycopg/PG/app deps）
+C. canonical zero-arg bootstrap（--all）
+D. bootstrap postconditions（RUNTIME_PYTHON_PORTABLE / POSTGRESQL_PORTABLE_PROVISIONING / psycopg）
+E. PRE Production fingerprint                          （canonical 路徑，經 scripts/sql_exec.py）
+F. focused → G. FI → H. full regression
+I. POST fingerprint → J. PRE==POST → K. cleanup/secret-scan/seal
+```
+
+- **PRE fingerprint 語意（corrected contract）**：captured **after isolated
+  runtime bootstrap** and **before any acceptance/test workload** — NOT
+  "before dependency/runtime bootstrap"。
+- **ONE implementation**：preflight/ordering/provenance contract =
+  `scripts/acceptance_contract.py`（stdlib-only；importing it 永不需要
+  psycopg）。非法 transition / 前置不滿足一律 **exit 78**，refusal message 標明
+  `ORDERING_PREREQUISITE`，**永不**將 ordering 拒絕誤報為 Production contact。
+- **§12 ordering state machine（單一合法鏈）**：`INIT → BASELINE_CAPTURED →
+  PRODUCTION_ACCESS_PREFLIGHT_PASSED → BOOTSTRAP_PASSED →
+  PRE_FINGERPRINT_CAPTURED → FOCUSED_PASSED → FAILURE_INJECTION_PASSED →
+  FULL_REGRESSION_PASSED → POST_FINGERPRINT_CAPTURED → FINGERPRINT_MATCHED →
+  CLEANUP_PASSED → EVIDENCE_SEALED`（job-local JSON state file；atomic save）。
+- **Acceptance context declaration**：caller 以 `FIE_ACCEPTANCE_STATE_FILE`
+  宣告 acceptance-job context；`scripts/test-cloud.sh` 在該 context 內先跑
+  preflight，再驗證 ordering prerequisite（focused 需 ≥ `PRE_FINGERPRINT_CAPTURED`、
+  `--full` 需 ≥ `FAILURE_INJECTION_PASSED`），PASS 後記錄
+  `FOCUSED_PASSED` / `FULL_REGRESSION_PASSED`。未宣告 state file → 行為與以往
+  byte-identical（developer run 非 acceptance job）。
+- **PRE/POST fingerprint**：同一 canonical zero-write hermetic
+  Production-shaped fixture（`tests.test_rehearsal_guard_zero_write_invariant`）
+  經同一 canonical SQL client；exact key-space 比較，**無 masking/normalization**；
+  target 是 hermetic fixture，**不是**真實 Production、無 zero-write invariant
+  削弱。
+
+### Acceptance ordering contract — fresh-job provenance（6.9A-R4-R6-R1）
+
+**fresh_codex_cloud_job_provenance** 的兩部分契約：
+
+| 欄位 | 語意 |
+|---|---|
+| `owner_fresh_job_assertion` | **外部/操作者斷言**（env `FIE_OWNER_FRESH_JOB_ASSERTION`：`true`/`false`/**unset→null**）；程式碼**永不**合成此值（O10） |
+| `runtime_freshness_consistency_verified` | job 內可機器驗證的一致性：expected published HEAD、無 predecessor remediation artifacts、無 inherited FIE job-owned PG processes/temp dirs（XDG persistent download cache 明示允許）。PG-process 殘留掃描以 **ownership-time** 歸因錨定：state file 於 job 開始記錄 `job_start_utc`；早於 job start 的 marker-carrying PG-family process = inherited residue（矛盾），job 期間產生者為本 job 自身 workload（observation）。未宣告 job start 錨點時掃描結果記為 inconclusive observation（比照 platform provenance 缺席規則） |
+| `platform_fresh_job_provenance_available = false` | 不假設 platform `/new` provenance API；**其缺席本身不是 failure**（O8）；矛盾 runtime evidence **是** failure（O9） |
+
+Worktree cleanliness 語意：tracked worktree 的 dirty 狀態**僅在**明示宣告的
+fresh-job check（`--require-clean-worktree`）下是 contradiction（真實 fresh Cloud
+acceptance run 一律帶此 flag）；remediation workspace（合法攜帶未提交工作）預設
+只記為 observation、不阻擋。值從不落入任一分類的 `PASS` 形式：NOT_RUN 欄位保持
+null（O12）。
+
+### Acceptance ordering contract — regression coverage
+
+`tests/test_acceptance_ordering_contract.py`（focused 清單成員）執行 §13
+O1–O12：O1 舊順序拒絕（REJECTED_WITH_ORDERING_PREREQUISITE，非 Production contact
+誤報）、O2 preflight psycopg-free、O3 preflight→bootstrap→PRE 順序、O4 acceptance
+workload 不得先於 PRE fingerprint、O5 PRE/POST 同一 canonical 路徑、O6/O6b
+Production-shaped DSN/credential carrier 注入 bootstrap context 失敗封閉（synthetic
+only）、O7 bootstrap child env scrub（`tests/cloud_child_env.py` 唯一 scrub 實作）、
+O8 platform provenance 缺席非 failure、O9 矛盾 freshness evidence 阻擋、O10 owner
+assertion 永不合成、O11 mandatory failure 阻止全部 workload、O12 receipt null
+語意保留。
+
 ## 6. Artifact outputs / exit status
 
 | 項目 | 契約 |
@@ -222,4 +292,12 @@ authoritative DB architecture 與 readiness 提案仍以 6.7B/6.8A/6.8B 已接�
 Phase 6.9A-R3（2026-10-05）— §4 rewritten: canonical repository-owned
 ephemeral PostgreSQL provisioning（portable acquisition path）replaces the
 inline best-effort provisioning; §7 network note and §10 status updated.
-Codex Cloud execution remains NOT VALIDATED until fresh re-entry.*
+Codex Cloud execution remains NOT VALIDATED until fresh re-entry.
+Phase 6.9A-R4-R5-R1（2026-10-06）— fresh-clone class cleanup / cache lock
+ownership / PG zombie attribution（§4 resolver 與 §12 註記保持不變）.
+Phase 6.9A-R4-R6-R1（2026-10-06）— §5A added: corrected acceptance ordering
+（PRE fingerprint AFTER bootstrap, before acceptance workloads）+ ordering
+state machine + acceptance-context gate in scripts/test-cloud.sh +
+fresh-job provenance contract（owner assertion nullable、never synthesized;
+platform provenance assumed absent）. Root cause：R4-R6 的 pre-bootstrap
+fingerprint 要求與 canonical SQL client 之間的依賴循環。*
