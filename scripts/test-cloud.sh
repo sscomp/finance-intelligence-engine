@@ -231,7 +231,8 @@ else
         tests.test_rehearsal_guard_zero_write_invariant \
         tests.test_wrapper_guard_68a \
         tests.test_db_target_identity \
-        tests.test_resource_ownership_contract
+        tests.test_resource_ownership_contract \
+        tests.test_fixture_lifecycle_exception_safety
     RC=$?
 fi
 

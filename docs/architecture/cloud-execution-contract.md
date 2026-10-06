@@ -148,6 +148,15 @@ bash scripts/test-cloud.sh --full   # full hermetic regression + 負向控制
   `--cache-state`），與 runtime 同源 — 持久 cache 位元組級一致（NC16）。
 - focused 清單含 `tests.test_bootstrap_cli_contract`（NC03 zero-arg /
   unknown-option fail-closed）。
+- **6.9A-R4-R4-R1 canonical SQL client + fixture lifecycle**：repository
+  validation 的 SQL 執行一律走 `scripts/sql_exec.py`（psycopg）— **hermetic
+  validation 永不執行 host `psql`**（fresh Cloud 無 psql;portable artifact
+  僅 server binaries;詳見 ephemeral-postgresql-provisioning.md §12）。
+  zero-write fixture lifecycle 為 exception-safe:teardown 責任在任何 fallible
+  setup 步驟前註冊、任一失敗點執行 ownership-aware 還原並 re-raise 原始例外、
+  teardown idempotent、provision subshell 環境 scrub 掉 per-job globals。
+  FI-01..FI-10 失敗注入矩陣 + 順序獨立性見
+  `tests/test_fixture_lifecycle_exception_safety.py`（focused/full 皆執行）。
 - 進入點保證：exit code 忠實反映 unittest 結果、failure 可見、無 mandatory test
   隱藏 skip、無 Production mutation、ephemeral resources 由 trap 清理。
 

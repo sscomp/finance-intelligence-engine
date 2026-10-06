@@ -219,3 +219,42 @@ read-only managed filesystem) with the pre-R4-R1 exit-90 contract;the R4
 failure class is the cache-path contract (§11 distinctions), NOT a
 PostgreSQL platform incompatibility;remediated here; authoritative cloud
 acceptance is a NEW fresh job from the published remediation HEAD.*
+
+## 12. R4-R4-R1 additions — canonical portable SQL client + exception-safe fixture lifecycle
+
+兩個 fresh-Codex-Cloud R4-R4 缺口的 repository-level 修復:
+
+1. **Canonical portable SQL client(WO §5)。** Repository validation 的 SQL
+   需求(建/拆測試物件、查值、zero-write invariants、fixture 準備)一律走
+   `scripts/sql_exec.py`(psycopg — pyproject 既有宣告依賴,亦是 provisioner
+   readiness 檢查的同一 client)。**hermetic validation 永不執行 host `psql`**:
+   fresh Codex Cloud 無 host psql,portable artifact 只含 server binaries
+   (initdb/pg_ctl/postgres)。契約:target 永遠是**明確 DSN 參數**(無 env
+   fallback、無 Production 選擇;ambiguous → `POSTGRESQL_SQL_TARGET_UNRESOLVED`
+   fail-closed);driver 缺失 → `POSTGRESQL_SQL_CLIENT_UNAVAILABLE`(精確合約
+   錯誤,非 generic FileNotFoundError);語句失敗 → `POSTGRESQL_SQL_*` 保留原始
+   server 錯誤;DSN 進任何訊息前一律 redact `password=`。host `psql` 僅允許
+   於「主題即是 host-tool 行為」的模組(如 phase3/service/pg_runtime_preflight.py)。
+
+2. **Exception-safe fixture lifecycle(R4-R4 RESOURCE_OWNERSHIP_FAILURE)。**
+   zero-write fixture(hermetic Production-SHAPED)改為 transactional:
+   snapshot process-visible state → teardown 責任在任何 fallible 步驟前註冊
+   (addClassCleanup + fixture 內 try/except)→ 任一失敗點執行 ownership-aware
+   teardown(stop 本 fixture instance、還原 provisioner globals/cache/contract
+   env、移除 self-owned workspace)→ **re-raise 原始例外**(teardown 以
+   `strict=False` 不遮蔽)。teardown idempotent(FI-08)。另:每個 provision
+   subshell 環境**scrub 掉所有 per-job provisioner globals**(僅保留
+   `FIE_TEST_PG_CACHE_DIR` policy)— 先前 fixture 失敗後洩漏的
+   `_FIE_CACHE_RESOLVED_DIR` memo 等狀態(讓下一個 lifecycle fixture 的
+   registry 帶上前一個 fixture 的 cache path)— 此洩漏向量整體消除。
+
+   失敗注入矩陣(FI-01..FI-10)與測試順序獨立性(歷史失敗序列、反序、單獨、
+   交替重複)見 `tests/test_fixture_lifecycle_exception_safety.py`。
+
+---
+
+*Change record: Phase 6.9A-R4-R4-R1(2026-10-06)— §12 新增;remediates the
+R4-R4 Codex Cloud portable-SQL-client contract defect(FileNotFoundError 'psql')
+與 fixture lifecycle/state-isolation defect at repository level;
+acceptance NOT VALIDATED until a fresh Codex Cloud job from the published
+remediation HEAD.*
