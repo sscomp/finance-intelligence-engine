@@ -150,6 +150,24 @@ def _ensure_prod_store_for_runtime(test: unittest.TestCase,
     prod = _expanded_default(wrapper, root)
     if not prod.exists():
         import sqlite3
+        # R4-R5-R1 Task A/B lifecycle contract: the synthetic store is a
+        # resource of WHOEVER creates it; the cleanup responsibility is
+        # registered BEFORE the first fallible creation step (exception
+        # safety: a failed create never leaks the partial file) and is
+        # idempotent (missing_ok). Registration is CONTEXT-SCOPED: an
+        # instance caller registers instance cleanup; a CLASS caller
+        # (setUpClass — the fresh-clone path this helper also serves)
+        # registers CLASS cleanup through addClassCleanup. Calling the
+        # instance addCleanup THROUGH a class object dispatches the plain
+        # function with the registered callable bound as `self`
+        # (TypeError: TestCase.addCleanup() missing 1 required positional
+        # argument: 'function' — the R4-R5 fresh-clone blocker A), so a
+        # class object must never take that route.
+        unlink_cleanup = lambda: prod.unlink(missing_ok=True)  # noqa: E731
+        if isinstance(test, type) and issubclass(test, unittest.TestCase):
+            test.addClassCleanup(unlink_cleanup)
+        else:
+            test.addCleanup(unlink_cleanup)
         prod.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(prod))
         try:
@@ -159,7 +177,6 @@ def _ensure_prod_store_for_runtime(test: unittest.TestCase,
             conn.commit()
         finally:
             conn.close()
-        test.addCleanup(lambda: (prod.unlink(missing_ok=True),))
     return prod
 
 
@@ -680,6 +697,116 @@ echo "SEED_DB=${{SEED_DB}}"
         self.assertEqual(rc, 78, err)
         self.assertNotIn("supersecret-pw-value", err)
         self.assertNotIn("postgresql://fie_prod", err)
+
+
+class SyntheticStoreCleanupLifecycleTests(unittest.TestCase):
+    """R4-R5-R1 Task A/B regression pins — synthetic-store cleanup
+    registration is CONTEXT-SCOPED and exception-safe.
+
+    Contract under test:
+
+    * a CLASS caller (setUpClass, the fresh-clone zero-write path) must
+      register CLASS-scoped cleanup via addClassCleanup — the historical
+      defect dispatched the instance ``addCleanup`` through the class
+      object, which bound the registered callable as ``self`` and raised
+      TypeError: TestCase.addCleanup() missing 1 required positional
+      argument: 'function' (the R4-R5 fresh-clone blocker A);
+    * a partial/failed setUpClass still removes the store (registration
+      precedes creation; unittest runs class cleanups on setUpClass
+      failure);
+    * cleanup is idempotent (missing_ok) and order-independent;
+    * instance callers are unchanged."""
+
+    def _run_class_suite(self, klass: type) -> unittest.TestResult:
+        import io
+        runner = unittest.TextTestRunner(stream=io.StringIO())
+        return runner.run(unittest.TestLoader().loadTestsFromTestCase(klass))
+
+    def _build_lifecycle_class(self, root: Path, fail_mid_setup: bool = False):
+        # Exercises the helper exactly as TestProductionZeroWriteInvariant
+        # .setUpClass does on a fresh clone (real call path, real API).
+        @classmethod
+        def setUpClass(cls):
+            cls._synthetic_store = _ensure_prod_store_for_runtime(
+                cls, root=root)
+            cls._store_present_mid_setup = cls._synthetic_store.exists()
+            if fail_mid_setup:
+                # simulates the fixture failing after the store allocation
+                raise RuntimeError("INJECTED_MID_SETUP_FAILURE")
+
+        @classmethod
+        def tearDownClass(cls):
+            pass
+
+        def test_uses_the_store(self):
+            self.assertTrue(self._store_present_mid_setup)
+            self.assertTrue(self._synthetic_store.exists())
+
+        def test_second_sees_same_store(self):
+            self.assertTrue(self._synthetic_store.exists())
+
+        return type("SyntheticStoreLifecycleCase", (unittest.TestCase,), {
+            "setUpClass": setUpClass,
+            "tearDownClass": tearDownClass,
+            "test_uses_the_store": test_uses_the_store,
+            "test_second_sees_same_store": test_second_sees_same_store,
+        })
+
+    def test_class_context_success_cleanup_no_typeerror(self):
+        # (1) class setup success + cleanup; (4) no cleanup API misuse.
+        with tempfile.TemporaryDirectory(prefix="store-cls-ok-") as td:
+            root = Path(td)
+            klass = self._build_lifecycle_class(root)
+            result = self._run_class_suite(klass)
+            self.assertTrue(result.wasSuccessful(),
+                            f"class suite failed: {result.errors}")
+            self.assertFalse(
+                (root / "metadata" / "intelligence_store.db").exists(),
+                "class cleanup must remove the synthetic store it created")
+
+    def test_class_setup_failure_after_partial_allocation_still_cleans(self):
+        # (2) setup failure after partial allocation + cleanup.
+        with tempfile.TemporaryDirectory(prefix="store-cls-fail-") as td:
+            root = Path(td)
+            klass = self._build_lifecycle_class(root, fail_mid_setup=True)
+            result = self._run_class_suite(klass)
+            self.assertFalse(result.wasSuccessful(),
+                             "injected setUpClass failure must be reported")
+            store = root / "metadata" / "intelligence_store.db"
+            self.assertFalse(
+                store.exists(),
+                "class cleanup must run on setUpClass failure and remove "
+                "the partially-allocated store")
+
+    def test_repeated_cleanup_is_idempotent_and_safe(self):
+        # (3) repeated cleanup safety — instance-context variant.
+        with tempfile.TemporaryDirectory(prefix="store-inst-") as td:
+            root = Path(td)
+            store = _ensure_prod_store_for_runtime(self, root=Path(td))
+            self.assertTrue(store.exists())
+            first = self.doCleanups()
+            self.assertTrue(first)
+            self.assertFalse(store.exists(), "first cleanup removes it")
+            second = self.doCleanups()
+            self.assertTrue(second, "repeat cleanup is a safe no-op")
+            self.assertFalse(store.exists())
+
+    def test_order_independence_across_classes(self):
+        # (5) two classes in sequence each own their creation and never
+        # leak into the other's run (either order, LIFO then fresh).
+        with tempfile.TemporaryDirectory(prefix="store-order-") as td:
+            root = Path(td)
+            klass_a = self._build_lifecycle_class(root)
+            klass_b = self._build_lifecycle_class(root)
+            result = self._run_class_suite(klass_a)
+            self.assertTrue(result.wasSuccessful(), result.errors)
+            self.assertFalse(
+                (root / "metadata" / "intelligence_store.db").exists(),
+                "first class's cleanup must not leave residue for the next")
+            result_b = self._run_class_suite(klass_b)
+            self.assertTrue(result_b.wasSuccessful(), result_b.errors)
+            self.assertFalse(
+                (root / "metadata" / "intelligence_store.db").exists())
 
 
 if __name__ == "__main__":

@@ -168,7 +168,12 @@ class WarmPortableCache:
       * parent FIE_TEST_PG_CACHE_DIR override (usable hard contract);
       * active persistent cache, warmed once when allowed;
       * a helper-allocated job-local cache, warmed once under an explicit
-        override (temp mode has no cross-invocation durability).
+        override (temp mode has no cross-invocation durability). This is
+        also used when the active persistent cache is warm-with-binless or
+        its pre-existing acquisition lock is unclaimable (LOCK_CLASS=UNKNOWN
+        — the R4-R5-R1 Task D fail-closed contract): the provisioner would
+        warm an isolated fallback that no scope adopts, so the helper
+        allocates the job-local cache itself and owns its removal.
 
     A real acquisition is attempted only when
     ``FIE_TEST_PG_ALLOW_REAL_ACQUISITION=1`` (test-cloud sets this; direct
@@ -208,9 +213,14 @@ class WarmPortableCache:
             return self
         # One warm attempt. In temp mode the per-invocation temp dir cannot
         # be shared by children — allocate an explicit job-local cache dir
-        # instead (same contract mode: explicit override).
+        # instead (same contract mode: explicit override). Same treatment
+        # when the persistent cache's pre-existing acquisition lock is
+        # unclaimable (UNKNOWN): ensure-cache would fail closed into an
+        # isolated fallback temp that is orphaned on child exit (no
+        # cross-invocation durability) — allocate the job-local cache here
+        # so this scope owns both the warmed content and its removal.
         target = state["dir"]
-        if state["mode"] == "temp":
+        if state["mode"] == "temp" or state.get("lock_class") == "UNKNOWN":
             self._tmpdir = os.path.join(
                 os.environ.get("TMPDIR", "/tmp"),
                 f"fie-warm-cache.{uuid.uuid4().hex[:12]}")

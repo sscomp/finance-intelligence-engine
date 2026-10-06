@@ -108,20 +108,31 @@ _random_hex() { python3 -c 'import secrets,sys; sys.stdout.write(secrets.token_h
 # THIS invocation created and marker-proves — cleanup never touches a
 # persistent cache or a foreign temp dir.
 #
-# Lock ownership contract (ABACUS_FIE_6_9A_R4_R2_R1 Task E): `.acquire.lock`
-# in a persistent cache carries ownership metadata (format
-# `fie-6-9a-acquire-lock-v1` + invocation id / pid / created_utc), written
-# under the held flock. Classification (fie_test_pg_cache_lock_classify):
+# Lock ownership contract (ABACUS_FIE_6_9A_R4_R2_R1 Task E; R4-R5-R1 Task D
+# canonicalization): `.acquire.lock` in a persistent cache carries ownership
+# metadata (format `fie-6-9a-acquire-lock-v1` + invocation id / pid /
+# created_utc), written under the held flock. Classification
+# (fie_test_pg_cache_lock_classify):
 #
-#   ABSENT            no lock file
+#   ABSENT            no lock file — the current job may create it
+#                     EXCLUSIVELY (O_EXCL/noclobber); the creating
+#                     invocation owns the inode by construction.
 #   ACTIVE            flock is held by a live acquirer (never touched)
-#   STALE_JOB_OWNED   fie-format metadata AND flock-free — safe stale-lock
-#                     protocol: cleanup holds the flock, re-proves the
-#                     marker, then removes it (flock/dead-owner proof + the
-#                     acquirers' inode-verification loop make removal race-
-#                     free);
-#   UNKNOWN legacy-empty/foreign/empty — fail closed: preserved and
-#                     reported (e.g. the pre-R4-R2 0-byte locks)
+#   STALE_JOB_OWNED   fie-format metadata AND flock-free — adoptable per
+#                     the documented stale-owner protocol: acquire holds
+#                     the flock, re-proves the fie marker UNDER the flock
+#                     against the live inode, then refreshes metadata;
+#                     cleanup holds the flock, re-proves the marker, then
+#                     removes it (flock/dead-owner proof + the acquirers'
+#                     inode-verification loop make removal race-free);
+#   UNKNOWN legacy-empty/foreign/empty — fail closed: ownership metadata
+#                     is NEVER written in place (writability does not
+#                     prove ownership; an existing unknown object cannot
+#                     become job-owned through mutation), the object is
+#                     never claimed and never deleted; the resolver
+#                     rejects the candidate and falls back to an isolated
+#                     job-local cache (R4-R5-R1 Task D); cleanup preserves
+#                     + reports it (exit 96)
 PG_CACHE_TEMP_CREATED=""
 
 _cache_trace_add() {  # <reason> (class labels only)
@@ -143,6 +154,37 @@ _cache_dir_usable_probe() {  # <label> <dir>: 0 iff creatable AND writable
     return 0
 }
 
+# R4-R5-R1 Task D — the "safe isolated alternative" leg of the ownership
+# contract: when the resolved persistent cache's pre-existing acquisition
+# lock cannot be claimed (UNKNOWN content: legacy 0-byte / foreign /
+# unparseable — ownership unprovable), provisioning falls back to an
+# isolated job-local temp cache. The unknown object is NEVER claimed
+# (ownership cannot be inferred from writability — the R4-R5 FI09
+# violation) and NEVER deleted; it stays exactly as found for cleanup's
+# fail-closed preserve-and-report (exit 96).
+_cache_fallback_temp_alloc() {  # sets PG_CACHE_* to job-local temp; 0 ok
+    local tmproot="${TMPDIR:-/tmp}" cand
+    if [ ! -d "${tmproot}" ] ||         ! _cache_dir_usable_probe temp-root "${tmproot}"; then
+        _cache_trace_add "temp-root-unusable"
+        _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE no creatable/writable cache-runtime candidate exists on this filesystem (rejected: ${_FIE_CACHE_TRACE}); provisioning refused"
+        return "${PG_EXIT_CACHE_PATH}"
+    fi
+    cand="$(mktemp -d "${tmproot%/}/fie-pgcache.XXXXXX" 2>/dev/null)" || {
+        _cache_trace_add "temp-unique-alloc-failed"
+        _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE no creatable/writable cache-runtime candidate exists on this filesystem (rejected: ${_FIE_CACHE_TRACE}); provisioning refused"
+        return "${PG_EXIT_CACHE_PATH}"
+    }
+    chmod 700 "${cand}" 2>/dev/null || true
+    (umask 077 && printf 'format=fie-6-9a-cache-v1\ncreated_utc=%s\nephemeral=yes\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)") > "${cand}/fie_cache.owner"
+    PG_CACHE_DIR="${cand}"
+    PG_CACHE_MODE="temp"
+    PG_CACHE_PERSISTENT="no"
+    PG_CACHE_TEMP_CREATED="${cand}"
+    echo "provision-test-postgres: isolated job-local cache fallback (pre-existing acquisition lock unclaimable; R4-R5-R1 Task D): ${cand}" >&2
+    return 0
+}
+
 _fie_test_pg_cache_resolve() {  # sets PG_CACHE_DIR/MODE/PERSISTENT (+ trace)
     local cand
     _FIE_CACHE_TRACE=""
@@ -157,7 +199,13 @@ _fie_test_pg_cache_resolve() {  # sets PG_CACHE_DIR/MODE/PERSISTENT (+ trace)
         return 0
     fi
     if [ -n "${FIE_TEST_PG_CACHE_DIR:-}" ]; then
-        # 1. explicit override — hard contract; unusable => fail closed
+        # 1. explicit override — hard contract; unusable => fail closed.
+        #    (An UNKNOWN pre-existing acquisition LOCK inside it does NOT
+        #    authorize claiming: the claim protocol fails closed and the
+        #    provisioning path selects the isolated job-local fallback;
+        #    R4-R5-R1 Task D. The resolver itself keeps returning the
+        #    candidate so the cleanup contract can still inspect + report
+        #    the foreign lock fail-closed.)
         if _cache_dir_usable_probe override "${FIE_TEST_PG_CACHE_DIR}"; then
             PG_CACHE_DIR="${FIE_TEST_PG_CACHE_DIR}"
             PG_CACHE_MODE="explicit"
@@ -166,13 +214,13 @@ _fie_test_pg_cache_resolve() {  # sets PG_CACHE_DIR/MODE/PERSISTENT (+ trace)
             _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE explicit FIE_TEST_PG_CACHE_DIR override is not creatable/writable on this filesystem (value withheld); refusing to fall back (override is a hard contract)"
             return "${PG_EXIT_CACHE_PATH}"
         fi
-    elif [ -n "${XDG_CACHE_HOME:-}" ] &&
+    elif [ -n "${XDG_CACHE_HOME:-}" ] && \
         _cache_dir_usable_probe xdg "${XDG_CACHE_HOME%/}/fie/test-postgres"; then
         # 2. XDG cache (probe-proven usable)
         PG_CACHE_DIR="${XDG_CACHE_HOME%/}/fie/test-postgres"
         PG_CACHE_MODE="xdg"
         PG_CACHE_PERSISTENT="yes"
-    elif [ -n "${HOME:-}" ] &&
+    elif [ -n "${HOME:-}" ] && \
         _cache_dir_usable_probe home "${HOME%/}/.cache/fie/test-postgres"; then
         # 3. HOME cache — only when actually unusable rejects fall through;
         #    "$HOME is set" is NOT evidence of writability (R4 root cause)
@@ -269,7 +317,7 @@ fie_test_pg_cache_cleanup() {
                 fi
                 ;;
             LOCK_CLASS=UNKNOWN)
-                _die "POSTGRESQL_TEARDOWN_FAILED cache acquisition lock ownership UNKNOWN (legacy/empty form; preserved and reported, removed by nothing)"
+                _die "POSTGRESQL_TEARDOWN_FAILED cache acquisition lock ownership UNKNOWN (legacy/empty form; preserved and reported; no removal performed)"
                 return "${PG_EXIT_TEARDOWN}"
                 ;;
             LOCK_CLASS=ACTIVE|LOCK_CLASS=ABSENT) : ;;
@@ -342,10 +390,114 @@ _fie_cache_lock_remove_if_stale_owned() {  # <cachedir>; 0 removed / 1 kept
         exec 8>&- 8<&-
         return 1
     fi
+    # Final re-proof immediately before the unlink (R4-R5-R1 Task D): a
+    # replacement between the marker/inode proof and the removal fails
+    # closed — the object that would be unlinked must still be the proven
+    # fie-owned one at THIS moment (flock is still held; only the two
+    # adjacent syscalls remain as window for an actor that ignores the
+    # flock protocol; honest maintainers are excluded by it).
+    if [ "$(readlink "/proc/self/fd/8" 2>/dev/null || true)" != "${lock}" ] || \
+        [ "$(grep -m1 '^format=' "${lock}" 2>/dev/null || true)" != \
+          "format=fie-6-9a-acquire-lock-v1" ]; then
+        exec 8>&- 8<&-
+        return 1
+    fi
     local rc=0
     rm -f -- "${lock}" || rc=1
     exec 8>&- 8<&-
     return "${rc}"
+}
+
+# Canonical acquisition-ownership claim (R4-R5-R1 Task D). Must run in THIS
+# shell (the claiming fd lives here, as with the removal protocol above).
+#
+#   ABSENT            -> create the lock file exclusively (noclobber
+#                        O_EXCL semantics): the creating invocation owns
+#                        the inode BY CONSTRUCTION, never by writability.
+#   STALE_JOB_OWNED   -> adopt per the documented stale-owner protocol:
+#                        hold the flock, re-prove the fie marker UNDER the
+#                        flock against the live inode, refresh metadata.
+#   ACTIVE            -> flock -w waits for the holder; on grant the
+#                        content is re-classified (fie-owned => adopt;
+#                        anything else => fail closed, preserved).
+#   UNKNOWN (incl. a foreign object appearing in the classify->mutate
+#                     window) => fail closed BEFORE any metadata write:
+#                        the lock is preserved untouched and never claimed
+#                        (defense in depth against the resolver's
+#                        TOCTOU; PG_EXIT_CACHE_PATH).
+#
+#   returns 0: THIS invocation owns the lock; ownership metadata present;
+#              fd 9 HELD — the caller must close fd 9 when done.
+#   nonzero:   fail closed — no metadata was written into an unproven
+#              object (the resolver-level isolated fallback may still have
+#              produced a usable cache for the caller upstream).
+_fie_cache_lock_acquisition_claim() {  # <cachedir>
+    local cachedir="$1" lock="${1}/.acquire.lock" target tries=0 created=0 fmt
+    local wait="${FIE_TEST_PG_LOCK_WAIT_SEC:-300}"
+    if [ ! -e "${lock}" ] && \
+        ( set -o noclobber; : > "${lock}" ) 2>/dev/null; then
+        created=1
+    fi
+    # NOTE (LK6 pin): the null-command `exec` applies redirections
+    # PERMANENTLY — keep the open inside a `{ ...; } 2>/dev/null` group so
+    # the shell's own stderr (diagnostics!) is never silenced, and open
+    # by the literal path shape the contract pins.
+    if ! { exec 9>>"${cachedir}/.acquire.lock"; } 2>/dev/null; then
+        _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cannot open cache acquisition lock file"
+        return "${PG_EXIT_CACHE_PATH}"
+    fi
+    while : ; do
+        tries=$(( tries + 1 ))
+        if ! flock -w "${wait}" 9; then
+            exec 9>&- 9<&-
+            _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cache acquisition lock unavailable after ${wait}s; refusing unsynchronized destructive promotion"
+            return "${PG_EXIT_CACHE_PATH}"
+        fi
+        # Deleted-inode detection via the /proc magic-symlink marker
+        # (R4-R2 Task E): stat -c %i /proc/self/fd/9 does NOT resolve to
+        # the target inode on every kernel — the portable, exact test is
+        # readlink's "(deleted)" suffix. Retries keep mutual exclusion
+        # against the LIVE path inode.
+        target="$(readlink "/proc/self/fd/9" 2>/dev/null || true)"
+        if [ "${target}" = "${lock}" ]; then
+            # --- ownership classification UNDER the held flock (Task D) ---
+            # fie_test_pg_cache_lock_classify would self-report ACTIVE
+            # here (we hold the flock), so the FILE CONTENT decides:
+            #   fie-format with an invocation  => proven fie-owned
+            #                                     (stale adopt/refresh);
+            #   empty AND exclusively created by
+            #   THIS invocation                 => ours by construction;
+            #   anything else (incl. legacy
+            #   0-byte we did not create)       => UNKNOWN in the
+            #                                     classify->mutate window:
+            #                                     fail closed, preserved.
+            fmt="$(grep -m1 '^format=' "${lock}" 2>/dev/null || true)"
+            if [ "${fmt}" = "format=fie-6-9a-acquire-lock-v1" ]; then
+                break
+            fi
+            if [ "${created}" -eq 1 ] && [ ! -s "${lock}" ]; then
+                break
+            fi
+            exec 9>&- 9<&-
+            _die "POSTGRESQL_PORTABLE_CACHE_LOCK_OWNERSHIP_UNPROVABLE cache acquisition lock content does not prove fie ownership (legacy/foreign/unattributable; value withheld); preserved untouched; claiming refused (R4-R5-R1 Task D)"
+            return "${PG_EXIT_CACHE_PATH}"
+        fi
+        if [ "${tries}" -ge 25 ]; then
+            exec 9>&- 9<&-
+            _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cache acquisition lock kept being replaced during acquisition (concurrent maintenance); refusing acquisition"
+            return "${PG_EXIT_CACHE_PATH}"
+        fi
+        exec 9>&- 9<&-
+        created=0  # a replaced inode is NOT the inode this job created
+        if ! { exec 9>>"${lock}"; } 2>/dev/null; then
+            _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cannot reopen cache acquisition lock file"
+            return "${PG_EXIT_CACHE_PATH}"
+        fi
+    done
+    # Ownership metadata is written UNDER the held flock, AFTER content
+    # ownership was proven (R4-R5-R1 Task D: never ownership-by-writability).
+    _fie_cache_lock_write_metadata "${lock}" || true
+    return 0
 }
 
 _portable_pg_arch() {
@@ -565,52 +717,35 @@ _fie_test_pg_ensure_cache() {
     fi
     if [ "${PG_CACHE_PERSISTENT}" = "yes" ]; then
         if command -v flock >/dev/null 2>&1; then
-            # Acquire + inode-verify loop (R4-R2 Task E protocol): a cleanup
-            # may have unlinked the lock file between our open and our flock;
-            # an acquirer discovering it holds a DELETED inode retries so
-            # mutual exclusion is always against the live path inode.
-            local lock_target="" tries=0
-            # NOTE: the null-command `exec` applies redirections PERMANENTLY
-            # — keep the probe inside a `{ ...; } 2>/dev/null` group so the
-            # shell's own stderr (diagnostics!) is never silenced.
-            if ! { exec 9>>"${cachedir}/.acquire.lock"; } 2>/dev/null; then
-                _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cannot open cache acquisition lock file"
-                return "${PG_EXIT_CACHE_PATH}"
+            # Canonical ownership claim (R4-R5-R1 Task D): exclusive-create
+            # for ABSENT / stale-owner adoption for proven fie-owned /
+            # flock-wait for ACTIVE / fail closed for UNKNOWN — never
+            # in-place claiming of an unproven pre-existing lock (the
+            # R4-R5 FI09 defect: fie metadata written into a legacy
+            # 0-byte lock converted UNKNOWN into apparently-job-owned
+            # state that a later cleanup then removed). The inode-verify
+            # retry loop (R4-R2 Task E) stays intact inside the claim.
+            _fie_cache_lock_acquisition_claim "${cachedir}"
+            rc=$?
+            if [ "${rc}" -ne 0 ]; then
+                # Fail-closed on the shared persistent cache (unproven /
+                # replaced object — incl. the create/create race window
+                # where an unattributable empty lock can appear): the
+                # shared lock object was never touched by this invocation;
+                # claiming or cleaning it is forbidden. Select the safe
+                # isolated alternative (R4-R5-R1 Task D): a fresh job-local
+                # temp cache owns nothing of the shared object's business.
+                if ! _cache_fallback_temp_alloc; then
+                    return "${PG_EXIT_CACHE_PATH}"
+                fi
+                cachedir="${PG_CACHE_DIR}"
+                _FIE_CACHE_RESOLVED_DIR="${PG_CACHE_DIR}"
+                _FIE_CACHE_RESOLVED_MODE="${PG_CACHE_MODE}"
+                _FIE_CACHE_RESOLVED_PERSISTENT="${PG_CACHE_PERSISTENT}"
             fi
-            while : ; do
-                tries=$(( tries + 1 ))
-                if ! flock -w 300 9; then
-                    exec 9>&- 9<&-
-                    _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cache acquisition lock unavailable after 300s; refusing unsynchronized destructive promotion"
-                    return "${PG_EXIT_CACHE_PATH}"
-                fi
-                # Deleted-inode detection via the /proc magic-symlink marker
-                # (R4-R2 Task E): stat -c %i /proc/self/fd/N does NOT resolve
-                # to the target inode on every kernel — the portable,
-                # exact test is readlink's "(deleted)" suffix. Our flock may
-                # be against a lock file that a concurrent maintenance
-                # unlinked between our open and our flock; retry then, so
-                # mutual exclusion is always against the LIVE path inode.
-                lock_target="$(readlink "/proc/self/fd/9" 2>/dev/null || true)"
-                if [ "${lock_target}" = "${cachedir}/.acquire.lock" ]; then
-                    break
-                fi
-                if [ "${tries}" -ge 25 ]; then
-                    exec 9>&- 9<&-
-                    _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cache acquisition lock kept being replaced during acquisition (concurrent maintenance); refusing acquisition"
-                    return "${PG_EXIT_CACHE_PATH}"
-                fi
-                exec 9>&- 9<&-
-                if ! { exec 9>>"${cachedir}/.acquire.lock"; } 2>/dev/null; then
-                    _die "POSTGRESQL_PORTABLE_CACHE_PATH_UNWRITABLE cannot reopen cache acquisition lock file"
-                    return "${PG_EXIT_CACHE_PATH}"
-                fi
-            done
-            # Ownership metadata is written UNDER the held flock (Task E).
-            _fie_cache_lock_write_metadata "${cachedir}/.acquire.lock" || true
             _cache_cold_acquire "${cachedir}" "${base}" "${arch}" "${ver}" 1
             rc=$?
-            exec 9>&- 9<&-
+            exec 9>&- 9<&- 2>/dev/null || true
             return "${rc}"
         fi
         _cache_cold_acquire "${cachedir}" "${base}" "${arch}" "${ver}" 0
@@ -1200,7 +1335,21 @@ _provisioner_main() {
     local action="${1:-}"
     case "${action}" in
         --ensure-cache)
-            _fie_test_pg_ensure_cache ;;
+            _fie_test_pg_ensure_cache
+            local rc=$?
+            # Standalone invocation: when the warmed content landed in an
+            # isolated job-local FALLBACK cache (unclaimable persistent
+            # lock; R4-R5-R1 Task D) it has no cross-invocation durability
+            # — leave no orphaned residue; this invocation created it
+            # (PG_CACHE_TEMP_CREATED) and its marker proves ownership.
+            if [ -n "${PG_CACHE_TEMP_CREATED:-}" ] && [ -d "${PG_CACHE_TEMP_CREATED}" ]; then
+                grep -q "^format=fie-6-9a-cache-v1$" \
+                    "${PG_CACHE_TEMP_CREATED}/fie_cache.owner" 2>/dev/null &&
+                    rm -rf -- "${PG_CACHE_TEMP_CREATED}" 2>/dev/null || true
+                PG_CACHE_TEMP_CREATED=""
+                echo "provision-test-postgres: ensure-cache warmed a job-local fallback cache (no cross-invocation durability); removed it at exit" >&2
+            fi
+            return "${rc}" ;;
         --resolve-cache)
             _fie_test_pg_cache_resolve || return $?
             printf 'CACHE_DIR=%s\nCACHE_MODE=%s\nCACHE_PERSISTENT=%s\n' \
