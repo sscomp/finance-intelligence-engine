@@ -51,6 +51,12 @@ from phase3.service.errors import (
     sanitize_for_error,
 )
 from phase3.service import freshness as _freshness
+from phase3.service.operational_events import (
+    DATABASE_UNAVAILABLE,
+    READINESS_FAILURE,
+    SCHEMA_INCOMPATIBLE,
+    emit as _emit_ops_event,
+)
 from phase3.service.timeutil import utc_now_iso
 
 __all__ = ["IntelligenceService", "DefaultIntelligenceService"]
@@ -170,6 +176,14 @@ def _readiness_identity_gate(store: DatabaseStore) -> dict[str, Any] | None:
             "persistence layer is not readable",
             {"reason": "runtime identity metadata is not readable"},
         ) from exc
+
+
+#: WO §9 event mapping for readiness gate failures (server-side only).
+_READINESS_GATE_EVENT = {
+    ServiceErrorCode.SCHEMA_INCOMPATIBLE.value: SCHEMA_INCOMPATIBLE,
+    ServiceErrorCode.DEPENDENCY_UNAVAILABLE.value: DATABASE_UNAVAILABLE,
+    ServiceErrorCode.IDENTITY_INCOMPATIBLE.value: READINESS_FAILURE,
+}
 
 
 class IntelligenceService(Protocol):
@@ -318,6 +332,8 @@ class DefaultIntelligenceService:
                 },
                 sort_keys=True,
             ))
+            _emit_ops_event(DATABASE_UNAVAILABLE,
+                            backend=self._store.backend)
             raise ServiceError(
                 ServiceErrorCode.DEPENDENCY_UNAVAILABLE,
                 "persistence layer is not readable",
@@ -325,14 +341,32 @@ class DefaultIntelligenceService:
             ) from exc
 
         current: int | None
-        gate = _readiness_schema_gate(self._store)
+        # Phase 6.9B-R4: readiness gate failures are distinguishable
+        # operational events (logging contract §9) — emitted server-side
+        # with stable codes only, then re-raised unchanged:
+        #   SCHEMA_INCOMPATIBLE   → SCHEMA_INCOMPATIBLE
+        #   DEPENDENCY_UNAVAILABLE→ DATABASE_UNAVAILABLE
+        #   IDENTITY_INCOMPATIBLE → READINESS_FAILURE
+        try:
+            gate = _readiness_schema_gate(self._store)
+        except ServiceError as exc:
+            _emit_ops_event(_READINESS_GATE_EVENT.get(
+                exc.code.value, READINESS_FAILURE
+            ), code=exc.code.value)
+            raise
         # Phase 6.9B-R3: prove WHO is connected, not just WHAT schema.
         # The verdict is fail-closed (raises on an incompatible runtime
         # identity); outside the enforcement scope (sqlite backend or a
         # non-production-shaped disposable PostgreSQL target without
         # pinned expectations) the gate reports applicable=false and
         # readiness is unchanged — see _identity_gate_applicable.
-        _readiness_identity_gate(self._store)
+        try:
+            _readiness_identity_gate(self._store)
+        except ServiceError as exc:
+            _emit_ops_event(_READINESS_GATE_EVENT.get(
+                exc.code.value, READINESS_FAILURE
+            ), code=exc.code.value)
+            raise
         current = int(gate["current_version"])
         return C.HealthReport(
             status="ok",

@@ -1,0 +1,39 @@
+#!/bin/bash
+# fie-activation-checklist — machine-readable production activation gate
+# (Phase 6.9B-R4, WO §12). Same operator-env contract as fie-start.
+#
+#   FIE_ENV_FILE (0600)  → the deployment env (R2 contract)
+#   FIE_EXPECTED_COMMIT  → the scoped commit (mandatory expectation)
+#
+# Execs: python -m phase3.operations.activation
+# Exit: 0 PRODUCTION_ACTIVATION_READY=true · 2 not ready (gate(s) false)
+#       · 78 configuration refusal. Full JSON report on stdout.
+set -u
+
+die() {
+    echo "{\"error\": {\"code\": \"$1\", \"message\": \"$2\"}}" >&2
+    exit 78
+}
+
+[ -n "${FIE_ENV_FILE:-}" ] || die ENV_FILE_REQUIRED \
+    "FIE_ENV_FILE is not set: the checklist refuses to invent an environment"
+[ -f "${FIE_ENV_FILE}" ] || die ENV_FILE_MISSING "FIE_ENV_FILE points at a nonexistent file (path withheld)"
+[ -r "${FIE_ENV_FILE}" ] || die ENV_FILE_UNREADABLE "FIE_ENV_FILE is not readable (check ownership/permissions)"
+
+set -a
+# shellcheck disable=SC1090
+. "${FIE_ENV_FILE}"
+set +a
+
+[ -n "${FIE_PROJECT_ROOT:-}" ] || die PROJECT_ROOT_REQUIRED \
+    "FIE_PROJECT_ROOT is not set by the env file"
+[ -d "${FIE_PROJECT_ROOT}" ] || die PROJECT_ROOT_MISSING "FIE_PROJECT_ROOT does not name a directory (value withheld)"
+
+cd "${FIE_PROJECT_ROOT}" || die PROJECT_ROOT_INACCESSIBLE "cannot enter FIE_PROJECT_ROOT (value withheld)"
+
+# shellcheck disable=SC1091,SC2034
+. scripts/fie_python_resolver.sh
+fie_resolve_python || die INTERPRETER_UNRESOLVABLE \
+    "no usable Python >= 3.11 interpreter resolved (source withheld)"
+
+exec "${FIE_PYTHON_BIN}" -m phase3.operations.activation "$@"

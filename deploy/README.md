@@ -27,7 +27,21 @@ deploy/
                                   values exported; host file must be 0600)
   staged/                         (created at staging; never committed with
                                    secrets)
+  bin/fie-backup                  6.9B-R4 backup wrapper →
+                                  phase3.persistence.pg_backup backup
+                                  (docs/operations/backup-restore-contract.md)
+  bin/fie-restore                 6.9B-R4 restore wrapper (fail-closed
+                                  provably-disposable target doctrine;
+                                  separate verify context required)
+  bin/fie-activation-checklist    6.9B-R4 §12 activation checklist →
+                                  phase3.operations.activation (any
+                                  mandatory gate false → NOT READY)
 ```
+
+Phase 6.9B-R4 operator documents: `docs/operations/
+production-runbook.md` (§11 ten sections + §13 rollback contract) and
+`docs/operations/backup-restore-contract.md` (§4/§5 backup+restore
+contract, RPO/RTO baseline doctrine).
 
 ## The three state classes (WO §11)
 

@@ -76,6 +76,11 @@ class TestFileContentAudit(unittest.TestCase):
         allowed_service_parts = {
             "dispatch", "contracts", "errors", "freshness", "reference",
             "boundary", "runtime_config", "timeutil",
+            # 6.9B-R4 additive pin: phase3.service.operational_events is a
+            # read-only structured-logging taxonomy (emit/redact; no SQL,
+            # no store, no service state) — transport emits STARTUP/
+            # SHUTDOWN/AUTH_FAILURE events through it.
+            "operational_events",
         }
         for source in sorted((REPO_ROOT / "phase3" / "transport").glob("*.py")):
             text = source.read_text(encoding="utf-8")

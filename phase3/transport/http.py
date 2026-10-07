@@ -70,6 +70,11 @@ from typing import Any
 
 from phase3.service import dispatch
 from phase3.service.errors import ServiceError, ServiceErrorCode
+from phase3.service.operational_events import (
+    SHUTDOWN as OPS_SHUTDOWN,
+    STARTUP as OPS_STARTUP,
+    emit as emit_ops_event,
+)
 from phase3.service.contracts import RequestContext
 from phase3.transport.auth import _request_id_from_headers, build_authenticator
 from phase3.transport.config import TransportConfig, load_transport_config
@@ -419,6 +424,18 @@ class _TransportHandler(BaseHTTPRequestHandler):
             # auth failures never reach the domain and map through the
             # same stable envelope/error table as domain errors
             request_id = _request_id_from_headers(self.headers)
+            # Phase 6.9B-R4 (§9): distinguishable AUTH_FAILURE event —
+            # codes only, no token/credential material (the envelope is
+            # already sanitized; the event adds nothing secret-bearing).
+            from phase3.service.operational_events import (
+                AUTH_FAILURE,
+                emit as _emit_ops_event,
+            )
+
+            _emit_ops_event(
+                AUTH_FAILURE, http_status=http_status_for(exc.code.value),
+                request_id=request_id, path=raw_path,
+            )
             error_envelope = {
                 "schema_version": _schema_version(),
                 "kind": "transport",
@@ -739,6 +756,13 @@ def run_server(
         )
     )
     server._fie_runtime = runtime  # type: ignore[attr-defined]
+    # §9 taxonomy: the lifecycle event also lands in the structured
+    # operations stream (field names/values carry no connection material)
+    emit_ops_event(
+        OPS_STARTUP, port=config.port,
+        backend="postgres" if is_pg_dsn(spec.original) else "sqlite",
+        schema_version=_schema_version(),
+    )
     return server
 
 
@@ -890,6 +914,11 @@ def main(argv: list[str] | None = None) -> int:
         },
         sort_keys=True,
     ))
+    # §9 taxonomy: structured shutdown event (bounded, post-cleanup)
+    emit_ops_event(
+        OPS_SHUTDOWN, clean=True,
+        signal=shutdown_signal[0] if shutdown_signal else "unknown",
+    )
     return 0
 
 if __name__ == "__main__":  # `python -m phase3.transport.http`

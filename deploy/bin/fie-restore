@@ -1,0 +1,58 @@
+#!/bin/bash
+# fie-restore — repository-owned PostgreSQL restore CLI (Phase 6.9B-R4).
+#
+# Same operator-environment contract as deploy/scripts/fie-start (R2) and
+# deploy/bin/fie-backup. The restore contract DEFAULTS TO REJECTING every
+# target that is not provably disposable:
+#
+#   FIE_RESTORE_TARGET_DISPOSABLE=1     REQUIRED explicit declaration
+#   FIE_RESTORE_TARGET_DSN              restore/mutation context (owner/
+#                                       migration identity, may CREATE)
+#   FIE_RESTORE_VERIFY_DSN              separate verification context
+#                                       (runtime identity — the restore
+#                                       context NEVER certifies itself)
+#
+# Usage:
+#   fie-restore --artifact PATH --db-target postgres://…
+#               [--verify-dsn postgres://…] [--disposable] [--expected-source FP]
+#
+# The artifact is fully validated (existence/size/metadata/Checksum/
+# pg_restore --list) BEFORE any target connection; restore executes as ONE
+# transaction (--clean --if-exists --exit-on-error, ownership preserved) —
+# any failure leaves the target unchanged. Post-restore schema/data/identity
+# verification runs on the verification context; PASS only when all hold.
+#
+# Exit: 0 PASS · 2 classified failure (machine-readable JSON on stderr; codes
+#       BACKUP_NOT_FOUND/BACKUP_INVALID/CHECKSUM_MISMATCH/
+#       RESTORE_TARGET_NOT_DISPOSABLE/… — see
+#       phase3/persistence/pg_backup.py) · 78 configuration refusal.
+
+set -u
+
+die() {
+    echo "{\"error\": {\"code\": \"$1\", \"message\": \"$2\"}}" >&2
+    exit 78
+}
+
+[ -n "${FIE_ENV_FILE:-}" ] || die ENV_FILE_REQUIRED \
+    "FIE_ENV_FILE is not set: fie-restore refuses to invent an environment (path is not a secret)"
+[ -f "${FIE_ENV_FILE}" ] || die ENV_FILE_MISSING "FIE_ENV_FILE points at a nonexistent file (path withheld)"
+[ -r "${FIE_ENV_FILE}" ] || die ENV_FILE_UNREADABLE "FIE_ENV_FILE is not readable (check ownership/permissions)"
+
+set -a
+# shellcheck disable=SC1090
+. "${FIE_ENV_FILE}"
+set +a
+
+[ -n "${FIE_PROJECT_ROOT:-}" ] || die PROJECT_ROOT_REQUIRED \
+    "FIE_PROJECT_ROOT is not set by the env file"
+[ -d "${FIE_PROJECT_ROOT}" ] || die PROJECT_ROOT_MISSING "FIE_PROJECT_ROOT does not name a directory (value withheld)"
+
+cd "${FIE_PROJECT_ROOT}" || die PROJECT_ROOT_INACCESSIBLE "cannot enter FIE_PROJECT_ROOT (value withheld)"
+
+# shellcheck disable=SC1091,SC2034
+. scripts/fie_python_resolver.sh
+fie_resolve_python || die INTERPRETER_UNRESOLVABLE \
+    "no usable Python >= 3.11 interpreter resolved (source withheld)"
+
+exec "${FIE_PYTHON_BIN}" -m phase3.persistence.pg_backup restore "$@"
