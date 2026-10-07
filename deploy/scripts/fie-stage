@@ -1,0 +1,124 @@
+#!/bin/bash
+# FIE deployment staging generator — Phase 6.9B-R2 (WO §11).
+#
+# REPOSITORY_ARTIFACT (this repo: deploy/supervisor/fie-http.conf template)
+#   -> STAGED_RUNTIME_ARTIFACT (a generated Supervisor conf with all
+#      {{PLACEHOLDER}} tokens substituted — install-specific paths but no
+#      secrets).
+# Activation into the ACTIVE_SUPERVISOR_CONFIGURATION is a SEPARATE,
+# explicitly authorized step (documented in deploy/README.md; NOT
+# executed by this script). Staging never touches production.
+#
+# Usage:
+#   deploy/scripts/fie-stage \
+#       --install-root <repo/install dir> \
+#       --env-file <operator-owned 0600 env file> \
+#       --runtime-user <user> \
+#       --log-dir <dir> \
+#       [--output <path>]      # default: <install-root>/deploy/staged/fie-http.conf
+#
+# Validation (fail-closed):
+#   * every {{PLACEHOLDER}} in the template must be resolved;
+#   * the env file must exist and be mode 0600 (§9: ownership and
+#     permissions are part of the contract);
+#   * the result contains no left-over {{...}} tokens.
+
+set -u
+
+usage() {
+    echo "usage: $0 --install-root DIR --env-file FILE --runtime-user USER --log-dir DIR [--output PATH]" >&2
+    exit 78
+}
+
+INSTALL_ROOT=""
+ENV_FILE=""
+RUNTIME_USER=""
+LOG_DIR=""
+OUTPUT=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --install-root) INSTALL_ROOT="$2"; shift 2 ;;
+        --env-file) ENV_FILE="$2"; shift 2 ;;
+        --runtime-user) RUNTIME_USER="$2"; shift 2 ;;
+        --log-dir) LOG_DIR="$2"; shift 2 ;;
+        --output) OUTPUT="$2"; shift 2 ;;
+        *) usage ;;
+    esac
+done
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+TEMPLATE="$REPO_ROOT/deploy/supervisor/fie-http.conf"
+
+[ -n "$INSTALL_ROOT" ] || usage
+[ -n "$ENV_FILE" ] || usage
+[ -n "$RUNTIME_USER" ] || usage
+[ -n "$LOG_DIR" ] || usage
+[ -f "$TEMPLATE" ] || { echo '{"error":{"code":"TEMPLATE_MISSING"}}' >&2; exit 78; }
+[ -d "$INSTALL_ROOT" ] || { echo '{"error":{"code":"INSTALL_ROOT_MISSING","message":"(value withheld)"}}' >&2; exit 78; }
+[ -f "$ENV_FILE" ] || { echo '{"error":{"code":"ENV_FILE_MISSING","message":"(path withheld)"}}' >&2; exit 78; }
+
+# §9: the env file's permissions/ownership are part of the contract.
+ENV_MODE=$(stat -c '%a' "$ENV_FILE")
+if [ "$ENV_MODE" != "600" ]; then
+    echo "{\"error\":{\"code\":\"ENV_FILE_MODE_NOT_0600\",\"mode\":\"$ENV_MODE\"}}" >&2
+    exit 78
+fi
+
+OUTPUT="${OUTPUT:-$INSTALL_ROOT/deploy/staged/fie-http.conf}"
+mkdir -p "$(dirname "$OUTPUT")"
+
+# Resolve a substitute-capable python (canonical precedence, no host
+# fallback): FIE_PYTHON > $VIRTUAL_ENV > install root .venv > repo .venv >
+# PATH python3 — fail closed if none.
+STAGE_PY=""
+for cand in "${FIE_PYTHON:-}" "${VIRTUAL_ENV:-}/bin/python3" \
+            "$INSTALL_ROOT/.venv/bin/python3" \
+            "$REPO_ROOT/.venv/bin/python3" \
+            "$(command -v python3 || true)"; do
+    if [ -n "$cand" ] && [ -x "$cand" ] && "$cand" -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" 2>/dev/null; then
+        STAGE_PY="$cand"
+        break
+    fi
+done
+[ -n "$STAGE_PY" ] || { echo '{"error":{"code":"INTERPRETER_UNRESOLVABLE"}}' >&2; exit 78; }
+
+FIE_INSTALL_ROOT="$INSTALL_ROOT" \
+FIE_ENV_FILE="$ENV_FILE" \
+FIE_RUNTIME_USER="$RUNTIME_USER" \
+FIE_LOG_DIR="$LOG_DIR" \
+"$STAGE_PY" - "$TEMPLATE" "$OUTPUT" <<'PYEOF'
+import os
+import re
+import sys
+
+template_path, output_path = sys.argv[1], sys.argv[2]
+mapping = {
+    "FIE_INSTALL_ROOT": os.environ["FIE_INSTALL_ROOT"],
+    "FIE_ENV_FILE": os.environ["FIE_ENV_FILE"],
+    "FIE_RUNTIME_USER": os.environ["FIE_RUNTIME_USER"],
+    "FIE_LOG_DIR": os.environ["FIE_LOG_DIR"],
+}
+text = open(template_path, encoding="utf-8").read()
+resolved = re.sub(
+    r"\{\{([A-Z_]+)\}\}",
+    lambda m: mapping.get(m.group(1)),
+    text,
+)
+leftover = re.findall(r"\{\{([A-Z_0-9]+)\}\}", resolved)
+if leftover:
+    print('{"error":{"code":"PLACEHOLDER_UNRESOLVED","variables":["%s"]}}'
+          % '","'.join(leftover), file=sys.stderr)
+    sys.exit(1)
+with open(output_path, "w", encoding="utf-8") as fh:
+    fh.write(resolved)
+os.chmod(output_path, 0o644)
+print(output_path)
+PYEOF
+STAGE_RC=$?
+[ "$STAGE_RC" -eq 0 ] || exit "$STAGE_RC"
+
+echo "staged artifact: $OUTPUT"
+echo "validation: preflight -> $INSTALL_ROOT/deploy/scripts/fie-preflight (with FIE_ENV_FILE exported)"
+echo "isolated check: run a job-owned supervisord on the staged file BEFORE any activation"
+exit 0

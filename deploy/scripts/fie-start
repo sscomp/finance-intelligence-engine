@@ -1,0 +1,59 @@
+#!/bin/bash
+# FIE HTTP runtime start wrapper — Phase 6.9B-R2 (WO §6/§7.1).
+#
+# The ONLY thing the Supervisor program launches. Responsibilities:
+#   1. load the operator-owned runtime environment file (FIE_ENV_FILE,
+#      required, 0600 — secrets never appear in the Supervisor conf);
+#   2. cd into the explicit project root (FIE_PROJECT_ROOT from the env
+#      file — CWD independence, 6.9B-R1 C-1);
+#   3. resolve the interpreter through the canonical resolver
+#      (scripts/fie_python_resolver.sh — no host fallback, fail-closed);
+#   4. exec the canonical entrypoint — single process, no daemonization,
+#      no double fork: Supervisor owns this process for its whole life.
+#
+# Failures are printed as a single sanitized line naming the offending
+# VARIABLE (never a value) and exit 78 (fail-closed refusal class).
+# A sourced env file must carry `export`ed values (R1 lesson: non-export
+# assignments are invisible to the child).
+
+set -u
+
+die() {  # sanitized refusal: variable/cause name only, never a value
+    echo "{\"error\": {\"code\": \"$1\", \"message\": \"$2\"}}" >&2
+    exit 78
+}
+
+[ -n "${FIE_ENV_FILE:-}" ] || die ENV_FILE_REQUIRED \
+    "FIE_ENV_FILE is not set: the start wrapper refuses to invent an environment (set environment=<path> in the staged Supervisor conf; path is not a secret)"
+[ -f "${FIE_ENV_FILE}" ] || die ENV_FILE_MISSING \
+    "FIE_ENV_FILE points at a nonexistent file (path withheld)"
+[ -r "${FIE_ENV_FILE}" ] || die ENV_FILE_UNREADABLE \
+    "FIE_ENV_FILE is not readable by this user (check ownership/permissions)"
+
+# Load the environment (exported variables only; sourcing is silent).
+set -a
+# shellcheck disable=SC1090
+. "${FIE_ENV_FILE}"
+set +a
+
+[ -n "${FIE_PROJECT_ROOT:-}" ] || die PROJECT_ROOT_REQUIRED \
+    "FIE_PROJECT_ROOT is not set by the env file: the wrapper refuses a CWD-dependent start (6.9B-R1 C-1)"
+[ -d "${FIE_PROJECT_ROOT}" ] || die PROJECT_ROOT_MISSING \
+    "FIE_PROJECT_ROOT does not name a directory (value withheld)"
+
+cd "${FIE_PROJECT_ROOT}" || die PROJECT_ROOT_INACCESSIBLE \
+    "cannot enter FIE_PROJECT_ROOT (value withheld)"
+
+# Canonical interpreter resolution (6.9A-R4-R2-R1): FIE_PYTHON override >
+# $VIRTUAL_ENV > repo .venv > PATH python3; fails closed (exit 78) on no
+# usable interpreter. Never a silent substitution.
+# shellcheck disable=SC1091,SC2034
+. scripts/fie_python_resolver.sh
+fie_resolve_python || die INTERPRETER_UNRESOLVABLE \
+    "no usable Python >= 3.11 interpreter resolved (FIE_PYTHON source withheld)"
+
+# exec: replaces the shell — exactly ONE process remains, owned by
+# Supervisor. The application installs a SIGTERM handler and exits 0 on
+# graceful shutdown, 2 on fail-closed refusal (see deploy/supervisor/
+# fie-http.conf rationale).
+exec "${FIE_PYTHON_BIN}" -m phase3.transport.http "$@"

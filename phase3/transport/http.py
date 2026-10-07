@@ -822,6 +822,35 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    except OSError as exc:
+        # Phase 6.9B-R2 (P2-06, WO §7.5/§20): bind conflicts fail closed
+        # with a sanitized single-line diagnostic that names the conflict
+        # class and the configured port — no traceback, no takeover, and
+        # (with the deployment artifact's exitcodes=0,2 policy) no
+        # supervisor restart loop against an occupied port. host/port are
+        # ordinary configuration knobs, not secrets.
+        import errno as _errno
+
+        code = "BIND_UNAVAILABLE"
+        if exc.errno == _errno.EACCES:
+            code = "BIND_PERMISSION_DENIED"
+        elif getattr(exc, "errno", None) not in (None, _errno.EADDRINUSE, _errno.EINVAL):
+            raise
+        print(
+            json.dumps(
+                {
+                    "error": {
+                        "code": code,
+                        "host": config.host,
+                        "port": config.port,
+                        "message": "listener bind refused (address occupied or unusable); no takeover",
+                    }
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     stop = threading.Event()
     shutdown_signal: list[str] = []
 

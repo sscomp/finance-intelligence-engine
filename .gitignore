@@ -14,6 +14,10 @@ htmlcov/
 .venv/
 venv/
 env/
+# …except the committed env-file SCHEMA of the 6.9B-R2 deployment artifact
+# (placeholders only; the real 0600 env file stays on the host)
+!deploy/env/
+!deploy/env/fie-runtime.env.example
 
 # IDE
 .idea/

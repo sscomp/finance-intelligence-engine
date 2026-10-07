@@ -1,0 +1,50 @@
+#!/bin/bash
+# FIE deployment preflight wrapper — Phase 6.9B-R2 (WO §8).
+#
+# Same environment contract as deploy/scripts/fie-start (FIE_ENV_FILE +
+# FIE_PROJECT_ROOT from the operator-owned 0600 env file), then runs the
+# deterministic preflight module (phase3.preflight) which validates the
+# full serve-plane contract and prints a sanitized JSON report.
+#
+# Preflight does NOT start the service, does NOT connect to any database,
+# does NOT mutate schema, and NEVER prints secret values.
+#
+# Exit: 0 = PRECHECK_RESULT=PASS, 2 = FAIL (refusals in the JSON report),
+# 78 = wrapper-level configuration refusal.
+
+set -u
+
+die() {
+    echo "{\"error\": {\"code\": \"$1\", \"message\": \"$2\"}}" >&2
+    exit 78
+}
+
+[ -n "${FIE_ENV_FILE:-}" ] || die ENV_FILE_REQUIRED \
+    "FIE_ENV_FILE is not set: preflight refuses to invent an environment"
+[ -f "${FIE_ENV_FILE}" ] || die ENV_FILE_MISSING \
+    "FIE_ENV_FILE points at a nonexistent file (path withheld)"
+
+set -a
+# shellcheck disable=SC1090
+. "${FIE_ENV_FILE}"
+set +a
+
+[ -n "${FIE_PROJECT_ROOT:-}" ] || die PROJECT_ROOT_REQUIRED \
+    "FIE_PROJECT_ROOT is not set by the env file"
+[ -d "${FIE_PROJECT_ROOT}" ] || die PROJECT_ROOT_MISSING \
+    "FIE_PROJECT_ROOT does not name a directory (value withheld)"
+
+cd "${FIE_PROJECT_ROOT}" || die PROJECT_ROOT_INACCESSIBLE \
+    "cannot enter FIE_PROJECT_ROOT (value withheld)"
+
+# Pre-resolve the interpreter via the canonical resolver (no host
+# fallback) — this IS part of the preflight contract ("interpreter
+# available"), so a resolver failure refuses before the module runs.
+# shellcheck disable=SC1091
+. scripts/fie_python_resolver.sh
+fie_resolve_python || die INTERPRETER_UNRESOLVABLE \
+    "no usable Python >= 3.11 interpreter resolved"
+
+# The module checks imports independently as well; this wrapper exec
+# keeps a single process and the exit code contract.
+exec "${FIE_PYTHON_BIN}" -m phase3.preflight "$@"
