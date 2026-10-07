@@ -302,13 +302,26 @@ def main():
         
         # 保存 JSON 供 debug
         now = get_taipei_time()
-        # Phase 6.1 portability: log dir via central boundary (FIE_DATA_DIR > repo layout)
+        # Phase 6.1 portability: log dir via central boundary (FIE_DATA_DIR >
+        # repo layout). Phase 6.9B-R1 (C-1): the historical CWD fallback is
+        # abolished and the dead `db.get_log_dir` import removed (that
+        # function never existed in db.py, so the import always failed and
+        # the CWD branch always ran). Data-dir resolution now goes through
+        # phase3.paths only; with phase3 unimportable the operator must set
+        # FIE_DATA_DIR explicitly.
         import os
         try:
-            from db import get_log_dir as _log_dir
-            log_dir = _log_dir()
+            from phase3.paths import data_dir as _fie_data_dir
+            log_dir = os.path.join(str(_fie_data_dir()), "logs")
         except ImportError:
-            log_dir = os.path.join(os.environ.get("FIE_DATA_DIR", os.getcwd()), "logs")
+            _data_dir_env = os.environ.get("FIE_DATA_DIR")
+            if not _data_dir_env:
+                raise RuntimeError(
+                    "macro_daily: phase3.paths is not importable and "
+                    "FIE_DATA_DIR is unset — the CWD-based path fallback "
+                    "was removed (Phase 6.9B-R1); set FIE_DATA_DIR explicitly"
+                )
+            log_dir = os.path.join(_data_dir_env, "logs")
         os.makedirs(log_dir, exist_ok=True)
         log_file = f"{log_dir}/{now.strftime('%Y-%m-%d')}.json"
         with open(log_file, "w", encoding="utf-8") as f:

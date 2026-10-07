@@ -742,12 +742,40 @@ def run_server(
     return server
 
 
-def main() -> int:
-    """Console entry point (``fie-http-server``) — repository-declared."""
+def main(argv: list[str] | None = None) -> int:
+    """Console entry point (``fie-http-server``) — repository-declared.
+
+    Phase 6.9B-R1 (Task G): ``--check-config`` is a narrowly scoped
+    CONFIGURATION VALIDATION mode. It resolves the transport contract
+    through the exact same code path as startup, prints the sanitized
+    effective contract, and exits — nothing binds, nothing connects,
+    nothing writes. Intended for deployment pre-flight (6.9B-R2
+    packaging) without touching the serve plane.
+    """
     import signal
     import sys
 
     from phase3.service.runtime_config import ConfigurationError
+
+    tokens = sys.argv[1:] if argv is None else list(argv)
+    if "--check-config" in tokens:
+        try:
+            config = load_transport_config()
+        except ConfigurationError as exc:
+            print(
+                json.dumps(
+                    {"error": {"code": exc.code, "message": exc.message}},
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        # Log-safe projection only: auth_token is never serialised
+        # (TransportConfig.to_dict withholds it by construction).
+        summary = config.to_dict()
+        summary["check"] = "ok"
+        print(json.dumps(summary, sort_keys=True))
+        return 0
 
     try:
         config = load_transport_config()

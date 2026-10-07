@@ -406,7 +406,12 @@ class TestPortfolioShadowRunAdditive(unittest.TestCase):
             # resolution through the canonical runtime_contract resolver,
             # CWD defaults abolished — dispatch-only, cmd_shadow_run
             # behavior unchanged; regression tests pass).
-            "ed3aebe0036523527434d0fffea4845c3b2563d0da5f198621a88c4bc24cbfa5"
+            # FIE 6.9B-R1 UPDATE 2026-10-07: SHA updated from ed3aebe0...
+            # to 223c1435... (runtime configuration contract: additive
+            # config-contract subcommand — Task G; dispatch-only,
+            # existing cmd_* behavior unchanged; full regression rerun
+            # PASS).
+            "223c1435adecf385a84cca51f3595a0c4a8284882d2659f326fe3c3279a94783"
         )
         self.assertEqual(actual_sha, expected_post_m8_sha,
                          "cli.py SHA should match post-M8 baseline")

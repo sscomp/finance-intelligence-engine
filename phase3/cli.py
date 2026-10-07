@@ -3361,6 +3361,27 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p24.set_defaults(func=cmd_backfill)
 
+    p25 = sub.add_parser(
+        "config-contract",
+        help="Print the effective, secret-redacted runtime configuration "
+             "contract (Phase 6.9B-R1 Task G).",
+        description=(
+            "Resolve the effective runtime configuration contract — the "
+            "same resolution path the HTTP serve plane and the batch plane "
+            "use — and print it SANITIZED: no raw DSN, no token, no secret "
+            "value. Secrets appear only as presence metadata (e.g. "
+            "AUTH_TOKEN_PRESENT). Refuses (exit 2, sanitized refusal JSON) "
+            "when the configuration is invalid — a validation mode, not a "
+            "workload trigger: never binds, never connects, never mutates."
+        ),
+    )
+    p25.add_argument(
+        "--json", action="store_true",
+        help="Emit the contract as a single JSON object on stdout "
+             "(default: JSON too — this command is machine-first).",
+    )
+    p25.set_defaults(func=cmd_config_contract)
+
     return p
 
 
@@ -3922,6 +3943,157 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     if output.get("validation_errors"):
         return 1
     return 0
+
+
+# ---------- Phase 6.9B-R1 Task G: safe configuration diagnostics ---------- #
+
+
+def _cfg_contract_section_transport() -> dict:
+    """Transport-plane knobs with presence metadata (never the token)."""
+    host_env = os.environ.get("FIE_HTTP_HOST")
+    port_env = os.environ.get("FIE_HTTP_PORT")
+    return {
+        "host": host_env if host_env else "127.0.0.1",
+        "host_source": "explicit_env" if host_env else "default",
+        "port": port_env if port_env is not None else 8787,
+        "port_source": "explicit_env" if port_env else "default",
+        "auth_mode": os.environ.get("FIE_AUTH_MODE") or "none",
+        "auth_token_present": bool(os.environ.get("FIE_AUTH_TOKEN")),
+        "auth_principal": os.environ.get("FIE_AUTH_PRINCIPAL") or "service-consumer",
+        "log_level": os.environ.get("FIE_LOG_LEVEL") or "INFO",
+        "request_timeout": os.environ.get("FIE_REQUEST_TIMEOUT") or "60",
+        "sqlite_access_mode": os.environ.get("FIE_SQLITE_ACCESS_MODE") or "writable",
+    }
+
+
+def _cfg_contract_section_db_targets() -> dict:
+    """Per-role DB target presence — class/source metadata only.
+
+    Target VALUES are never rendered in any form (masked or otherwise):
+    a DSN is credential material and this diagnostic is about *which
+    contract is in force*, not what it points at. Resolution refusals
+    are recorded as the refusal class (machine-testable) with the value
+    withheld.
+    """
+    from phase3.runtime_contract import (
+        CANONICAL_ENV_VARS,
+        FailClosedTarget,
+        legacy_alias_env_vars,
+        resolve_role_target,
+    )
+    roles = ("raw", "intelligence", "test", "rollback")
+    out: dict[str, Any] = {}
+    for role in roles:
+        aliases_present = [
+            a for a in legacy_alias_env_vars(role)
+            if os.environ.get(a, "").strip()
+        ]
+        entry: dict[str, Any] = {
+            "env_var": CANONICAL_ENV_VARS[role],
+            "legacy_alias_in_use": aliases_present,
+        }
+        try:
+            spec = resolve_role_target(role)
+            entry.update({
+                "present": True,
+                "backend": spec.backend,
+                "source": spec.source,
+                "resolved_by": spec.env_var,
+            })
+        except FailClosedTarget as exc:
+            entry.update({
+                "present": False,
+                "refusal": exc.reason,
+            })
+        out[role] = entry
+    return out
+
+
+def _cfg_contract_section_kill_switch() -> dict:
+    """Kill-switch state via the canonical loader (fail-closed, C-2/C-3)."""
+    from phase3.config.loader import ConfigLoader
+    from phase3.paths import config_dir
+    root = config_dir() / "config" / "phase3"
+    out: dict[str, Any] = {"config_root": str(root), "root_source": (
+        "explicit_env" if os.environ.get("FIE_CONFIG_DIR") else "default")}
+    try:
+        loader = ConfigLoader(root)
+        entry: dict[str, Any] = {
+            "enabled": loader._read_enabled(),
+            "state": "explicit",
+        }
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        entry = {"enabled": None, "state": "refused",
+                 "refusal": type(exc).__name__ + ": " + str(exc).split(":")[0]}
+    out.update(entry)
+    return out
+
+
+def cmd_config_contract(args: argparse.Namespace) -> int:
+    """Phase 6.9B-R1 Task G: print the effective runtime configuration
+    contract, SANITIZED.
+
+    This is a validation/diagnostic mode — zero side effects: nothing
+    binds, nothing connects to a database, nothing writes. Every
+    credential-capable slot appears only as presence metadata
+    (``AUTH_TOKEN_PRESENT``) or a refusal class; target values never
+    appear at all.
+
+    Exit code: 0 when the effective contract validates; 2 when any
+    resolution refuses (the sanitized refusal of the failing plane is
+    included with values withheld).
+    """
+    from phase3.paths import artifact_dir, config_dir, data_dir
+    from phase3.transport.config import load_transport_config
+    from phase3.service.runtime_config import ConfigurationError
+
+    report: dict[str, Any] = {
+        "contract": "fie-runtime-configuration",
+        "version": "6.9B-R1",
+    }
+    valid = True
+    refusals: dict[str, Any] = {}
+
+    service_env = os.environ.get("FIE_SERVICE_ENV", "").strip().lower() or "local"
+    report["service_env"] = service_env
+    report["log_format"] = os.environ.get("FIE_LOG_FORMAT") or "structured"
+
+    try:
+        from phase3.service.runtime_config import load_runtime_config
+        runtime = load_runtime_config()
+        report["database"] = {
+            "spec": runtime.database_spec,  # masked form (sanitize_db_url)
+            "source": runtime.database_source,
+        }
+    except Exception as exc:  # noqa: BLE001 - FailClosedTarget family
+        report["database"] = {"spec": None, "source": "unresolved"}
+        refusals["runtime"] = getattr(exc, "code", None) or getattr(
+            exc, "reason", type(exc).__name__)
+        valid = False
+
+    report["paths"] = {
+        "data_dir": str(data_dir()),
+        "config_dir": str(config_dir()),
+        "artifact_dir": str(artifact_dir()),
+    }
+    report["db_targets"] = _cfg_contract_section_db_targets()
+    report["kill_switch"] = _cfg_contract_section_kill_switch()
+    if report["kill_switch"].get("state") == "refused":
+        valid = False
+
+    report["transport"] = _cfg_contract_section_transport()
+    try:
+        load_transport_config()
+    except ConfigurationError as exc:
+        refusals["transport"] = {"code": exc.code, "message": exc.message}
+        valid = False
+
+    report["valid"] = valid
+    if refusals:
+        report["refusals"] = refusals
+
+    print(json.dumps(report, sort_keys=True, ensure_ascii=False))
+    return 0 if valid else 2
 
 
 def main(argv: list[str] | None = None) -> int:

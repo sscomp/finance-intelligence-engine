@@ -235,32 +235,46 @@ class TestConfigLoaderReal(unittest.TestCase):
         self.assertEqual(cfg.config_hash, self.cfg.config_hash)
 
 
-# ---------- ConfigLoader: defaults / missing files ----------
+# ---------- ConfigLoader: missing files ----------
 
 class TestConfigLoaderMissing(unittest.TestCase):
-    def test_missing_root_uses_defaults(self):
-        # Empty tempdir — all config files "missing" → uses defaults.
+    # Phase 6.9B-R1 (C-2/C-3): the fail-open defaults are abolished.
+    # A missing enabled.yaml refuses (the kill switch must be explicit);
+    # every OTHER missing file still falls back to its documented default.
+
+    def test_missing_root_refuses_fail_closed(self):
+        # Empty tempdir — no enabled.yaml → deterministic refusal, never
+        # the historical implicit `enabled: True`.
         with tempfile.TemporaryDirectory() as td:
             loader = ConfigLoader(td)
-            cfg = loader.load()
-            self.assertIsInstance(cfg, LoadedConfig)
-            # Defaults should be applied
-            self.assertEqual(
-                cfg.macro.weights.weights, MACRO_DEFAULT_WEIGHTS
-            )
-            self.assertEqual(
-                cfg.industry.weights.weights, INDUSTRY_DEFAULT_WEIGHTS
-            )
-            self.assertEqual(
-                cfg.company.weights.weights, COMPANY_DEFAULT_WEIGHTS
-            )
-            # config_hash still works (no files → still a 16-char hash)
-            self.assertEqual(len(cfg.config_hash), 16)
+            with self.assertRaises(ValueError) as cm:
+                loader.load()
+            self.assertIn("enabled.yaml is missing", str(cm.exception))
+
+    def test_present_root_without_enabled_file_refuses(self):
+        # Other files present, kill switch absent → still refuses; the
+        # kill-switch gate runs FIRST.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "scorers").mkdir(parents=True, exist_ok=True)
+            for f in ("decay.yaml", "source_weights.yaml",
+                      "scorers/macro.yaml", "scorers/industry.yaml",
+                      "scorers/company.yaml"):
+                p = root / f
+                p.write_text("placeholder: 1\n", encoding="utf-8")
+            loader = ConfigLoader(root)
+            with self.assertRaises(ValueError) as cm:
+                loader.load()
+            self.assertIn("enabled.yaml is missing", str(cm.exception))
 
     def test_empty_root_decay_and_source_weights_empty(self):
+        # With the kill switch explicit, absent decay/source_weights still
+        # resolve to their documented defaults (empty rules).
         with tempfile.TemporaryDirectory() as td:
-            loader = ConfigLoader(td)
-            cfg = loader.load()
+            root = Path(td)
+            (root / "enabled.yaml").write_text("enabled: true\n",
+                                               encoding="utf-8")
+            cfg = ConfigLoader(root).load()
             self.assertEqual(cfg.decay_rules, {})
             self.assertEqual(cfg.source_weights, {})
 
@@ -275,8 +289,11 @@ class TestConfigLoaderInvalid(unittest.TestCase):
                 "decay:\n  my_signal:\n    function: garbled\n    half_life_days: 7\n",
                 encoding="utf-8",
             )
-            # Need a full set of files to load everything else
-            for f in ("enabled.yaml", "source_weights.yaml",
+            # Need a full set of files to load everything else; the kill
+            # switch must be explicit (6.9B-R1 C-2/C-3).
+            (root / "enabled.yaml").write_text("enabled: true\n",
+                                               encoding="utf-8")
+            for f in ("source_weights.yaml",
                       "scorers/macro.yaml", "scorers/industry.yaml",
                       "scorers/company.yaml"):
                 p = root / f
@@ -295,7 +312,9 @@ class TestConfigLoaderInvalid(unittest.TestCase):
                 encoding="utf-8",
             )
             (root / "scorers").mkdir(parents=True, exist_ok=True)
-            for f in ("enabled.yaml", "decay.yaml",
+            (root / "enabled.yaml").write_text("enabled: true\n",
+                                               encoding="utf-8")
+            for f in ("decay.yaml",
                       "scorers/macro.yaml", "scorers/industry.yaml",
                       "scorers/company.yaml"):
                 p = root / f
@@ -315,7 +334,9 @@ class TestConfigLoaderInvalid(unittest.TestCase):
                 "default_weights:\n  economic: 0.7\n  monetary: 0.7\n",
                 encoding="utf-8",
             )
-            for f in ("enabled.yaml", "decay.yaml", "source_weights.yaml",
+            (root / "enabled.yaml").write_text("enabled: true\n",
+                                               encoding="utf-8")
+            for f in ("decay.yaml", "source_weights.yaml",
                       "scorers/industry.yaml", "scorers/company.yaml"):
                 p = root / f
                 p.write_text("placeholder: 1\n", encoding="utf-8")

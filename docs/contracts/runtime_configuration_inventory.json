@@ -1,0 +1,308 @@
+{
+  "contract": "fie-runtime-configuration-inventory",
+  "version": "6.9B-R1",
+  "date": "2026-10-06",
+  "precedence_rule": "explicit argument > canonical environment variable > legacy alias environment variable > documented safe default (absent value); every explicitly supplied INVALID value refuses deterministically (ConfigurationError / FailClosedTarget) and never silently falls back",
+  "working_directory_rule": "no configured value may depend on the process CWD; repo-relative defaults derive from the repository location (phase3.paths project discovery) only",
+  "variables": [
+    {
+      "name": "FIE_HTTP_HOST",
+      "plane": "serve",
+      "required": false,
+      "default": "127.0.0.1",
+      "secret": false,
+      "validation": "non-empty string after strip; empty resets to default",
+      "failure_mode": "n/a (absent -> default; no malformed class for a string host)",
+      "consumer": "phase3.transport.config.load_transport_config -> phase3.transport.http",
+      "source": "phase3/transport/config.py"
+    },
+    {
+      "name": "FIE_HTTP_PORT",
+      "plane": "serve",
+      "required": false,
+      "default": "8787 (0 = deliberate ephemeral bind)",
+      "secret": false,
+      "validation": "integer in 0..65535",
+      "failure_mode": "refusal INVALID_HTTP_PORT (explicitly supplied non-numeric/negative/>65535)",
+      "consumer": "phase3.transport.config.load_transport_config -> phase3.transport.http",
+      "source": "phase3/transport/config.py::_resolve_port"
+    },
+    {
+      "name": "FIE_AUTH_MODE",
+      "plane": "serve",
+      "required": false,
+      "default": "none (FORBIDDEN under staging/production)",
+      "secret": false,
+      "validation": "vocabulary none|token",
+      "failure_mode": "refusal UNKNOWN_AUTH_MODE; AUTH_MODE_FORBIDDEN_IN_PRODUCTION under production-like profiles",
+      "consumer": "phase3.transport.config -> phase3.transport.auth",
+      "source": "phase3/transport/config.py::_resolve_auth_mode"
+    },
+    {
+      "name": "FIE_AUTH_TOKEN",
+      "plane": "serve",
+      "required": "conditional: required when FIE_AUTH_MODE=token under staging/production; fail-closed at the authenticator otherwise",
+      "default": "none",
+      "secret": true,
+      "validation": "non-empty (never echoed by any diagnostic)",
+      "failure_mode": "refusal AUTH_CREDENTIAL_MISSING under production-like; authenticator construction refusal otherwise",
+      "consumer": "phase3.transport.auth.BearerTokenAuthenticator",
+      "source": "phase3/transport/config.py"
+    },
+    {
+      "name": "FIE_AUTH_PRINCIPAL",
+      "plane": "serve",
+      "required": false,
+      "default": "service-consumer",
+      "secret": false,
+      "validation": "none (opaque label)",
+      "failure_mode": "n/a",
+      "consumer": "phase3.transport.auth",
+      "source": "phase3/transport/config.py"
+    },
+    {
+      "name": "FIE_LOG_LEVEL",
+      "plane": "serve",
+      "required": false,
+      "default": "INFO",
+      "secret": false,
+      "validation": "vocabulary DEBUG|INFO|WARNING|ERROR",
+      "failure_mode": "refusal INVALID_LOG_LEVEL",
+      "consumer": "phase3.transport.http.main (logging.basicConfig)",
+      "source": "phase3/transport/config.py::_resolve_log_level"
+    },
+    {
+      "name": "FIE_REQUEST_TIMEOUT",
+      "plane": "serve",
+      "required": false,
+      "default": "60 seconds",
+      "secret": false,
+      "validation": "finite positive number",
+      "failure_mode": "refusal INVALID_REQUEST_TIMEOUT",
+      "consumer": "phase3.transport.http",
+      "source": "phase3/transport/config.py::_resolve_request_timeout"
+    },
+    {
+      "name": "FIE_SQLITE_ACCESS_MODE",
+      "plane": "serve",
+      "required": false,
+      "default": "writable",
+      "secret": false,
+      "validation": "vocabulary writable|readonly|immutable_snapshot",
+      "failure_mode": "refusal UNKNOWN_ACCESS_MODE",
+      "consumer": "phase3.persistence.sqlite",
+      "source": "phase3/transport/config.py::_resolve_access_mode"
+    },
+    {
+      "name": "FIE_SERVICE_ENV",
+      "plane": "both",
+      "required": false,
+      "default": "local",
+      "secret": false,
+      "validation": "vocabulary local|test|staging|production (also classified rehearsal/production by phase3.runtime_contract)",
+      "failure_mode": "refusal UNKNOWN_SERVICE_ENV (runtime_config) / FAIL_CLOSED_PRODUCTION_MODE_DECLARATION_REQUIRED (guard layer); under staging/production the production-like gates require DSN + non-none auth",
+      "consumer": "phase3.service.runtime_config, phase3.runtime_contract, shell guards",
+      "source": "phase3/service/runtime_config.py"
+    },
+    {
+      "name": "FIE_LOG_FORMAT",
+      "plane": "both",
+      "required": false,
+      "default": "structured",
+      "secret": false,
+      "validation": "vocabulary structured|plain",
+      "failure_mode": "refusal INVALID_LOG_FORMAT",
+      "consumer": "phase3.service.runtime_config",
+      "source": "phase3/service/runtime_config.py"
+    },
+    {
+      "name": "FIE_DB_TARGET_RAW",
+      "plane": "both",
+      "required": "required by the raw layer at every use (no implicit default)",
+      "default": "none (absent -> fail-closed)",
+      "secret": "value may embed credentials (DSN); never echoed — masked forms only",
+      "validation": "phase3.runtime_contract.parse_target (explicit backend class; absolute SQLite path or postgres(ql):// DSN)",
+      "failure_mode": "FailClosedTarget exit 78 classes: FAIL_CLOSED_DB_TARGET_REQUIRED / FAIL_CLOSED_MALFORMED_DB_TARGET / FAIL_CLOSED_CONTRADICTORY_DB_TARGETS",
+      "consumer": "phase3.runtime_contract.resolve_raw_target -> db.py raw layer",
+      "source": "phase3/runtime_contract.py (canonical)"
+    },
+    {
+      "name": "FIE_DB_TARGET_INTELLIGENCE",
+      "plane": "both",
+      "required": "required by the Phase 3B store/persistence seam at every resolution (no implicit default)",
+      "default": "none (absent -> fail-closed)",
+      "secret": "value may embed credentials (DSN); masked forms only",
+      "validation": "phase3.runtime_contract.parse_target",
+      "failure_mode": "FailClosedTarget classes as FIE_DB_TARGET_RAW; surfaced as ConfigurationError DATABASE_URL_* by phase3.service.runtime_config/transport.config",
+      "consumer": "phase3.runtime_contract.resolve_intelligence_target -> phase3.persistence.backend.resolve_spec",
+      "source": "phase3/runtime_contract.py (canonical)"
+    },
+    {
+      "name": "FIE_DB_TARGET_TEST",
+      "plane": "batch",
+      "required": false,
+      "default": "none (absent -> fail-closed when that resolution is attempted)",
+      "secret": "masked forms only",
+      "validation": "phase3.runtime_contract.parse_target",
+      "failure_mode": "FailClosedTarget classes",
+      "consumer": "wrapper guard / rehearsal tooling",
+      "source": "phase3/runtime_contract.py (canonical)"
+    },
+    {
+      "name": "FIE_DB_TARGET_ROLLBACK",
+      "plane": "batch",
+      "required": false,
+      "default": "none",
+      "secret": "masked forms only",
+      "validation": "phase3.runtime_contract.parse_target",
+      "failure_mode": "FailClosedTarget classes",
+      "consumer": "rollback tooling / wrapper guard",
+      "source": "phase3/runtime_contract.py (canonical)"
+    },
+    {
+      "name": "FIE_DB_PATH",
+      "plane": "both",
+      "required": false,
+      "default": "none",
+      "secret": "masked forms only",
+      "note": "LEGACY ALIAS of FIE_DB_TARGET_RAW (6.8A normalization) AND the guard-reference path selector in phase3.paths; deprecated for the raw-layer DB-target role — canonical name preferred; contradictory aliases fail closed",
+      "failure_mode": "same refusal classes as the raw role; contradiction with the canonical var fails closed",
+      "consumer": "phase3.paths.macro_history_db_path/macro_history_db_spec, phase3.runtime_contract",
+      "source": "phase3/runtime_contract.py LEGACY_ALIAS_ROLES"
+    },
+    {
+      "name": "FIE_DATABASE_URL",
+      "plane": "both",
+      "required": false,
+      "default": "none",
+      "secret": "masked forms only",
+      "note": "LEGACY ALIAS of FIE_DB_TARGET_INTELLIGENCE (6.8A normalization); canonical name preferred",
+      "failure_mode": "same refusal classes as the intelligence role",
+      "consumer": "phase3.paths.database_url, phase3.runtime_contract",
+      "source": "phase3/runtime_contract.py LEGACY_ALIAS_ROLES"
+    },
+    {
+      "name": "FIE_INTELLIGENCE_DB",
+      "plane": "batch",
+      "required": false,
+      "default": "none",
+      "secret": "masked forms only",
+      "note": "LEGACY ALIAS of FIE_DB_TARGET_INTELLIGENCE (6.8A normalization); deprecated — canonical name preferred",
+      "failure_mode": "same refusal classes as the intelligence role",
+      "consumer": "phase3.runtime_contract",
+      "source": "phase3/runtime_contract.py LEGACY_ALIAS_ROLES"
+    },
+    {
+      "name": "FIE_PROJECT_ROOT",
+      "plane": "both",
+      "required": false,
+      "default": "auto-discovered repository root (phase3.paths._discover_repo_root)",
+      "secret": false,
+      "validation": "none",
+      "failure_mode": "n/a",
+      "consumer": "phase3.paths.*",
+      "source": "phase3/paths.py"
+    },
+    {
+      "name": "FIE_DATA_DIR",
+      "plane": "both",
+      "required": false,
+      "default": "<FIE_PROJECT_ROOT>",
+      "secret": false,
+      "validation": "none (path)",
+      "failure_mode": "when phase3.paths is unimportable in legacy fetchers, an UNSET value refuses (CWD fallback removed, 6.9B-R1 C-1)",
+      "consumer": "phase3.paths.data_dir; macro_daily.py/company_monthly.py/industry_weekly.py",
+      "source": "phase3/paths.py"
+    },
+    {
+      "name": "FIE_CONFIG_DIR",
+      "plane": "both",
+      "required": false,
+      "default": "<FIE_PROJECT_ROOT>",
+      "secret": false,
+      "validation": "none (path)",
+      "failure_mode": "when phase3.paths is unimportable in legacy fetchers, an UNSET value refuses (CWD fallback removed, 6.9B-R1 C-1); resolved LAZILY everywhere since 6.9B-R1 (C-4)",
+      "consumer": "phase3.paths.config_dir; phase3.config.loader (lazy); legacy fetchers",
+      "source": "phase3/paths.py, phase3/config/loader.py"
+    },
+    {
+      "name": "FIE_ARTIFACT_DIR",
+      "plane": "batch",
+      "required": false,
+      "default": "<FIE_PROJECT_ROOT>/metadata/reports/artifacts",
+      "secret": false,
+      "validation": "none (path)",
+      "failure_mode": "n/a",
+      "consumer": "phase3.pipeline export / phase3.paths.artifact_dir",
+      "source": "phase3/paths.py"
+    },
+    {
+      "name": "FIE_PRODUCTION_DB_CONTRACT",
+      "plane": "guard",
+      "required": false,
+      "default": "/home/ubuntu/fie-67b-upgrade/fie-service.env /home/ubuntu/fie-67b-upgrade/fie-wrapper-pg.env (space-separated list allowed)",
+      "secret": false,
+      "validation": "readable files carrying DB-target variables",
+      "failure_mode": "FailClosedTarget FAIL_CLOSED_PRODUCTION_IDENTITY_UNAVAILABLE (missing/unreadable/DSN-free set proves nothing)",
+      "consumer": "phase3.runtime_contract.load_production_identities / rehearsal guard",
+      "source": "phase3/runtime_contract.py DEFAULT_CONTRACT_FILES"
+    },
+    {
+      "name": "FIE_WRAPPER_ENV",
+      "plane": "batch",
+      "required": false,
+      "default": "none",
+      "secret": false,
+      "validation": "absolute path to an operator-owned 0600 env file",
+      "failure_mode": "wrapper refuse when unset and required by the guard discipline",
+      "consumer": "run.sh / run_weekly.sh / run_monthly.sh wrappers",
+      "source": "examples/fie-wrapper.env.example"
+    }
+  ],
+  "file_sources": [
+    {
+      "file": "config/phase3/enabled.yaml",
+      "key": "enabled",
+      "plane": "batch",
+      "required": true,
+      "default": "NONE — missing file/key/mis-typed value refuses (6.9B-R1 C-2/C-3; the historical fail-open default true is abolished)",
+      "secret": false,
+      "validation": "explicit boolean or string in 1/true/yes/on, 0/false/no/off",
+      "failure_mode": "ValueError from phase3.config.loader.ConfigLoader._read_enabled (kill-switch gate runs first)",
+      "consumer": "phase3.config.loader.ConfigLoader.load"
+    },
+    {
+      "file": "config/phase3/decay.yaml",
+      "key": "decay",
+      "plane": "batch",
+      "required": false,
+      "default": "no decay rules",
+      "secret": false,
+      "validation": "function vocabulary linear|exponential|step|none",
+      "failure_mode": "ValueError (unknown decay function)",
+      "consumer": "phase3.config.loader"
+    },
+    {
+      "file": "config/phase3/source_weights.yaml",
+      "key": "sources",
+      "plane": "batch",
+      "required": false,
+      "default": "no source-weight entries",
+      "secret": false,
+      "validation": "source_weight/type_weights in [0,1]",
+      "failure_mode": "ValueError (out of range)",
+      "consumer": "phase3.config.loader"
+    },
+    {
+      "file": "config/phase3/scorers/{macro,industry,company}.yaml",
+      "key": "default_weights / ttl_hours",
+      "plane": "batch",
+      "required": false,
+      "default": "dimension defaults + 24h TTL",
+      "secret": false,
+      "validation": "weights sum to 1.0 (float tolerance)",
+      "failure_mode": "ValueError (ScorerWeights sum)",
+      "consumer": "phase3.config.loader"
+    }
+  ]
+}

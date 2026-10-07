@@ -190,7 +190,12 @@ PHASE3_BASELINE = {
     # routed through the canonical runtime_contract resolver; silent
     # CWD defaults abolished — dispatch-only, cmd_shadow_run behavior
     # unchanged; regression tests pass).
-    "phase3/cli.py": "ed3aebe0036523527434d0fffea4845c3b2563d0da5f198621a88c4bc24cbfa5",
+    # FIE 6.9B-R1 UPDATE 2026-10-07: cli.py SHA updated from ed3aebe0... to
+    # 223c1435... (runtime configuration contract implementation: additive
+    # config-contract subcommand (Task G) + cmd_backfill untouched;
+    # dispatch-only, existing cmd_* behavior unchanged; full regression
+    # rerun PASS).
+    "phase3/cli.py": "223c1435adecf385a84cca51f3595a0c4a8284882d2659f326fe3c3279a94783",
     "phase3/pipeline/scoring_pipeline.py": "b325b97eaae25be515b5a5aada35e28e530fa574836c714ba488108893a15e5a",
     "phase3/pipeline/intelligence_pipeline.py": "025af0e538572fc056a73a9dc8ef2686f7518fd95723525693726f1da6fe5570",
     "phase3/datamodel/scores.py": "cc934edd423b1cea8a51cd0554547546a5bc2a34bac169d0ba154332599a090c",

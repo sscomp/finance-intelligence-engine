@@ -19,13 +19,32 @@ TZ_TAIPEI = timezone(timedelta(hours=8))
 # Phase 6.1 portability: paths via the central configuration boundary
 # (FIE_CONFIG_DIR / FIE_DATA_DIR) instead of the hard-coded
 # /home/ubuntu/macro-report layout.
+# Phase 6.9B-R1 (C-1): the historical CWD fallback is abolished — see
+# company_monthly.py for the rationale and the operator obligation.
 try:
     from phase3.paths import config_dir as _fie_config_dir, data_dir as _fie_data_dir
-except ImportError:  # pragma: no cover - phase3 不在 sys.path 時退回 CWD 版面
+except ImportError:  # pragma: no cover - exercised via subprocess tests
     def _fie_config_dir():
-        return os.environ.get("FIE_CONFIG_DIR", os.getcwd())
+        _v = os.environ.get("FIE_CONFIG_DIR")
+        if not _v:
+            raise RuntimeError(
+                "industry_weekly: phase3.paths is not importable and "
+                "FIE_CONFIG_DIR is unset — the CWD-based path fallback "
+                "was removed (Phase 6.9B-R1); set FIE_CONFIG_DIR/FIE_DATA_DIR "
+                "explicitly"
+            )
+        return _v
+
     def _fie_data_dir():
-        return os.environ.get("FIE_DATA_DIR", os.getcwd())
+        _v = os.environ.get("FIE_DATA_DIR")
+        if not _v:
+            raise RuntimeError(
+                "industry_weekly: phase3.paths is not importable and "
+                "FIE_DATA_DIR is unset — the CWD-based path fallback "
+                "was removed (Phase 6.9B-R1); set FIE_CONFIG_DIR/FIE_DATA_DIR "
+                "explicitly"
+            )
+        return _v
 
 CONFIG_PATH = os.path.join(_fie_config_dir(), "industry_config.json")
 LOG_DIR = os.path.join(_fie_data_dir(), "logs")

@@ -9,7 +9,11 @@ use if PyYAML is unavailable). For now, we expect PyYAML; missing
 import is reported as a clear ImportError.
 
 Key files (config/phase3/):
-  - enabled.yaml            → kill switch (just `enabled: true|false`)
+  - enabled.yaml            → kill switch (just `enabled: true|false`);
+                              REQUIRED — a missing/unparseable kill switch
+                              is a deterministic load refusal (Phase 6.9B-R1
+                              C-2/C-3: the historical fail-open default
+                              ``True`` for a missing file/key is abolished)
   - decay.yaml              → signal_type → {function, half_life_days, ...}
   - source_weights.yaml     → source_type → {source_weight, type_weights}
   - scorers/macro.yaml      → ScorerWeights + dimension order for macro
@@ -41,13 +45,29 @@ from phase3.datamodel import (
 )
 
 
-# Default config root, overridable via env or explicit arg.
-# Phase 6.1 portability: derived from the central runtime path boundary
-# (FIE_CONFIG_DIR > project root) instead of the historical hard-coded
-# /home/ubuntu/macro-report path. In a source checkout this resolves to
-# <repo>/config/phase3.
-_DEFAULT_ROOT = Path(os.environ.get("FIE_CONFIG_DIR") or Path(__file__).resolve().parents[2])
-DEFAULT_CONFIG_ROOT = _DEFAULT_ROOT / "config" / "phase3"
+# Phase 6.9B-R1 (C-4): the default config root is resolved LAZILY, at
+# ConfigLoader construction, through the central path boundary
+# (phase3.paths.config_dir: FIE_CONFIG_DIR > project root). The historical
+# import-time snapshot (``_DEFAULT_ROOT = Path(os.environ.get(...))``) is
+# abolished — a caller that imports this module before setting
+# FIE_CONFIG_DIR no longer gets frozen stale-default behavior, and any
+# change can be observed by the :func:`phase3.cli config-contract`
+# diagnostic. In a source checkout this resolves to <repo>/config/phase3.
+def _default_config_root() -> Path:
+    from phase3.paths import config_dir
+    return config_dir() / "config" / "phase3"
+
+
+def __getattr__(name: str) -> Any:
+    """PEP 562 lazy module attribute (Phase 6.9B-R1 C-4).
+
+    ``DEFAULT_CONFIG_ROOT`` keeps its historical name for import
+    compatibility, but is resolved at access time from the central path
+    boundary instead of being frozen at module import.
+    """
+    if name == "DEFAULT_CONFIG_ROOT":
+        return _default_config_root()
+    raise AttributeError(name)
 
 
 def _try_import_yaml() -> Any:
@@ -205,6 +225,9 @@ class ConfigLoader:
     """Loads and validates Phase 3 YAML config.
 
     Validates:
+      - enabled.yaml exists and carries an explicit boolean kill switch
+        (Phase 6.9B-R1 C-2/C-3: missing file/key/parse-safe value refuses —
+        never a fail-open default)
       - All three scorer weight maps sum to 1.0 within float tolerance
       - Decay function names are known
       - source_weight is in [0, 1]
@@ -296,13 +319,58 @@ class ConfigLoader:
         ttl = int(data.get("ttl_hours", 24))
         return sw, ttl
 
+    def _read_enabled(self) -> bool:
+        """Read the kill switch — FAIL-CLOSED (Phase 6.9B-R1 C-2/C-3).
+
+        The kill-switch decision must be explicit:
+
+        * a MISSING ``enabled.yaml`` refuses (the historical fail-open
+          default ``True`` is abolished — an absent file can never
+          silently mean "scoring enabled");
+        * a PRESENT file without an ``enabled`` key refuses;
+        * a non-boolean value refuses unless it unambiguously parses to
+          true/false (boolean scalar or one of the string vocabulary
+          ``1/true/yes/on``, ``0/false/no/off``, case-insensitive);
+        * any other value (e.g. a number, a list, an unknown string)
+          refuses — never silently becomes a boolean.
+
+        Every refusal is a ``ValueError`` naming the file and the rule,
+        never the ambient environment beyond the file location.
+        """
+        path = self._root / "enabled.yaml"
+        if not path.exists():
+            raise ValueError(
+                "enabled.yaml is missing: the Phase 3 kill switch must be "
+                "explicit (write `enabled: true` or `enabled: false`); the "
+                "historical fail-open default is no longer accepted "
+                "(Phase 6.9B-R1)"
+            )
+        raw = self._read("enabled.yaml")
+        if "enabled" not in raw:
+            raise ValueError(
+                "enabled.yaml carries no `enabled` key: the Phase 3 kill "
+                "switch must be explicit (Phase 6.9B-R1)"
+            )
+        val = raw["enabled"]
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            lowered = val.strip().lower()
+            if lowered in ("1", "true", "yes", "on"):
+                return True
+            if lowered in ("0", "false", "no", "off"):
+                return False
+        raise ValueError(
+            "enabled.yaml: the `enabled` value is not an unambiguous "
+            "boolean; the kill switch cannot be resolved (value withheld; "
+            "Phase 6.9B-R1)"
+        )
+
     def load(self) -> LoadedConfig:
-        enabled_raw = self._read("enabled.yaml")
-        enabled_val = enabled_raw.get("enabled", True)
-        if isinstance(enabled_val, str):
-            enabled = enabled_val.lower() in ("1", "true", "yes", "on")
-        else:
-            enabled = bool(enabled_val)
+        # Kill-switch gate FIRST: an unresolvable scoring enablement
+        # refuses the whole load before any other file is parsed
+        # (Phase 6.9B-R1 C-2/C-3).
+        enabled = self._read_enabled()
 
         macro_sw, macro_ttl = self._read_scorer(
             "scorers/macro.yaml", MACRO_SCORER_TYPE, MACRO_DEFAULT_WEIGHTS
