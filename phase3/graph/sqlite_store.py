@@ -325,6 +325,21 @@ class SQLiteGraphStore(SqlGraphStore):
         db_path: str | os.PathLike[str] = DEFAULT_DB_PATH,
         auto_migrate: bool = True,
     ) -> None:
+        if auto_migrate:
+            # Phase 6.9B-R3: construction-time auto-migration is
+            # migration authority, not runtime authority. A
+            # production-shaped target refuses implicit DDL here
+            # (fail closed); migration is an explicit operator context
+            # (``python -m phase3.cli init-db`` or
+            # FIE_MIGRATION_AUTHORITY=1).
+            from phase3.persistence.migration_authority import (
+                assert_auto_ddl_allowed,
+            )
+
+            assert_auto_ddl_allowed(
+                str(db_path),
+                operation="SQLiteGraphStore constructor auto-migration",
+            )
         super().__init__(SQLiteStore(db_path), auto_migrate=auto_migrate)
 
     @property

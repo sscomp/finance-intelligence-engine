@@ -179,7 +179,17 @@ M4_S2_BASELINE = {
 # docs/architecture/phase6-3/persistence-access-map.md).
 PHASE3_BASELINE = {
     "phase3/__init__.py": "3020382849864e92f78ae38b2c9cbd0e48419e3120e76786f905d43a5eafaeaa",
-    "phase3/api.py": "acb4f679549aff69d171012d2906f3e9cb573ffead4b1e8d99e1704736ffb1d7",
+    # FIE 6.9B-R3 UPDATE 2026-10-07: api.py SHA updated from acb4f679...
+    # to 38b0797c... (work order
+    # ABACUS_FIE_6_9B_R3_PRODUCTION_DATABASE_IDENTITY_PRIVILEGE_AND_
+    # PERSISTENCE_HARDENING: the implicit-DDL arcs _open_store /
+    # _build_graph_store now consult phase3.persistence.
+    # migration_authority.auto_ddl_allowed — on a production-shaped
+    # target runtime authority never auto-DDLs; a non-production
+    # disposable target keeps the historical behavior; 0 scoring-
+    # sequence edits. Documented, WO-sanctioned additiveness; the
+    # read-only scoring/pipeline/datamodel SHAs are unchanged).
+    "phase3/api.py": "38b0797c14090c851a79343901a398ded62598cacc3381f4293cf138694e3186",
     # FIE 6.7B PostgreSQL Readiness Remediation UPDATE 2026-10-04:
     # cli.py SHA updated from dfa7cd71... to 12de9d1e... (WO C1 additive
     # remediation: backend-aware seed source default via

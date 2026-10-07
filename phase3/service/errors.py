@@ -113,6 +113,12 @@ class ServiceErrorCode(str, Enum):
     #: readiness fails CLOSED with this stable, transport-neutral code
     #: (never a raw driver exception).
     SCHEMA_INCOMPATIBLE = "SCHEMA_INCOMPATIBLE"
+    #: Phase 6.9B-R3: the persistence layer is reachable and the schema
+    #: is compatible, but the CONNECTED database identity violates the
+    #: runtime role contract (superuser/prohibited attribute/ownership/
+    #: overprivileged/wrong pinned database-schema-role). Readiness
+    #: fails CLOSED with this stable, transport-neutral code.
+    IDENTITY_INCOMPATIBLE = "IDENTITY_INCOMPATIBLE"
     #: Phase 6.7B-R4: the bounded dispatch window for a request
     #: operation expired (transport-owned deadline). Read-only plane:
     #: the abandoned operation is never retried or re-executed.

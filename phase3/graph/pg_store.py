@@ -32,6 +32,19 @@ class PostgresGraphStore(SqlGraphStore):
     """
 
     def __init__(self, dsn: str, *, auto_migrate: bool = True) -> None:
+        if auto_migrate:
+            # Phase 6.9B-R3: construction-time auto-migration is
+            # migration authority, not runtime authority (see
+            # phase3/persistence/migration_authority.py). The
+            # production runtime role has no schema-CREATE privilege at
+            # all; this code-path guard refuses even before connecting.
+            from phase3.persistence.migration_authority import (
+                assert_auto_ddl_allowed,
+            )
+
+            assert_auto_ddl_allowed(
+                dsn, operation="PostgresGraphStore constructor auto-migration"
+            )
         super().__init__(PostgresStore(dsn), auto_migrate=auto_migrate)
 
     @property

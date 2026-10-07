@@ -208,7 +208,7 @@
             "type": "object",
             "required": ["code", "message"],
             "properties": {
-              "code": {"type": "string", "enum": ["INVALID_REQUEST", "UNAUTHENTICATED", "FORBIDDEN", "NOT_FOUND", "STALE_DATA", "DATA_UNAVAILABLE", "DEPENDENCY_UNAVAILABLE", "SCHEMA_INCOMPATIBLE", "OPERATION_TIMEOUT", "INTERNAL_ERROR"]},
+              "code": {"type": "string", "enum": ["INVALID_REQUEST", "UNAUTHENTICATED", "FORBIDDEN", "NOT_FOUND", "STALE_DATA", "DATA_UNAVAILABLE", "DEPENDENCY_UNAVAILABLE", "SCHEMA_INCOMPATIBLE", "IDENTITY_INCOMPATIBLE", "OPERATION_TIMEOUT", "INTERNAL_ERROR"]},
               "message": {"type": "string", "description": "sanitised — never contains stack traces, SQL, DSNs, paths, internal representations or secrets (§7)"},
               "details": {"type": "object"}
             }
@@ -262,6 +262,24 @@
     "http-status": 503,
     "error-code": "SCHEMA_INCOMPATIBLE"
   },
+  "x-runtime-identity-gate": {
+    "description": "Phase 6.9B-R3 — /readyz (and /v1/health) also run a deterministic fail-closed runtime database-identity gate after the schema gate: catalog-proven WHO the runtime is connected as (attributes, schema-CREATE privilege, owned relations, inherited memberships) plus operator-pinned expectations (FIE_EXPECTED_RUNTIME_DB/_SCHEMA/_ROLE, enforced only when set — never a guess). Enforcement scope is fail-closed, mirroring the migration-authority guard: enforced on provably production-shaped targets, on any pinned deployment, and under explicit FIE_RUNTIME_IDENTITY_GATE=1; disposable non-production PostgreSQL targets keep historical behavior (unprovable identity is not treated as production identity; the R1 rehearsal guards stay the write-funnel net). A PostgreSQL target whose identity cannot be parsed stays enforced.",
+    "failure-codes": [
+      "RUNTIME_ROLE_SUPERUSER",
+      "RUNTIME_ROLE_CREATEROLE",
+      "RUNTIME_ROLE_CREATEDB",
+      "RUNTIME_ROLE_REPLICATION",
+      "RUNTIME_ROLE_BYPASSRLS",
+      "RUNTIME_OVERPRIVILEGED_SCHEMA",
+      "RUNTIME_ROLE_OWNS_OBJECTS",
+      "RUNTIME_INHERITED_ROLE",
+      "WRONG_DATABASE",
+      "WRONG_SCHEMA",
+      "WRONG_ROLE"
+    ],
+    "http-status": 503,
+    "error-code": "IDENTITY_INCOMPATIBLE"
+  },
   "x-dispatch-timeout-contract": {
     "description": "Phase 6.7B-R4 — bounded request/dispatch timeout. FIE_REQUEST_TIMEOUT (one vocabulary: parseable, finite, strictly positive seconds; non-numeric/zero/negative/inf/nan refuse deterministically at configuration resolution, ADR-017) bounds BOTH the handler connection-read window AND the bounded dispatch wait for domain operations on the single persistence-worker thread. On expiry the transport answers 503 OPERATION_TIMEOUT with details.reason=DISPATCH_DEADLINE_EXCEEDED; the abandoned read-only operation is never implicitly re-executed. Dependency windows are bounded separately (PostgreSQL connect_timeout 10s + statement_timeout 60s; SQLite busy_timeout 5s) — a dependency timeout inside the window is DEPENDENCY_UNAVAILABLE (bounded-window semantics, same unavailability family, never INTERNAL_ERROR).",
     "operation-timeout-code": "OPERATION_TIMEOUT",
@@ -278,6 +296,7 @@
     "DATA_UNAVAILABLE": 503,
     "DEPENDENCY_UNAVAILABLE": 503,
     "SCHEMA_INCOMPATIBLE": 503,
+    "IDENTITY_INCOMPATIBLE": 503,
     "OPERATION_TIMEOUT": 503,
     "INTERNAL_ERROR": 500
   },

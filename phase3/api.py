@@ -187,8 +187,24 @@ def _open_store(db_path: str) -> Any:
     spec = resolve_spec(db_path)
     store = open_store(spec)
     try:
-        mgr = MigrationManager(store, default_migrations_for(store))
-        mgr.apply()
+        from phase3.persistence.migration_authority import auto_ddl_allowed
+
+        if auto_ddl_allowed(spec):
+            # Explicit/explicitly-authorized context (or a non-
+            # production-shaped disposable target): historical behavior
+            # preserved.
+            mgr = MigrationManager(store, default_migrations_for(store))
+            mgr.apply()
+        else:
+            # Phase 6.9B-R3: runtime authority consumes an
+            # already-migrated schema — never auto-DDL, never silent
+            # repair. Prove the schema is compatible (read-only) and
+            # fail closed otherwise.
+            from phase3.persistence.schema_gate import (
+                check_schema_compatibility,
+            )
+
+            check_schema_compatibility(store)
     except Exception:
         store.close()
         raise
@@ -260,7 +276,13 @@ def _build_graph_store(
         # Path guard does not apply — the specifier is a DSN, not a file.
         # DSN is masked before it can reach logs/exceptions.
         from phase3.graph.pg_store import PostgresGraphStore
+        from phase3.persistence.migration_authority import auto_ddl_allowed
 
+        if auto_migrate:
+            # Phase 6.9B-R3: construction auto-migration on a
+            # production-shaped target requires migration authority;
+            # runtime authority never auto-DDLs (fail closed).
+            auto_migrate = auto_ddl_allowed(db_path)
         return PostgresGraphStore(db_path, auto_migrate=auto_migrate)
     try:
         resolved = _check_path(db_path)
@@ -270,6 +292,11 @@ def _build_graph_store(
             message=str(exc),
             error_class="PathGuardError",
         ) from exc
+    if auto_migrate:
+        # Phase 6.9B-R3: migration-authority gate (see postgres branch).
+        from phase3.persistence.migration_authority import auto_ddl_allowed
+
+        auto_migrate = auto_ddl_allowed(resolved)
     return _SQLiteGraphStore(resolved, auto_migrate=auto_migrate)
 
 

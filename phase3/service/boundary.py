@@ -23,9 +23,20 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, Protocol
 
 from phase3.persistence.contracts import DatabaseStore
+from phase3.persistence.identity_gate import (
+    IdentityGateUnavailable,
+    IdentityIncompatible,
+    check_runtime_identity,
+    expected_runtime_expectations,
+)
+from phase3.persistence.migration_authority import (
+    _as_target_spec,
+    is_production_shaped,
+)
 from phase3.persistence.score_repo import ScoreRepository, ScoreSnapshotRecord
 from phase3.persistence.schema_gate import (
     SchemaGateUnavailable,
@@ -73,6 +84,91 @@ def _readiness_schema_gate(store: DatabaseStore) -> dict[str, Any]:
             ServiceErrorCode.DEPENDENCY_UNAVAILABLE,
             "persistence layer is not readable",
             {"reason": "schema metadata is not readable"},
+        ) from exc
+
+
+def _truthy_env(name: str, env: dict[str, str]) -> bool:
+    return (env.get(name, "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _identity_gate_applicable(
+    store: DatabaseStore, *, env: dict[str, str] | None = None
+) -> bool:
+    """Phase 6.9B-R3 gate APPLICABILITY scoping (fail closed).
+
+    The runtime-identity contract is ENFORCED on a PostgreSQL connection
+    when any of the following holds:
+
+    * the target is provably production-shaped (R1 production contract
+      fingerprint match — the same detection the R3 migration-authority
+      guard uses, deliberately identical scoping);
+    * the operator pinned runtime expectations
+      (``FIE_EXPECTED_RUNTIME_DB`` / ``_SCHEMA`` / ``_ROLE``) — a
+      deployment that pins its runtime identity proves it wherever it
+      runs;
+    * an explicit opt-in ``FIE_RUNTIME_IDENTITY_GATE=1`` forces
+      enforcement onto any PostgreSQL target (staging/rehearsal
+      hardening).
+
+    Disposable non-production PostgreSQL targets (test clusters,
+    throwaway databases) keep their historical behavior — the same
+    "unprovable identity is NOT treated as production identity" rule
+    as the migration-authority guard; the R1 rehearsal guards remain
+    the fail-closed net for the write funnels. A PostgreSQL store whose
+    DSN cannot be parsed is NOT provably non-production: it stays
+    ENFORCED. Non-PostgreSQL backends delegate to the gate itself
+    (sqlite → ``{"applicable": false}``).
+    """
+    e = os.environ if env is None else env
+    if any(v is not None for v in expected_runtime_expectations(e).values()):
+        return True
+    if _truthy_env("FIE_RUNTIME_IDENTITY_GATE", e):
+        return True
+    if getattr(store, "backend", "sqlite") != "postgres":
+        # delegates to check_runtime_identity (which marks sqlite
+        # non-applicable through the R1 target-resolution contract)
+        return True
+    spec = _as_target_spec(getattr(store, "_dsn", ""))
+    if spec is None:
+        return True  # cannot parse the target → cannot prove it non-Production
+    return is_production_shaped(spec, env)
+
+
+def _readiness_identity_gate(store: DatabaseStore) -> dict[str, Any] | None:
+    """Deterministic fail-closed runtime-identity verdict for readiness.
+
+    Phase 6.9B-R3: WHO the runtime is connected as is proved, not
+    inferred from a successful connect. Incompatible identity →
+    ``IDENTITY_INCOMPATIBLE`` (503, stable code + the gate's reason
+    code only — no credentials, no driver text); unreadable identity
+    metadata → ``DEPENDENCY_UNAVAILABLE``. Returns the raw report for
+    server-side use on success; non-applicable scopes (SQLite backends
+    and non-enforced disposable PostgreSQL targets, see
+    :func:`_identity_gate_applicable`) return a small dict carrying
+    ``applicable: false`` — never a silent skip, the scope reason is
+    explicit.
+    """
+    if not _identity_gate_applicable(store):
+        backend = getattr(store, "backend", "sqlite")
+        return {
+            "applicable": False,
+            "backend": backend,
+            "scope": "NON_PRODUCTION_TARGET"
+            if backend == "postgres" else "NON_POSTGRESQL_BACKEND",
+        }
+    try:
+        return check_runtime_identity(store)
+    except IdentityIncompatible as exc:
+        raise ServiceError(
+            ServiceErrorCode.IDENTITY_INCOMPATIBLE,
+            "connected database identity violates the runtime role contract",
+            {"reason": exc.code},
+        ) from exc
+    except IdentityGateUnavailable as exc:
+        raise ServiceError(
+            ServiceErrorCode.DEPENDENCY_UNAVAILABLE,
+            "persistence layer is not readable",
+            {"reason": "runtime identity metadata is not readable"},
         ) from exc
 
 
@@ -230,6 +326,13 @@ class DefaultIntelligenceService:
 
         current: int | None
         gate = _readiness_schema_gate(self._store)
+        # Phase 6.9B-R3: prove WHO is connected, not just WHAT schema.
+        # The verdict is fail-closed (raises on an incompatible runtime
+        # identity); outside the enforcement scope (sqlite backend or a
+        # non-production-shaped disposable PostgreSQL target without
+        # pinned expectations) the gate reports applicable=false and
+        # readiness is unchanged — see _identity_gate_applicable.
+        _readiness_identity_gate(self._store)
         current = int(gate["current_version"])
         return C.HealthReport(
             status="ok",

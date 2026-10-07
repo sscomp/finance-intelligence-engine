@@ -65,6 +65,11 @@ def _mask_dsn(spec: object) -> str:
     return "<non-dsn>"
 
 
+def _present(env: dict[str, str], var: str) -> bool:
+    """Presence-only boolean for one variable name (value withheld)."""
+    return bool((env.get(var, "") or "").strip())
+
+
 def _db_role_presence(env: dict[str, str], role: str) -> dict:
     """Presence/source/legacy-alias metadata for one DB role (no values)."""
     canonical_by_role = {
@@ -148,6 +153,17 @@ def run_preflight(env: dict[str, str] | None = None) -> tuple[dict, int]:
         runtime = getattr(config, "runtime", {}) or {}
         checks["database_spec_masked"] = _mask_dsn(runtime.get("database_spec", ""))
         checks["database_source"] = runtime.get("database_source", "unknown")
+
+    # 3b — Phase 6.9B-R3: runtime-identity expectation pins (presence
+    # only; values withheld). Optional operator knobs enforced by the
+    # readiness identity gate when set; preflight reports their
+    # presence so an operator can see whether the deployment pins role/
+    # database/schema expectations at all.
+    checks["runtime_identity_expectations"] = {
+        "role_pinned": _present(env, "FIE_EXPECTED_RUNTIME_ROLE"),
+        "database_pinned": _present(env, "FIE_EXPECTED_RUNTIME_DB"),
+        "schema_pinned": _present(env, "FIE_EXPECTED_RUNTIME_SCHEMA"),
+    }
 
     # 4 — auth material referenced/available (presence boolean only).
     if config is not None:

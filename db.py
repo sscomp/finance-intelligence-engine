@@ -342,7 +342,39 @@ _STMT = {
 
 
 def init_db():
-    """Create tables if not exist (either backend)."""
+    """Create tables if not exist (either backend).
+
+    Phase 6.9B-R3: implicit raw-schema DDL is migration authority, not
+    runtime authority. On a production-shaped target (fingerprint match
+    against the R1 production contract) the create-if-missing call
+    requires ``FIE_MIGRATION_AUTHORITY=1``; runtime authority instead
+    proves the raw tables are already present (read-only) and fails
+    closed with ``RAW_SCHEMA_NOT_INITIALIZED`` if they are not — no
+    silent repair of Production schema.
+    """
+    from phase3.persistence.migration_authority import (
+        auto_ddl_allowed,
+        migration_authority_granted,
+    )
+    from phase3.runtime_contract import resolve_raw_target
+
+    allow = migration_authority_granted()
+    if not allow:
+        try:
+            # The guard verdicts on the specifier ACTUALLY in force —
+            # the resolved raw-target contract or the caller/test
+            # override on ``db.DB_PATH`` (raw_db_spec raises
+            # FailClosedTarget when no target contract exists).
+            allow = auto_ddl_allowed(raw_db_spec())
+        except Exception:  # noqa: BLE001 - unresolvable target
+            # Unprovable target: no production identity to protect (see
+            # migration_authority.is_production_shaped) — the historical
+            # create-if-missing behavior applies; any subsequent
+            # connection failure still fails closed at use as before.
+            allow = True
+    if not allow:
+        _assert_raw_tables_present()
+        return
     conn = get_db()
     c = conn.cursor()
 
@@ -354,6 +386,34 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+
+class RawSchemaNotInitialized(RuntimeError):
+    """Fail-closed refusal: raw tables are absent and runtime authority
+    forbids creating them (raise the stable code, never repair)."""
+
+    code = "RAW_SCHEMA_NOT_INITIALIZED"
+
+
+def _assert_raw_tables_present():
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        for table in ("macro_daily", "stock_monthly", "institutional_daily"):
+            try:
+                c.execute(f"SELECT 1 FROM {table} LIMIT 1")
+                c.fetchone()
+            except RawSchemaNotInitialized:
+                raise
+            except Exception:  # noqa: BLE001
+                raise RawSchemaNotInitialized(
+                    "raw production DB target lacks required table "
+                    f"{table!r}; runtime authority forbids implicit DDL — "
+                    "run the migration/bootstrap context "
+                    "(FIE_MIGRATION_AUTHORITY=1) to apply the raw schema"
+                ) from None
+    finally:
+        conn.close()
 
 
 def save_macro_daily(data, verdict, score, signals):

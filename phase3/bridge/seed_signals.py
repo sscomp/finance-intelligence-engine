@@ -865,6 +865,14 @@ def seed_from_macro_history(
     from phase3.persistence.migrations import MigrationManager, default_migrations_for
 
     spec = resolve_spec(target_db)
+    # Phase 6.9B-R3: seeding applies migrations — that is migration
+    # authority. A production-shaped target (fingerprint match against
+    # the R1 production contract) refuses implicit DDL without
+    # FIE_MIGRATION_AUTHORITY=1; disposable targets keep the historical
+    # behavior.
+    from phase3.persistence.migration_authority import assert_auto_ddl_allowed
+
+    assert_auto_ddl_allowed(spec, operation="seed target migration apply")
     # open_store applies the selection rule for BOTH backends: SQLite
     # targets keep the historical SQLiteStore construction (path guard,
     # sqlite:// scheme handling); PostgreSQL DSNs go to PostgresStore.
