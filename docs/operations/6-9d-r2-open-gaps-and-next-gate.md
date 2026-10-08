@@ -25,3 +25,20 @@
 2. Decide Gate C: publish T4 assets to the repo (PR) or keep local patch only.
 3. Decide on recurring encrypted off-host rotation (item 4) as a follow-up work order.
 4. Consider enabling Syncthing File Versioning on both peers (item 2).
+## R3 status addendum — 2026-10-08 (Gate A review)
+
+This register documents R2 closure (18:35Z). R3 state on top of it:
+
+- **R3 Gate 0 + Gate A: EXECUTED** (owner-authorized, PASS_WITH_CONDITIONS).
+  Deliverables published: branch `fie-6.9d-r2-recovery-package`, **PR #1
+  (OPEN, merge pending owner authorization)** — the register's line
+  "Gate C (publication): NOT YET AUTHORIZED … no repo commit/push done"
+  describes the R2 close-out moment only and is superseded from R3 Gate A onward.
+- **Recovery-key custody (P0): OWNER_ACKNOWLEDGED / ACCEPTED** — pod-side
+  placement is intentional (no delete/rotate/relocate/modify); off-host
+  independently retrievable copy owner-verified (Air, sha `35eabe96…`).
+- **Next:** owner authorization for PR merge · Gate B backup-automation
+  design + activation (separate tokens; scheduled jobs NOT active).
+- Carry-over for Gate B design (from gaps 2/3/4/7): deletion-protection and
+  a non-synced independent destination, retention, and raw-DB recurring
+  coverage are addressed in the R3 Gate B backup architecture design.
