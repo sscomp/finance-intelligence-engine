@@ -57,7 +57,7 @@ AK=/home/fie-backup/.ssh/authorized_keys
 pub_t=$(cat "$PUB_TRANSFER")
 pub_v=$(cat "$PUB_VERIFY")
 {
-  printf 'restrict,no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,command="/usr/bin/rrsync write-only /srv/fie-backup" %s\n' "$pub_t"
+  printf 'restrict,no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,command="/usr/bin/rrsync -wo -no-del /srv/fie-backup" %s\n' "$pub_t"
   printf 'restrict,no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,command="/usr/local/bin/fie-backup-verify" %s\n' "$pub_v"
 } > "$AK"
 chown fie-backup:fie-backup "$AK"; chmod 0600 "$AK"

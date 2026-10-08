@@ -91,7 +91,7 @@ ssh_a3() { # $1=key  $2=command string (becomes SSH_ORIGINAL_COMMAND under force
 }
 RSH="ssh -p $A3_PORT -i $KEY_TRANSFER -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
      -o ConnectTimeout=15 -o ProxyCommand=\"$PROXY_CMD\""
-rsync_a3() { rsync -az --owner --group --perms --times -e "$RSH" "$@"; }
+rsync_a3() { rsync -az --perms --times -e "$RSH" "$@"; }
 
 start=$(date -u +%FT%TZ)
 log "=== start mode=$MODE"
@@ -162,7 +162,7 @@ cat > "$SD/manifest.json" <<EOF
   "retention": "7 daily / 4 weekly / 2 monthly — this gate DRY-RUN ONLY"
 }
 EOF
-for f in "$SD"/*.enc; do sha256sum "$(basename "$f")" >> "$SD/SHA256SUMS"; done
+(cd "$SD" && for f in *.enc; do sha256sum "$f" >> "$SD/SHA256SUMS"; done)
 (cd "$SD" && sha256sum -c SHA256SUMS >/dev/null) || fail "local SHA256SUMS self-check failed"
 
 # --- transfer via forced-command rrsync (write-only; cannot read back through this key) ---
@@ -191,7 +191,7 @@ cat > "$LOGDIR/receipt-$RUN_ID.json" <<EOF
   "verify_method": "forced-command dest-verify key; sha256 re-computation on A3 inside /srv/fie-backup/$RUN_ID",
   "destination": "omarchy-a3:/srv/fie-backup/$RUN_ID",
   "databases": [$db_list],
-  "ciphertext_sha256": {$(for name in $(printf '%s\n' "${!CT_SHA[@]}" | sort); do printf '%s:"%s",' "$name" "${CT_SHA[$name]}"; done | sed 's/,$//')}
+  "ciphertext_sha256": {$(for name in $(printf '%s\n' "${!CT_SHA[@]}" | sort); do printf '"%s":"%s",' "$name" "${CT_SHA[$name]}"; done | sed 's/,$//')}
 }
 EOF
 chmod 600 "$LOGDIR/receipt-$RUN_ID.json"
