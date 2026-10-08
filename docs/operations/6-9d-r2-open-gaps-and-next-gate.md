@@ -1,13 +1,12 @@
 # OPEN GAPS AND NEXT GATE — FIE 6.9D-R2
 
-**As of:** 2026-10-08T18:10Z · work order 6.9D-R2 · **verdict: PASS_WITH_CONDITIONS**
-(sole unmet FULL_PASS criterion = recovery-key off-host custody = P0 owner action below; all data-path gates proven from off-host-retrieved ciphertext)
+**As of:** 2026-10-08T18:35Z · work order 6.9D-R2 · **verdict: FULL_PASS** (P0 closed 18:35Z — all FULL_PASS criteria satisfied)
 
 ## Open gaps (ranked)
 
 | # | gap | severity | owner action available now |
 |---|---|---|---|
-| 1 | **Recovery private key still host-local** — custodian handoff file (`~/.fie-r2-staging/owner-handoff/recovery-private-key-20261008.asc`, 0600) has not been confirmed moved off-host; pod loss before relocation = key loss (ciphertext unrecoverable). | **P0** | Copy the 0600 file to a secure store on a different device now; keep one copy off the Abacus pod. After confirming off-host custody, host copies can be destroyed on request (deleting local GNUPGHOME requires its own confirmation). |
+| ~~1~~ | **CLOSED 2026-10-08T18:35Z** — owner-verified off-host key (Air sha 35eabe96… + fingerprint CFF8A1D3… match); host-side key material (handoff, GNUPGHOME, and a third owner-placed copy in the synced Abacus tree) all shredded. | ~~P0~~ | — (remaining host actions: keep the Air Downloads copy safe; consider a second custody copy — see P1 rows) | ~~1~~ **Recovery private key still host-local** — custodian handoff file (`~/.fie-r2-staging/owner-handoff/recovery-private-key-20261008.asc`, 0600) has not been confirmed moved off-host; pod loss before relocation = key loss (ciphertext unrecoverable). | **P0** | **Owner reported retrieval 2026-10-08T18:27Z** (downloaded to own device). Close-out: owner confirms sha256 of off-host copy = 35eabe96f367faef9998e305e8ac8f5c6ee482d0e6d87cd1fe01a56a3a86b81a (and gpg fingerprint CFF8A1D3…); then host-local key material (owner-handoff + ~/.fie-r2-gnupg) destroyed on explicit confirmation. |
 | 2 | **No deletion protection / versioning on the sync folder** — deletions propagate irreversibly in both directions (observed live when the Air-side relocation produced delete events). Syncthing File Versioning is off. | P1 | Enable "File Versioning (Trash)" for `abacus-shared` on both peers; or keep retention copies outside the sync tree. |
 | 3 | **Off-host copies remain inside the synced tree** (`/Users/sscomp/Abacus/databases`, `/home/ubuntu/Abacus/...`) — same-tree copies add no independent failure domain beyond the two sync peers. | P1 | Move one retention copy outside `~/Abacus` on the Air, or authorize a second unrelated destination (cloud bucket/SFTP) in a follow-up. |
 | 4 | **Backup scheduler is host-local & same-failure-domain** — the daily `postgresql-backup-scheduler` writes only to the pod; the 6.9D-R2 bundle was a one-shot. No recurring encrypted off-host rotation exists. | P1 | Approve a follow-up work order: recurring encrypted bundle + rotation + alerting (the scheduler template and drill script shipped in this delivery make that incremental). |
