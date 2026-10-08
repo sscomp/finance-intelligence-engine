@@ -1,0 +1,78 @@
+# FIE minimal CI — 6.9D-R3 (WO: GitHub publication & recovery acceptance)
+#
+# Scope (owner-authorized): bootstrap validation, dependency installation,
+# available automated tests (focused cloud-ready set on an ISOLATED ephemeral
+# PostgreSQL — self-provisioned loopback cluster, never Production), and
+# first-party secret scanning with negative controls.
+#
+# Contract:
+#   * self-contained: first-party pinned actions only (checkout/setup-python/cache);
+#   * no secrets consumed; no workflow-level env credentials;
+#   * test entrypoint = canonical scripts/test-cloud.sh (fail-closed: scrubs
+#     FIE_*/PGPASSWORD env, provisions its own ephemeral loopback PG, never
+#     falls back to any production target);
+#   * full regression (2803 tests) stays manual (workflow_dispatch) — not a PR gate;
+#   * all steps fail the job on nonzero exit — no weakening, no bypass.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Also run the full regression suite (test-cloud.sh --full)"
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # history scan needs the full graph
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: secret-scan selftest (negative controls)
+        run: python3 -I scripts/scan_secrets.py --selftest
+      - name: secret scan (worktree + last 200 commits of introduced lines)
+        run: python3 -I scripts/scan_secrets.py --history-limit 200
+      - name: reject tracked credential-ish files
+        run: |
+          bad="$(git ls-files | grep -E '(^|/)(\.env|\.env\.[^.]*|.*\.pem|.*privkey[0-9.]*|id_rsa|id_ed25519|.*-key-[0-9]{8}.asc)$' || true)"
+          if [ -n "$bad" ]; then
+            echo "TRACKED CREDENTIAL-ISH FILES:" >&2
+            echo "$bad" >&2
+            exit 78
+          fi
+          echo "no tracked credential-ish files"
+
+  bootstrap-and-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
+          restore-keys: ${{ runner.os }}-pip-
+      - name: bootstrap (dependency install + import contract)
+        run: bash scripts/bootstrap.sh --all
+      - name: focused cloud-ready tests (isolated ephemeral PG)
+        run: bash scripts/test-cloud.sh
+      - name: full regression (manual dispatch only)
+        if: ${{ inputs.full }}
+        timeout-minutes: 60
+        run: bash scripts/test-cloud.sh --full
