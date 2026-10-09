@@ -166,8 +166,12 @@ EOF
 (cd "$SD" && sha256sum -c SHA256SUMS >/dev/null) || fail "local SHA256SUMS self-check failed"
 
 # --- transfer via forced-command rrsync (write-only; cannot read back through this key) ---
-log "transfer $(du -sb "$SD" | awk '{print $1}') bytes to fie-backup@omarchy-a3:/srv/fie-backup/$RUN_ID/"
-rsync_a3 "$SD/" "fie-backup@$A3_IP:$RUN_ID/" || fail "rsync transfer failed"
+# B2 finding F1 fix: the send list must be EXPLICIT ciphertext-only. Sending the whole
+# staging dir (as previously) also shipped the plaintext dumps/globals.sql to the
+# destination (discovered 2026-10-09, see B2 evidence 05_remediation F1).
+log "transfer ciphertext-only artifacts to fie-backup@omarchy-a3:/srv/fie-backup/$RUN_ID/"
+rsync_a3 "$SD"/*.enc "$SD"/SHA256SUMS "$SD"/manifest.json \
+  "fie-backup@$A3_IP:$RUN_ID/" || fail "rsync transfer failed"
 
 # --- destination-side read-back verification (never trust the transfer exit code) ---
 read_back=$(ssh_a3 "$KEY_VERIFY" "$RUN_ID") || fail "destination verify command failed"
