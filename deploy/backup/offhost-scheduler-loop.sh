@@ -1,7 +1,8 @@
 #!/bin/bash
-# offhost-scheduler-loop.sh — FIE 6.9D-R3 Gate B1: daily 04:52 UTC dependency-gated loop.
-# Same pattern as the proven postgresql-18 backup-scheduler.sh (no second daemon design
-# change): computes the next 04:52 UTC, idles until then, then fires one gated run of
+# offhost-scheduler-loop.sh — FIE 6.9D-R3 Gate B1 / twice-daily activation: 04:52 & 16:52
+# UTC dependency-gated loop. Same pattern as the proven postgresql-18 backup-scheduler.sh
+# (no second daemon design change): computes the next future slot from TARGETS, idles
+# until then, then fires one gated run of
 # deploy/backup/offhost-backup.sh. Any preflight failure inside offhost-backup.sh is
 # fail-closed (non-zero exit + alert); the loop keeps the next-night schedule.
 #
@@ -19,15 +20,17 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 BACKUP="$HERE/offhost-backup.sh"
 LOGDIR=/home/ubuntu/fie-offhost-logs
-TARGET_H=4    # 04:52 UTC
-TARGET_M=52
+TARGETS="04:52 16:52"   # twice daily UTC slots (slot A existing 04:52Z / slot B new 16:52Z)
 [ -x "$BACKUP" ] || { echo "[offhost-scheduler] missing $BACKUP" >&2; exit 1; }
 
-next_target() { # prints epoch of next 04:52 UTC (strictly in the future)
-  now=$(date -u +%s)
-  t=$(date -u -d "today $TARGET_H:$TARGET_M" +%s 2>/dev/null || date -u -d "tomorrow $TARGET_H:$TARGET_M" +%s)
-  [ "$t" -le "$now" ] && t=$(date -u -d "tomorrow $TARGET_H:$TARGET_M" +%s)
-  echo "$t"
+next_target() { # prints epoch of next $TARGETS slot (strictly in the future)
+  now=$(date -u +%s); best=
+  for hm in $TARGETS; do
+    t=$(date -u -d "today $hm" +%s 2>/dev/null || date -u -d "tomorrow $hm" +%s)
+    [ "$t" -le "$now" ] && t=$(date -u -d "tomorrow $hm" +%s)
+    if [ -z "$best" ] || [ "$t" -lt "$best" ]; then best=$t; fi
+  done
+  echo "$best"
 }
 
 gate_postgres() {
@@ -51,13 +54,12 @@ gate_pass() { # gate with one retry after 300s backoff; records outcome
 }
 
 mkdir -p "$LOGDIR"
-echo "[offhost-scheduler] started $(date -u +%FT%TZ) (target ${TARGET_H}:${TARGET_M}Z daily)" >> "$LOGDIR/scheduler-gates.log"
+echo "[offhost-scheduler] started $(date -u +%FT%TZ) (targets ${TARGETS} UTC daily)" >> "$LOGDIR/scheduler-gates.log"
 
 while :; do
   now=$(date -u +%s); t=$(next_target)
-  [ "$t" -le "$now" ] && t=$(date -u -d "tomorrow ${TARGET_H}:${TARGET_M}" +%s)
   wait=$(( t - now ))
-  echo "[offhost-scheduler] next run at $(date -u -d "@$t" +%FT%TZ) (sleep ${wait}s)" >> "$LOGDIR/scheduler-gates.log"
+  echo "[offhost-scheduler] next run at $(date -u -d "@$t" +%FT%TZ) (targets ${TARGETS} UTC) (sleep ${wait}s)" >> "$LOGDIR/scheduler-gates.log"
   sleep "$wait"
 
   if ! gate_pass "postgres" gate_postgres; then
