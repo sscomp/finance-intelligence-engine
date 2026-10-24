@@ -130,15 +130,17 @@ def scan_line(path: str, lineno: int, line: str,
         hits.append((path, name, lineno, m.group(0)[:8] + "…"))
 
 
+# Assemble prohibited synthetic shapes at runtime so repository audits remain
+# strict, including against this scanner; detection selftests receive full values.
 SELFTEST_CASES = [
     # (expected_hit, line)
     (False, "export FIE_DATABASE_URL=\"postgresql://user:password@host:5432/db\"  # fixture"),
     (True,  "export FIE_DATABASE_URL=\"postgresql://svc:0f3ec7a8b91d4e12@db.internal:5432/fie\""),
-    (True,  "AWSCredentials AKIAXXXXXXXXXXXXXXXX 36-char check"),
-    (True,  "AKIAIOSFODNN7EXAMPLE"),  # AWS docs' canonical example key still flags:
+    (True,  "AWSCredentials " + "AKIA" + "X" * 16 + " 36-char check"),
+    (True,  "AKIA" + "IOSFODNN7EXAMPLE"),  # AWS docs' canonical example key still flags:
                                       # shaped like a real access key = fail-closed
-    (True,  "Authorization: Bearer ghp_0123456789abcdef0123456789abcdef01234567"),
-    (True,  "-----BEGIN OPENSSH PRIVATE KEY-----"),
+    (True,  "Authorization: Bearer ghp_" + "0123456789abcdef" * 2 + "01234567"),
+    (True,  "-----BEGIN OPENSSH " + "PRIVATE KEY-----"),
     (False, "api_key = changeme"),
     (False, "token: example.example.example"),
 ]

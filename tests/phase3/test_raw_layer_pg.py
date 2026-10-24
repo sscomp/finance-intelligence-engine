@@ -150,19 +150,20 @@ class RawLayerPostgresTests(unittest.TestCase):
         self.assertEqual(db.raw_layer_backend(), "unresolved")
 
     def test_init_and_saves_upsert_on_pg(self) -> None:
+        today = date.today().isoformat()
         with self._use_pg():
             self.assertEqual(db.raw_layer_backend(), "postgres")
             macro = {
-                "US10Y": {"date": "2026-10-04", "value": 4.05},
-                "US2Y": {"date": "2026-10-04", "value": 3.9},
-                "US13W": {"date": "2026-10-04", "value": 4.6},
-                "DXY": {"date": "2026-10-04", "value": 101.2},
-                "VIX": {"date": "2026-10-04", "value": 13.9},
-                "USDTWD": {"date": "2026-10-04", "value": 32.1},
-                "YIELD_SPREAD": {"date": "2026-10-04", "value": 0.15},
+                "US10Y": {"date": today, "value": 4.05},
+                "US2Y": {"date": today, "value": 3.9},
+                "US13W": {"date": today, "value": 4.6},
+                "DXY": {"date": today, "value": 101.2},
+                "VIX": {"date": today, "value": 13.9},
+                "USDTWD": {"date": today, "value": 32.1},
+                "YIELD_SPREAD": {"date": today, "value": 0.15},
             }
             db.save_macro_daily(macro, "neutral", 66, [{"k": "v"}])
-            db.save_macro_daily({**macro, "US10Y": {"date": "2026-10-04",
+            db.save_macro_daily({**macro, "US10Y": {"date": today,
                                                     "value": 4.08}},
                                 "cautious", 63, [])
             # same date -> UPSERT (not duplicate row), values replaced
@@ -263,6 +264,7 @@ class RawLayerSqliteRegressionTests(unittest.TestCase):
     """The SQLite path keeps its historical behavior (rollback safety)."""
 
     def test_sqlite_backend_unchanged(self) -> None:
+        today = date.today().isoformat()
         tmp = Path("/tmp") / f"fie_c2_sqlite_{uuid.uuid4().hex[:8]}"
         tmp.mkdir()
         try:
@@ -271,10 +273,10 @@ class RawLayerSqliteRegressionTests(unittest.TestCase):
                 self.assertEqual(db.raw_layer_backend(), "sqlite")
                 db.init_db()
                 db.save_macro_daily(
-                    {"US10Y": {"date": "2026-10-04", "value": 4.2}},
+                    {"US10Y": {"date": today, "value": 4.2}},
                     "neutral", 70, [])
                 db.save_macro_daily(
-                    {"US10Y": {"date": "2026-10-04", "value": 4.3}},
+                    {"US10Y": {"date": today, "value": 4.3}},
                     "neutral", 71, [])
                 # INSERT OR REPLACE semantics preserved: single row
                 with sqlite3.connect(path) as conn:

@@ -13,6 +13,9 @@ writes to or restarts the live cluster.
 from __future__ import annotations
 
 import os
+import shutil
+import socket
+import tempfile
 import stat
 import subprocess
 import unittest
@@ -138,11 +141,26 @@ class DisposableChainTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        # A per-run cluster dir keeps the chain hermetic; reuses the
-        # repo convention (/tmp/fie-pg layout, port from env override).
-        import os as _os
-        cls.port = int(_os.environ.get("FIE_TEST_PG_PORT", "54329"))
-        cls.cluster_dir = "/tmp/fie-pg"
+        # This test actively restarts PostgreSQL. Never reuse an existing
+        # cluster or a caller's port: own a unique directory and free port.
+        cls.cluster_dir = tempfile.mkdtemp(prefix="fie-c3-preflight-")
+        cls.addClassCleanup(cls._cleanup_cluster)
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            cls.port = listener.getsockname()[1]
+
+    @classmethod
+    def _cleanup_cluster(cls) -> None:
+        pgdata = Path(cls.cluster_dir) / "pgdata"
+        if (pgdata / "postmaster.pid").exists():
+            # Stop only the cluster whose directory this test created;
+            # retain its files if stopping fails, for diagnosis/recovery.
+            subprocess.run(
+                [preflight._pg_bin("pg_ctl"), "-D", str(pgdata),
+                 "-m", "fast", "-w", "-t", "30", "stop"],
+                capture_output=True, check=True, timeout=40,
+            )
+        shutil.rmtree(cls.cluster_dir)
 
     def test_full_chain_passes_on_disposable_cluster(self) -> None:
         report = preflight.run_preflight(
