@@ -31,3 +31,7 @@ For cron-only hosts, use exactly one entry (absolute paths are deliberate):
 ```
 
 The Python executor applies Taipei timezone regardless of cron host timezone. Do not run this together with launchd/systemd. Avoid shell `TZ=` assumptions for calendar correctness. Never install the T2 service under the M2 service identity.
+
+See [isolated rehearsal remediation](DRY_RUN_REMEDIATION.md) for stale-data,
+production publisher, bounded strategy, Hermes namespace, rollback and later
+live-session activation requirements. Production report jobs remain disabled.

@@ -26,3 +26,7 @@ A provider bar on a verified closed date is retained as a labelled calendar conf
 | FRED DGS10/DGS2/VIXCLS | Publication/series-specific US calendars and release grace. Taiwan closure never makes US observations current. |
 
 See [scheduling](SCHEDULING.md) for recommendations and the distinction from the existing installed cadence.
+
+See [isolated rehearsal remediation](DRY_RUN_REMEDIATION.md) for stale-data,
+production publisher, bounded strategy, Hermes namespace, rollback and later
+live-session activation requirements. Production report jobs remain disabled.
