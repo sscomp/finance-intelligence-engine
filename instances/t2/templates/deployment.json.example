@@ -1,0 +1,12 @@
+{
+  "docker": "/usr/bin/docker",
+  "db_container": "fie-t2-db",
+  "app_container": "fie-t2-http",
+  "raw_database": "fie_t2_raw",
+  "intelligence_database": "fie_t2_intelligence",
+  "admin_role": "fie_t2_admin",
+  "writer_role": "fie_t2_ingestor",
+  "cluster": "0",
+  "api_base": "http://127.0.0.1:18793",
+  "api_principal": "t2-independent-read"
+}

@@ -1,0 +1,10 @@
+[Unit]
+Description=Independent FIE T2 scheduler
+After=docker.service network-online.target
+[Service]
+Type=oneshot
+User=REPLACE_T2_USER
+WorkingDirectory=REPLACE_T2_ROOT
+UMask=0077
+ExecStart=REPLACE_T2_ROOT/.venv/bin/python -I -B REPLACE_T2_ROOT/src/fie_t2.py tick
+TimeoutStartSec=900

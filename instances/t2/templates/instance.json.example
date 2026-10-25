@@ -1,0 +1,22 @@
+{
+  "alert_delivery": "local files only",
+  "api_base": "http://127.0.0.1:18793",
+  "catchup": "One current periodic bucket; fixed jobs same-day <=60 minutes, retries 60/120s, max 3 attempts",
+  "collector_interval_minutes": 60,
+  "database_targets": [
+    "fie_t2_raw",
+    "fie_t2_intelligence"
+  ],
+  "database_writes": true,
+  "enabled_jobs": [],
+  "external_writes": false,
+  "instance_id": "T2",
+  "intraday_interval_minutes": 30,
+  "intraday_window": "09:00 <= Asia/Taipei < 14:00; last slot 13:30; scheduled sessions only",
+  "max_data_age_hours": 36,
+  "min_free_disk_bytes": 10737418240,
+  "monitor_interval_minutes": 5,
+  "retries_per_slot": 3,
+  "scheduler_interval_seconds": 60,
+  "timezone": "Asia/Taipei"
+}

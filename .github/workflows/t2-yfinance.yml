@@ -1,0 +1,19 @@
+name: t2-yfinance-offline
+on:
+  pull_request:
+    paths: ['instances/t2/**', 'docs/t2/**', '.github/workflows/t2-yfinance.yml']
+  push:
+    branches: [master]
+    paths: ['instances/t2/**', 'docs/t2/**', '.github/workflows/t2-yfinance.yml']
+permissions:
+  contents: read
+jobs:
+  adapter-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -B -m unittest discover -s instances/t2/tests -v

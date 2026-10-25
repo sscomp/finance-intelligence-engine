@@ -732,3 +732,6 @@ Phase 5 工程完成（Engineering Complete）。M2–M7 全部完成，M8 營�
 ---
 
 *Finance Intelligence Engine — 可解釋、可追溯、可配置的投資研究引擎。*
+### Independent T2 yfinance deployment and operations
+
+The [T2 operations guide](docs/t2/OPERATIONS.md) documents the actual M2 free yfinance daily-bar mechanism, independent M2/T2 state, local-only reporting and acceptance boundaries. See [deployment and rollback](docs/t2/DEPLOYMENT.md), [scheduler/cadence](docs/t2/SCHEDULING.md), [data-source contracts](docs/t2/DATA_SOURCES.md), and [troubleshooting](docs/t2/TROUBLESHOOTING.md). Portable source/configuration/service templates live in [`instances/t2`](instances/t2). Opening/pre-close/publisher are staged until real trading-day acceptance; daily bars are delayed/indicative research data, without a realtime accuracy guarantee.

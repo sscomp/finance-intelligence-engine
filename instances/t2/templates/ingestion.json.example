@@ -1,0 +1,26 @@
+{
+  "instance_id": "T2",
+  "enabled_sources": [
+    "twse_valuation",
+    "twse_prices",
+    "twse_institutional",
+    "fred_macro"
+  ],
+  "rolling_days": 7,
+  "schedule": "Each source once per Asia/Taipei hour, every day; current hour only after restart",
+  "writer": "fie_t2_ingestor NOLOGIN via fixed Docker exec/psql target guard",
+  "source_semantics": "TWSE latest daily valuation/closing price; T86 previous seven calendar days, scheduled sessions; FRED publisher recent five observations for DGS10/DGS2/VIXCLS",
+  "missing_data": "Never invent observations; no rows is recorded in coverage; no observations for entire source is failure",
+  "freshness": "Retain published dates. Successful collection does not imply fresh observations.",
+  "external_publishing": false,
+  "container_identities": {
+    "REPLACE_DB_CONTAINER": {
+      "id": "REPLACE_DB_ID",
+      "image": "REPLACE_DB_IMAGE"
+    },
+    "REPLACE_APP_CONTAINER": {
+      "id": "REPLACE_APP_ID",
+      "image": "REPLACE_APP_IMAGE"
+    }
+  }
+}

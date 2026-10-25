@@ -1,0 +1,36 @@
+{
+  "instance_id": "T2",
+  "interval": "1d",
+  "symbols": [
+    "0050.TW",
+    "^TWII",
+    "2344.TW",
+    "2382.TW",
+    "2408.TW",
+    "3231.TW",
+    "2317.TW",
+    "2303.TW",
+    "2409.TW",
+    "3481.TW",
+    "2603.TW",
+    "2618.TW",
+    "2327.TW",
+    "3711.TW",
+    "2449.TW",
+    "3045.TW",
+    "2412.TW"
+  ],
+  "period": "5d",
+  "tail_extra": {
+    "symbol": "2382.TW",
+    "period": "1mo"
+  },
+  "cache_seconds": 900,
+  "checkpoint_max_seconds": 4500,
+  "per_symbol_timeout_seconds": 20,
+  "run_timeout_seconds": 420,
+  "python": "REPLACE_WITH_ABSOLUTE_VENV_PYTHON",
+  "market_day_accepted": false,
+  "allow_limited_daily": true,
+  "delivery": "local-only"
+}

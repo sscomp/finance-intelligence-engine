@@ -1,0 +1,306 @@
+{
+  "instance_id": "T2",
+  "reviewed_at": "2026-10-25T03:33:16.274251+00:00",
+  "authorization": "Independent T2 deployment template; review before activation.",
+  "jobs": {
+    "monitor": {
+      "verdict": "PASS",
+      "network_reads": [
+        "GET http://127.0.0.1:18793/readyz",
+        "GET http://127.0.0.1:18793/v1/health",
+        "GET http://127.0.0.1:18793/v1/intelligence/latest?limit=50"
+      ],
+      "external_writes": [],
+      "database_writes": [],
+      "local_writes": [
+        "T2 state/scheduler.sqlite3",
+        "T2 state/monitor.json, latest-alert.json",
+        "T2 heartbeat"
+      ],
+      "duplicate_protection": "whole-instance flock + SQLite unique(instance,job,slot), successful slots skipped; bounded retry; atomic local artifacts"
+    },
+    "intraday": {
+      "verdict": "PASS",
+      "network_reads": [
+        "GET http://127.0.0.1:18793/readyz",
+        "GET http://127.0.0.1:18793/v1/health",
+        "GET http://127.0.0.1:18793/v1/intelligence/latest?limit=50"
+      ],
+      "external_writes": [],
+      "database_writes": [],
+      "local_writes": [
+        "T2 state/scheduler.sqlite3",
+        "T2 state/latest-report.json",
+        "T2 reports/"
+      ],
+      "duplicate_protection": "whole-instance flock + SQLite unique(instance,job,slot), successful slots skipped; bounded retry; atomic local artifacts"
+    },
+    "twse_valuation": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [
+        "fie_t2_raw",
+        "fie_t2_intelligence"
+      ],
+      "network_reads": [
+        "Public HTTPS GET to TWSE official public daily source"
+      ],
+      "local_writes": [
+        "state/source-responses/<sha256>.body",
+        "state/ingestion-twse_valuation.json",
+        "state/scheduler.sqlite3"
+      ],
+      "duplicate_protection": "SQLite slot + instance flock; raw batch content hash; intelligence receipt and per-input score keys in one transaction; advisory xact lock",
+      "writer_guard": "Fixed P3 DB/container/system_identifier; SET LOCAL ROLE fie_t2_ingestor NOLOGIN INSERT/SELECT only; API runtime stays read-only"
+    },
+    "twse_prices": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [
+        "fie_t2_raw",
+        "fie_t2_intelligence"
+      ],
+      "network_reads": [
+        "Public HTTPS GET to TWSE official public daily source"
+      ],
+      "local_writes": [
+        "state/source-responses/<sha256>.body",
+        "state/ingestion-twse_prices.json",
+        "state/scheduler.sqlite3"
+      ],
+      "duplicate_protection": "SQLite slot + instance flock; raw batch content hash; intelligence receipt and per-input score keys in one transaction; advisory xact lock",
+      "writer_guard": "Fixed P3 DB/container/system_identifier; SET LOCAL ROLE fie_t2_ingestor NOLOGIN INSERT/SELECT only; API runtime stays read-only"
+    },
+    "twse_institutional": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [
+        "fie_t2_raw",
+        "fie_t2_intelligence"
+      ],
+      "network_reads": [
+        "Public HTTPS GET to TWSE official public daily source"
+      ],
+      "local_writes": [
+        "state/source-responses/<sha256>.body",
+        "state/ingestion-twse_institutional.json",
+        "state/scheduler.sqlite3"
+      ],
+      "duplicate_protection": "SQLite slot + instance flock; raw batch content hash; intelligence receipt and per-input score keys in one transaction; advisory xact lock",
+      "writer_guard": "Fixed P3 DB/container/system_identifier; SET LOCAL ROLE fie_t2_ingestor NOLOGIN INSERT/SELECT only; API runtime stays read-only"
+    },
+    "fred_macro": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [
+        "fie_t2_raw",
+        "fie_t2_intelligence"
+      ],
+      "network_reads": [
+        "Public HTTPS GET to FRED /series/DGS10,DGS2,VIXCLS"
+      ],
+      "local_writes": [
+        "state/source-responses/<sha256>.body",
+        "state/ingestion-fred_macro.json",
+        "state/scheduler.sqlite3"
+      ],
+      "duplicate_protection": "SQLite slot + instance flock; raw batch content hash; intelligence receipt and per-input score keys in one transaction; advisory xact lock",
+      "writer_guard": "Fixed P3 DB/container/system_identifier; SET LOCAL ROLE fie_t2_ingestor NOLOGIN INSERT/SELECT only; API runtime stays read-only"
+    },
+    "watchdog_tail": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [],
+      "local_writes": [
+        "state/receipt-watchdog_tail-<slot>.json",
+        "state/job-watchdog_tail.json",
+        "reports/ (macro/reminder only)"
+      ],
+      "network": [],
+      "id": "t2-fie-watchdog_tail",
+      "blocked_reason": null
+    },
+    "opening": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [],
+      "local_writes": [
+        "T2 reports/t2-yfinance-*",
+        "T2 state/yfinance-report-*",
+        "T2 state/local-publication.json",
+        "T2 state/local-published-*"
+      ],
+      "network": [],
+      "id": "t2-fie-opening",
+      "blocked_reason": "Actual market-day acceptance pending; LOCAL ONLY",
+      "network_reads": []
+    },
+    "publisher": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [],
+      "local_writes": [
+        "T2 reports/t2-yfinance-*",
+        "T2 state/yfinance-report-*",
+        "T2 state/local-publication.json",
+        "T2 state/local-published-*"
+      ],
+      "network": [],
+      "id": "t2-fie-publisher",
+      "blocked_reason": "Actual market-day acceptance pending; LOCAL ONLY",
+      "network_reads": []
+    },
+    "phase4_shadow": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [],
+      "local_writes": [
+        "state/receipt-phase4_shadow-<slot>.json",
+        "state/job-phase4_shadow.json",
+        "reports/ (macro/reminder only)"
+      ],
+      "network": [],
+      "id": "t2-fie-phase4_shadow",
+      "blocked_reason": null
+    },
+    "watchdog_open": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [],
+      "local_writes": [
+        "state/receipt-watchdog_open-<slot>.json",
+        "state/job-watchdog_open.json",
+        "reports/ (macro/reminder only)"
+      ],
+      "network": [],
+      "id": "t2-fie-watchdog_open",
+      "blocked_reason": null
+    },
+    "macro_morning": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [],
+      "local_writes": [
+        "state/receipt-macro_morning-<slot>.json",
+        "state/job-macro_morning.json",
+        "reports/ (macro/reminder only)"
+      ],
+      "network": [],
+      "id": "t2-fie-macro_morning",
+      "blocked_reason": null
+    },
+    "tail": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [],
+      "local_writes": [
+        "T2 reports/t2-yfinance-*",
+        "T2 state/yfinance-report-*",
+        "T2 state/local-publication.json",
+        "T2 state/local-published-*"
+      ],
+      "network": [],
+      "id": "t2-fie-tail",
+      "blocked_reason": "Actual market-day acceptance pending; LOCAL ONLY",
+      "network_reads": []
+    },
+    "constituents_review": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [],
+      "local_writes": [
+        "state/receipt-constituents_review-<slot>.json",
+        "state/job-constituents_review.json",
+        "reports/ (macro/reminder only)"
+      ],
+      "network": [],
+      "id": "t2-fie-constituents_review",
+      "blocked_reason": null
+    },
+    "company_monthly": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [
+        "fie_t2_intelligence"
+      ],
+      "network_reads": [],
+      "local_writes": [
+        "T2 state/research*",
+        "T2 state/scheduler.sqlite3",
+        "T2 reports/t2-company_monthly-*"
+      ],
+      "duplicate_protection": "existing instance flock + SQLite slot; content-key raw batches; versioned intelligence with guarded heads; atomic receipts/artifacts",
+      "writer_guard": "existing fixed T2 container/cluster/database; existing NOLOGIN role; t2_research only; heads column UPDATE only"
+    },
+    "industry_weekly": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [
+        "fie_t2_intelligence"
+      ],
+      "network_reads": [],
+      "local_writes": [
+        "T2 state/research*",
+        "T2 state/scheduler.sqlite3",
+        "T2 reports/t2-industry_weekly-*"
+      ],
+      "duplicate_protection": "existing instance flock + SQLite slot; content-key raw batches; versioned intelligence with guarded heads; atomic receipts/artifacts",
+      "writer_guard": "existing fixed T2 container/cluster/database; existing NOLOGIN role; t2_research only; heads column UPDATE only"
+    },
+    "research_rss": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [
+        "fie_t2_raw",
+        "fie_t2_intelligence"
+      ],
+      "network_reads": [
+        "three allowlisted DIGITIMES RSS URLs"
+      ],
+      "local_writes": [
+        "T2 state/research*",
+        "T2 state/scheduler.sqlite3",
+        "T2 reports/t2-research_rss-*"
+      ],
+      "duplicate_protection": "existing instance flock + SQLite slot; content-key raw batches; versioned intelligence with guarded heads; atomic receipts/artifacts",
+      "writer_guard": "existing fixed T2 container/cluster/database; existing NOLOGIN role; t2_research only; heads column UPDATE only"
+    },
+    "research_company": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [
+        "fie_t2_raw",
+        "fie_t2_intelligence"
+      ],
+      "network_reads": [
+        "four allowlisted TWSE OpenAPI endpoints"
+      ],
+      "local_writes": [
+        "T2 state/research*",
+        "T2 state/scheduler.sqlite3",
+        "T2 reports/t2-research_company-*"
+      ],
+      "duplicate_protection": "existing instance flock + SQLite slot; content-key raw batches; versioned intelligence with guarded heads; atomic receipts/artifacts",
+      "writer_guard": "existing fixed T2 container/cluster/database; existing NOLOGIN role; t2_research only; heads column UPDATE only"
+    },
+    "yfinance": {
+      "verdict": "PASS",
+      "external_writes": [],
+      "database_writes": [
+        "fie_t2_raw",
+        "fie_t2_intelligence"
+      ],
+      "network_reads": [
+        "yfinance 1.4.1 Yahoo chart plus library cookie/crumb handshake; up to 18 history calls, sequential, 420s outer timeout"
+      ],
+      "local_writes": [
+        "T2 state/yfinance*",
+        "T2 state/research*",
+        "T2 state/scheduler.sqlite3"
+      ],
+      "duplicate_protection": "existing instance flock, durable slots, raw content key, research versions and receipts"
+    }
+  },
+  "provider_and_publish_credentials": "No provider or external publishing credentials; public sources only. Fixed local Docker exec uses existing P3 admin socket to verify cluster then SET LOCAL ROLE; this is application-scoped privilege, not an OS sandbox.",
+  "safety_scope": "Only dedicated P3 databases gain additive T2 schema and insertions. M2/P2 and existing M2 cron remain untouched. No external sends or new backup."
+}

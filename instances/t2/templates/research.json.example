@@ -1,0 +1,118 @@
+{
+  "instance_id": "T2",
+  "provider_version": "T2_RESEARCH_V1",
+  "rss_history_days": 90,
+  "rss_scope": "Three existing M2-approved DIGITIMES AI/technology/semiconductor RSS feeds; keyword-labelled headline evidence only, not full eight-industry coverage",
+  "rss_feeds": [
+    {
+      "url": "https://www.digitimes.com.tw/tech/rss/xml/xmlrss_30_25.xml",
+      "provider": "DIGITIMES"
+    },
+    {
+      "url": "https://www.digitimes.com.tw/tech/rss/xml/xmlrss_10_60.xml",
+      "provider": "DIGITIMES"
+    },
+    {
+      "url": "https://www.digitimes.com.tw/tech/rss/xml/xmlrss_10_40.xml",
+      "provider": "DIGITIMES"
+    }
+  ],
+  "industry_keywords": {
+    "AI": [
+      "AI",
+      "人工智慧",
+      "GPU",
+      "NVIDIA",
+      "生成式",
+      "HBM",
+      "CoWoS"
+    ],
+    "半導體": [
+      "半導體",
+      "晶片",
+      "晶圓",
+      "封測",
+      "IC設計",
+      "先進封裝",
+      "TSMC"
+    ],
+    "伺服器": [
+      "伺服器",
+      "server",
+      "資料中心",
+      "data center",
+      "液冷",
+      "散熱"
+    ],
+    "PCB": [
+      "PCB",
+      "印刷電路板",
+      "IC載板",
+      "銅箔基板"
+    ],
+    "網通": [
+      "網通",
+      "5G",
+      "6G",
+      "Wi-Fi",
+      "router",
+      "switch"
+    ],
+    "重電": [
+      "重電",
+      "變壓器",
+      "電網",
+      "輸配電"
+    ],
+    "金融": [
+      "金融",
+      "銀行",
+      "保險",
+      "金控"
+    ],
+    "高股息": [
+      "高股息",
+      "ETF",
+      "配息",
+      "殖利率"
+    ]
+  },
+  "company_endpoints": {
+    "revenue": "https://openapi.twse.com.tw/v1/opendata/t187ap05_L",
+    "income_general": "https://openapi.twse.com.tw/v1/opendata/t187ap06_L_ci",
+    "income_holding": "https://openapi.twse.com.tw/v1/opendata/t187ap06_L_fh",
+    "income_bank": "https://openapi.twse.com.tw/v1/opendata/t187ap06_L_basi"
+  },
+  "permissions": {
+    "rss": "Publisher RSS subscription https://www.digitimes.com.tw/tech/rss/rss.asp; existing M2 approved source URLs read-only inspected; local headlines/links only",
+    "company": "TWSE OpenAPI 1.0 swagger 06e1cea82448361e733a0ad1ae16e52f5d5d6b71905acd078472f852c32c0eb0; explicit integration welcome and https://data.gov.tw/license",
+    "intraday": "Operator approved free unofficial yfinance for personal research. Daily bar timestamp is not latest trade. Actual market-day E2E pending; no certified realtime claim."
+  },
+  "limits": {
+    "requests_per_rss_run": 3,
+    "requests_per_company_run": 4,
+    "inter_request_delay_seconds": 0.2,
+    "per_request_timeout_seconds": 15,
+    "max_body_bytes": 4000000,
+    "rss_interval_hours": 6,
+    "company_interval_days": 1,
+    "retry": "existing per-instance scheduler 60/120s, maximum three attempts; no network retry loop"
+  },
+  "disabled_sources": [
+    {
+      "provider": "Wealth RSS",
+      "url": "https://www.wealth.com.tw/rss",
+      "reason": "bounded Oct25 probe: stale Jun5 pubDate and missing canonical link fields; no articles accepted"
+    },
+    {
+      "provider": "TWSE MIS",
+      "url": "https://mis.twse.com.tw/stock/api/getStockInfo.jsp",
+      "reason": "No automated access license/contract or documented safe rate/volume semantics verified; endpoint not polled; no new quote collector"
+    },
+    {
+      "provider": "DIGITIMES server",
+      "url": "https://www.digitimes.com.tw/tech/rss/xml/xmlrss_30_26.xml",
+      "reason": "Oct25 bounded read: newest article pubDate Oct5; exceeds seven-day source gate. Historical true articles retained; source excluded from active report contract."
+    }
+  ]
+}
