@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>REPLACE_UNIQUE_T2_SCHEDULER_LABEL</string>
+<key>ProgramArguments</key><array><string>REPLACE_T2_ROOT/.venv/bin/python</string><string>-I</string><string>-B</string><string>REPLACE_T2_ROOT/src/fie_t2.py</string><string>tick</string></array>
+<key>StartInterval</key><integer>60</integer>
+<key>RunAtLoad</key><true/>
+<key>WorkingDirectory</key><string>REPLACE_T2_ROOT</string>
+<key>StandardOutPath</key><string>REPLACE_T2_ROOT/logs/scheduler.log</string>
+<key>StandardErrorPath</key><string>REPLACE_T2_ROOT/logs/scheduler.err</string>
+<key>Umask</key><integer>63</integer>
+</dict></plist>

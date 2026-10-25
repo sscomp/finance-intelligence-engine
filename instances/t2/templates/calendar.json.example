@@ -1,0 +1,21 @@
+{
+  "instance_id": "T2",
+  "schema": 2,
+  "valid_from": "2026-01-01",
+  "valid_until": "2026-12-31",
+  "verified_utc": "REPLACE_AFTER_VERIFICATION",
+  "verification_max_age_days": 30,
+  "closed_dates": [],
+  "extra_closed_dates": [],
+  "evidence": [
+    {
+      "path": "config/calendar-evidence/REPLACE",
+      "sha256": "REPLACE"
+    }
+  ],
+  "us_closed_dates": [],
+  "us_equity_closed_dates": [],
+  "fred_release_evidence": {
+    "verified_at": "REPLACE_AFTER_VERIFICATION"
+  }
+}

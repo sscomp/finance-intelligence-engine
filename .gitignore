@@ -96,3 +96,15 @@ dist/
 # Cloud-agent working dirs (never runtime state of this repository).
 .claude/
 .codex/
+
+# Independent T2 instance: runtime and private inputs never published
+instances/t2/config/
+instances/t2/state/
+instances/t2/reports/
+instances/t2/secrets/
+instances/t2/logs/
+instances/t2/evidence/
+.venv-yfinance/
+*.dump
+.env.*
+!.env.example
