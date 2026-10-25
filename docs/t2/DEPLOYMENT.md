@@ -68,3 +68,7 @@ If these checks fail, keep staged jobs disabled and record the exact source/time
 ## Rollback
 
 Stop only the T2 timer/LaunchAgent; take the instance lock and preserve current config, activation manifest, source/report receipts and new data. Restore the prechange code/config copies, remove new jobs from `enabled_jobs`/side-effect ledger, and reseal to the restored audited files. Leave raw/intelligence history and additive schemas intact. Validate original collector/RSS/company/read behavior before starting the T2 service again. Do not drop tables, reset scheduler state, force-push Git or roll back M2/P2. Rollback is code/config only; full backup expansion remains deferred.
+
+See [isolated rehearsal remediation](DRY_RUN_REMEDIATION.md) for stale-data,
+production publisher, bounded strategy, Hermes namespace, rollback and later
+live-session activation requirements. Production report jobs remain disabled.

@@ -25,3 +25,7 @@ Run the same Python interpreter and instance root as the service. The `src/fie_t
 One `tick` runs under the instance flock. Durable SQLite `(instance,job,slot)` completion suppresses repeat execution after restart. At most three attempts per slot, 60/120-second backoff; no unbounded catchup. Source batches are raw-first, content-addressed, then intelligence versions/heads/receipt are committed together under an advisory lock. Crash recovery replays the same batch; it does not delete history. Local publication verifies hashes, source age, calendar and same-day report before changing a private local pointer. A content marker prevents repeated publication. There is no notification sender.
 
 Inspect heartbeat (<180 seconds), monitor (<420 seconds), per-source attempt/success times, actual source dates, row coverage, body hash, raw batch, intelligence receipt, scheduler slot and report hashes. A fresh fetch is not a fresh market observation. Core independent health monitors the original pipeline; inspect yfinance component receipts separately. Keep logs and evidence private, mode 0600, directories 0700.
+
+See [isolated rehearsal remediation](DRY_RUN_REMEDIATION.md) for stale-data,
+production publisher, bounded strategy, Hermes namespace, rollback and later
+live-session activation requirements. Production report jobs remain disabled.

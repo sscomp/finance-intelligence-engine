@@ -16,7 +16,7 @@ spec=importlib.util.spec_from_file_location('yf_source',ROOT/'src/yfinance_sourc
 NOW=dt.datetime(2026,10,27,1,30,tzinfo=dt.timezone.utc)
 class YFinanceTests(unittest.TestCase):
  def setUp(self):
-  self.mask=os.umask(0o077);self.tmp=tempfile.TemporaryDirectory();self.r=Path(self.tmp.name)
+  self.mask=os.umask(0o077);self.tmp=tempfile.TemporaryDirectory();self.r=Path(self.tmp.name).resolve()
   for d in ['src','config','state','reports','secrets']:(self.r/d).mkdir()
   for p in (ROOT/'src').glob('*.py'):shutil.copyfile(p,self.r/'src'/p.name)
   for p in (ROOT/'templates').glob('*.json.example'):
@@ -88,19 +88,20 @@ class YFinanceTests(unittest.TestCase):
  def test_report_and_publisher_disabled_until_actual_acceptance(self):
   with patch.object(y,'status',return_value={'usable':True,'rows':self.rows()}):
    self.assertEqual(y.write_report('opening','slot',NOW,self.r)['result'],'DEGRADED')
-   self.assertEqual(y.publish('slot',NOW,self.r)['reason'],'ACTUAL_MARKET_DAY_ACCEPTANCE_PENDING')
+   self.assertEqual(y.publish('slot',NOW,self.r)['reason'],'PUBLICATION_MODE_OR_ROOT_REFUSED')
   self.assertEqual(list((self.r/'reports').iterdir()),[])
  def test_local_publication_duplicate_restart_tamper_and_source_failure(self):
-  c=self.c.copy();c['market_day_accepted']=True;self.save('config/yfinance.json',c)
-  with patch.object(y,'status',return_value={'usable':True,'rows':self.rows()}):
+  self.save('DRY_RUN.json',{'DRY_RUN':True,'production_authorization':False})
+  c=self.c.copy();c.update(market_day_accepted=True,DRY_RUN=True);self.save('config/yfinance.json',c)
+  with patch.object(y,'status',return_value={'usable':True,'rows':self.rows(),'batch_id':'a'*64,'rowset_sha256':'b'*64,'last_success':NOW.isoformat()}):
    out=y.write_report('opening','slot',NOW,self.r);self.assertEqual(out['result'],'PASS')
-   a=y.publish('slot',NOW,self.r);self.assertFalse(a['duplicate']);self.assertEqual(a['delivery'],'local-only')
-   self.assertTrue(y.publish('new-slot',NOW,self.r)['duplicate'])
+   a=y.simulate_publish('slot',NOW,self.r);self.assertFalse(a['duplicate']);self.assertEqual(a['delivery'],'local-only')
+   self.assertTrue(y.simulate_publish('new-slot',NOW,self.r)['duplicate'])
    # Reloading code keeps durable publication markers.
-   again=runpy.run_path(str(self.r/'src/yfinance_source.py'))
-   with patch.dict(again['publish'].__globals__,status=lambda *a:{'usable':True,'rows':self.rows()}):self.assertTrue(again['publish']('restart',NOW,self.r)['duplicate'])
-   path=self.r/out['artifacts'][0]['path'];path.write_text('{}');self.assertEqual(y.publish('slot',NOW,self.r)['result'],'DEGRADED')
-  with patch.object(y,'status',return_value={'usable':False}):self.assertEqual(y.publish('slot',NOW,self.r)['result'],'DEGRADED')
+   again=runpy.run_path(y.__file__)
+   with patch.dict(again['simulate_publish'].__globals__,status=lambda *a:{'usable':True,'rows':self.rows(),'batch_id':'a'*64,'rowset_sha256':'b'*64,'last_success':NOW.isoformat()}):self.assertTrue(again['simulate_publish']('restart',NOW,self.r)['duplicate'])
+   path=self.r/out['artifacts'][0]['path'];path.write_text('{}');self.assertEqual(y.simulate_publish('slot',NOW,self.r)['result'],'DEGRADED')
+  with patch.object(y,'status',return_value={'usable':False}):self.assertEqual(y.simulate_publish('slot',NOW,self.r)['result'],'DEGRADED')
  def test_tail_requires_same_day_opening(self):
   c=self.c.copy();c['market_day_accepted']=True;self.save('config/yfinance.json',c)
   with patch.object(y,'status',return_value={'usable':True,'rows':self.rows()}):self.assertEqual(y.write_report('tail','tail',NOW.replace(hour=5,minute=0),self.r)['reason'],'SAME_DAY_OPENING_ABSENT')

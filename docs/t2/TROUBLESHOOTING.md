@@ -21,3 +21,7 @@ The accepted report path is source → normalized response hash → raw content 
 For support, record the Git commit, activation hash, calendar evidence hash/expiry, interpreter/yfinance versions, job ID/slot/attempt, original fetch time, bar dates, coverage, batch/receipt/report IDs and safe error category. Keep source bodies and host evidence private. Avoid API tokens, environment dumps, DB dumps, personal cards or delivery IDs in GitHub issues/PRs. The source is for personal research; no exchange-certified or guaranteed-live claim should appear in incident summaries.
 
 The 50-row loopback latest query can exceed 8 seconds under load. Only that read has a bounded 20-second timeout; other API reads retain 8 seconds. Check measured API latency before restarting any service.
+
+See [isolated rehearsal remediation](DRY_RUN_REMEDIATION.md) for stale-data,
+production publisher, bounded strategy, Hermes namespace, rollback and later
+live-session activation requirements. Production report jobs remain disabled.
