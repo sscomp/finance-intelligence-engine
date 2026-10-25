@@ -69,7 +69,12 @@ Hermes commands and jobs need no changes.
 
 Run `python -B -m unittest discover -s instances/t2/tests -v`,
 `bash scripts/bootstrap.sh --all`, `bash scripts/test-cloud.sh`, and the secret
-scanner commands in `.github/workflows/ci.yml`. Use independent private config
+scanner commands in `.github/workflows/ci.yml`. Run the generic cloud CI in a
+GNU/Linux environment with Python 3.11 available in the test children's scrubbed
+`/usr/bin:/bin` PATH, plus tar/xz/curl and PostgreSQL tooling. The existing generic
+cloud suite assumes GNU `realpath -m` and Linux process/tool behavior; a native Mac
+run is not a passing substitute. Keep its failures in evidence. The native T2
+Python regression suite is a separate supported check. Use independent private config
 and an ephemeral, network-isolated database for the full replay. The temporary
 writer adapter must prove container/cluster/database identity and must never
 redirect the production writer's guard. Keep original check names and record
