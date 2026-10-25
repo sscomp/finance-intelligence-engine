@@ -108,8 +108,22 @@ def fetch(root,now,c):
           'raw_semantics':'exact normalized worker stdout, not original Yahoo HTTP response; yfinance performs upstream parsing/adjustment'}
     m['atomic'](p,meta);return payload,meta
 
+def admit_calendar(rows,now,root):
+    """Reject the whole batch before P3; keep provider response provenance intact.
+
+    Volume is not a session calendar: zero volume on a scheduled day is valid
+    historical input. Unknown/expired calendars also fail closed.
+    """
+    p=policy(root);sessions={}
+    for row in rows:
+        day=row['source_date']
+        if day not in sessions:sessions[day]=p['calendar_state'](root,dt.date.fromisoformat(day),now)
+        if sessions[day]!='SCHEDULED_SESSION':
+            raise DataError('BAR_CALENDAR_REJECTED:'+day+':'+sessions[day])
+
 def collect(now,root=ROOT):
     c=config(root);m=research(root);payload,meta=fetch(root,now,c);rows=normalize(payload,now,c)
+    admit_calendar(rows,now,root)
     for row in rows:
         row['calendar_session']=policy(root)['calendar_state'](root,dt.date.fromisoformat(row['source_date']),now)
         row['calendar_note']='PROVIDER_BAR_ON_VERIFIED_CLOSED_DATE' if row['calendar_session']=='CLOSED' else 'provider label retained; not proof of a trade'
@@ -127,8 +141,8 @@ def run(now,root=ROOT):
                 **receipt,'rowset_sha256':m['digest'](batch['rows']),'responses':batch['responses'],'coverage':batch['coverage'],
                 'source_as_of':sorted({r['source_as_of'] for r in batch['rows']}),'notice':NOTICE}
         m['atomic'](p,result);return result
-    except Exception:
-        m['atomic'](p,{**prior,'result':'FAILED','last_attempt':now.isoformat(),'error':'YFINANCE_COLLECTION_OR_PERSISTENCE_FAILED'});raise
+    except Exception as exc:
+        m['atomic'](p,{**prior,'result':'FAILED','last_attempt':now.isoformat(),'error':str(exc) if isinstance(exc,DataError) else 'YFINANCE_COLLECTION_OR_PERSISTENCE_FAILED'});raise
 
 def status(now,root=ROOT):
     try:
@@ -173,6 +187,7 @@ def assess(rows,now,root=ROOT):
                 v=fields[key]
                 if isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) or v<=0:raise DataError('INVALID_BAR_PRICE')
             if fields['low']>min(fields['open'],fields['close']) or fields['high']<max(fields['open'],fields['close']):raise DataError('INVALID_OHLC_RANGE')
+        admit_calendar(rows,now,root)
         return _assess(rows,now,root)
     except (KeyError,ValueError,TypeError,DataError):
         return {'status':'DATA_DELAYED','quality':'DEGRADED','reason':'INVALID_SOURCE_ROWS_OR_TIMESTAMP','live_report_allowed':False,'rows':[],'source_as_of':[],'notice':NOTICE}

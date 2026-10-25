@@ -30,3 +30,16 @@ See [scheduling](SCHEDULING.md) for recommendations and the distinction from the
 See [isolated rehearsal remediation](DRY_RUN_REMEDIATION.md) for stale-data,
 production publisher, bounded strategy, Hermes namespace, rollback and later
 live-session activation requirements. Production report jobs remain disabled.
+# yFinance historical calendar admission
+
+The collector rejects the entire normalized batch before P3 persistence if any
+exchange-local bar date is CLOSED or its calendar is unavailable/expired. The
+cached provider response and its SHA remain available for provenance; no rejected
+row enters P3. A valid scheduled day with zero volume remains valid historical
+input. Current-session volume and freshness requirements still apply separately.
+Report assessment repeats admission so existing closed-day rows cannot enter
+strategy observations. Existing production records are never rewritten.
+
+Offline publisher fixtures must use a canonical private temporary root outside
+the installed instance and all descendants. Installation-descendant denial is
+intentional; never relax publisher or Hermes guards to make a fixture pass.
