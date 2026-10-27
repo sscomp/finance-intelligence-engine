@@ -11,7 +11,7 @@ class CalendarAdmissionTests(base.unittest.TestCase):
 
     def collect(self,payload,persist=False):
         y=base.y;meta={'fetched_at':base.NOW.isoformat(),'sha256':'a'*64}
-        m=y.research(self.r);writer=Mock(return_value={'rows':18})
+        m=y.research(self.r);writer=Mock(side_effect=lambda batch,root:{'batch_id':batch['batch_id'],'rows':len(batch['rows'])})
         with patch.object(y,'fetch',return_value=(payload,meta)),patch.object(y,'research',return_value={**m,'persist':writer}):
             result=y.run(base.NOW,self.r) if persist else y.collect(base.NOW,self.r)
         return result,writer

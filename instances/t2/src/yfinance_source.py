@@ -108,28 +108,46 @@ def fetch(root,now,c):
           'raw_semantics':'exact normalized worker stdout, not original Yahoo HTTP response; yfinance performs upstream parsing/adjustment'}
     m['atomic'](p,meta);return payload,meta
 
-def admit_calendar(rows,now,root):
-    """Reject the whole batch before P3; keep provider response provenance intact.
+def admit_calendar(rows,now,root,filter_closed=False):
+    """Only verified CLOSED dates may be quarantined at collection.
 
     Volume is not a session calendar: zero volume on a scheduled day is valid
-    historical input. Unknown/expired calendars also fail closed.
+    historical input. Unknown/expired calendars reject the entire batch.
+    Read-back/strategy callers retain strict rejection of any CLOSED row.
     """
-    p=policy(root);sessions={}
+    p=policy(root);sessions={};accepted=[];rejected=[]
     for row in rows:
         day=row['source_date']
         if day not in sessions:sessions[day]=p['calendar_state'](root,dt.date.fromisoformat(day),now)
-        if sessions[day]!='SCHEDULED_SESSION':
+        if sessions[day]=='CLOSED' and filter_closed:
+            rejected.append(row)
+        elif sessions[day]!='SCHEDULED_SESSION':
             raise DataError('BAR_CALENDAR_REJECTED:'+day+':'+sessions[day])
+        else:accepted.append(row)
+    return accepted,rejected
 
 def collect(now,root=ROOT):
     c=config(root);m=research(root);payload,meta=fetch(root,now,c);rows=normalize(payload,now,c)
-    admit_calendar(rows,now,root)
+    rows,rejected=admit_calendar(rows,now,root,filter_closed=True)
+    admission={'policy':'VERIFIED_OPEN_ONLY_V1','input_rows':len(rows)+len(rejected),'accepted_rows':len(rows),
+               'rejected_rows':[{'key':r['key'],'source_date':r['source_date'],'calendar_session':'CLOSED','row_sha256':m['digest'](r)} for r in rejected]}
+    if rejected:
+        # Save rejected rows and exact response references before any P3 call,
+        # including the zero-accepted case. Refetches retain separate evidence.
+        evidence={'calendar_admission':admission,'rejected_rows':rejected,'responses':[meta]}
+        folder=root/'state/yfinance-calendar-rejections';folder.mkdir(mode=0o700,exist_ok=True)
+        dest=folder/(m['digest'](evidence)+'.json')
+        if dest.exists():
+            if json.loads(dest.read_bytes())!=evidence:raise DataError('CALENDAR_REJECTION_EVIDENCE_MISMATCH')
+        else:m['atomic'](dest,evidence)
+    if not rows:raise DataError('BAR_CALENDAR_REJECTED:'+rejected[0]['source_date']+':CLOSED:NO_ACCEPTED_ROWS')
     for row in rows:
-        row['calendar_session']=policy(root)['calendar_state'](root,dt.date.fromisoformat(row['source_date']),now)
-        row['calendar_note']='PROVIDER_BAR_ON_VERIFIED_CLOSED_DATE' if row['calendar_session']=='CLOSED' else 'provider label retained; not proof of a trade'
+        row['calendar_session']='SCHEDULED_SESSION'
+        row['calendar_note']='provider label retained; not proof of a trade'
         row['version']=m['digest'](row)
     batch={'instance_id':'T2','source':SOURCE,'provider_version':VERSION,'fetched_at':meta['fetched_at'],'responses':[meta],'rows':rows,
-           'coverage':{'series':18,'instruments':17,'interval':'1d','notice':NOTICE,'provider_calendar_conflict_dates':sorted({r['source_date'] for r in rows if r['calendar_session']=='CLOSED'})},'failures':[]}
+           'coverage':{'series':len({(r['entity_id'],r['period']) for r in rows}),'instruments':len({r['entity_id'] for r in rows}),'interval':'1d','notice':NOTICE,
+                       'provider_calendar_conflict_dates':sorted({r['source_date'] for r in rejected}),'calendar_admission':admission},'failures':[]}
     batch['batch_id']=m['digest']({k:batch[k] for k in ['source','provider_version','rows','failures']});return batch
 
 def run(now,root=ROOT):
@@ -137,6 +155,7 @@ def run(now,root=ROOT):
     prior=json.loads(p.read_text()) if p.exists() else {}
     try:
         batch=collect(now,root);receipt=m['persist'](batch,root)
+        if receipt.get('batch_id')!=batch['batch_id'] or receipt.get('rows')!=len(batch['rows']):raise DataError('PERSISTENCE_RECEIPT_MISMATCH')
         result={'instance_id':'T2','source':SOURCE,'result':'PASS','last_attempt':now.isoformat(),'last_success':batch['fetched_at'],
                 **receipt,'rowset_sha256':m['digest'](batch['rows']),'responses':batch['responses'],'coverage':batch['coverage'],
                 'source_as_of':sorted({r['source_as_of'] for r in batch['rows']}),'notice':NOTICE}
