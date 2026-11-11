@@ -57,6 +57,7 @@ production baselines（[FIE_6_7B](docs/production/FIE_6_7B_PRODUCTION_BASELINE.m
 | **投資組合決策引擎** | 基於分數的配置建議（score-weighted / risk-aware）、風險指標計算（集中度、最大回撤、相關性、風險預算）、執行規劃與報告產出 |
 | **歷史資料回填工具** | `backfill` CLI 支援 gap 偵測、dry-run 規劃、以及受控的歷史資料補填（僅寫入臨時 DB，永不寫入生產 DB） |
 | **資料新鮮度守護** | 交易日感知的 staleness 分類（FRESH / STALE / HARD_EXPIRED），CLI `--freshness-check` 旗標可在 Pipeline 執行時自動檢查 |
+| **TWSE/TPEx 抓取限流治理** | [治理規格與持續事件簿](docs/operations/TWSE_RATELIMIT_LOG.md)（fetcher 修改前必讀）：MI_INDEX 合併請求、每輪必檢、攔截頁判別及退避規則；統一 fetcher 與自動告警尚待實作（見文件 §3） |
 
 ---
 
