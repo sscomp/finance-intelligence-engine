@@ -16,6 +16,11 @@ from datetime import datetime, timedelta
 # helpers, all 46/46 PASS post-extraction).
 from reports.common.format import format_shares, format_net  # noqa: E402,F401
 
+# TWSE 限流治理：修改本模組或新增逐檔抓取前，先讀
+# docs/operations/TWSE_RATELIMIT_LOG.md（每輪必檢見 §2.4）。
+# T86 是單日全市場合併請求；觀察風險較低，不代表 0.3s 是安全速率。
+# 安全提示 HTML 應停止該路徑本輪請求、冷卻至少 30 分鐘再受控單次探測；
+# HTTP 307 單獨不足以認定限流。共用偵測／退避尚待實作（文件 §3）。
 T86_URL = "https://www.twse.com.tw/fund/T86?response=json&date={date}&selectType=ALL"
 
 def get_weekday_dates(days_back=35):
