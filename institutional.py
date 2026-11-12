@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 # helpers, all 46/46 PASS post-extraction).
 from reports.common.format import format_shares, format_net  # noqa: E402,F401
 
-from twse_fetcher import FetchCooldownActive  # noqa: E402
+from twse_fetcher import FetchCooldownActive, fetch_json  # noqa: E402
 
 # TWSE 限流治理：修改本模組或新增逐檔抓取前，先讀
 # docs/operations/TWSE_RATELIMIT_LOG.md（每輪必檢見 §2.4）。

@@ -30,6 +30,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
+import institutional
+import twse_fetcher
 from twse_fetcher import (
     DEFAULT_COOLDOWN_S,
     FetchCooldownActive,
@@ -229,6 +231,69 @@ class FakeEndpointTests(unittest.TestCase):
         _Handler.mode = "empty"
         self.assertIsNone(self.fetch())
         self.assertEqual(_Handler.hits, 1)
+
+
+class InstitutionalIntegrationTests(unittest.TestCase):
+    """Wire-level checks through institutional.fetch_t86_daily itself.
+
+    Uses mock.patch.object so the module-internal fetch_json reference is
+    the one exercised — the exact path production T86 calls take.
+    """
+
+    def setUp(self):
+        self.state_dir = TemporaryDirectory()
+        self.state_path = Path(self.state_dir.name) / "integration_state.json"
+        self.clock = _FakeClock()
+        self.slept = []
+
+    def tearDown(self):
+        self.state_dir.cleanup()
+
+    def _patch_fetcher(self, **impl_kw):
+        """Patch institutional.fetch_json with a kwarg-forwarding stub.
+
+        patch.object kwargs configure the mock's attributes, NOT call
+        arguments — so route defaults through a stub into the real
+        fetch_json, keeping every contract path live.
+        """
+        real = twse_fetcher.fetch_json
+        defaults = {"state_path": self.state_path, "now": self.clock, "sleeper": self.slept.append}
+        defaults.update(impl_kw)
+
+        def stub(url, **kw):
+            kw.update(defaults)
+            return real(url, **kw)
+
+        return mock.patch.object(institutional, "fetch_json", stub)
+
+    def test_fetch_t86_daily_parses_t86_rows(self):
+        payload = {"stat": "OK", "data": [
+            ["2330"] + ["0"] * 3 + ["100", "0", "0", "10", "0", "0", "7", "0", "0", "0", "0", "0", "0", "0", "117"],
+        ]}
+        with self._patch_fetcher(
+            opener=lambda url, timeout: (200, json.dumps(payload).encode()),
+        ):
+            result = institutional.fetch_t86_daily("20261110")
+        self.assertEqual(result["2330"], {"foreign": 110, "prop": 7, "total": 117})
+
+    def test_fetch_t86_daily_propagates_cooldown(self):
+        state = {"schema": 1, "paths": {"www.twse.com.tw/fund/T86": {"blocked_until": _FakeClock().t + 999}}}
+        self.state_path.write_text(json.dumps(state))
+        with self._patch_fetcher():
+            with self.assertRaises(FetchCooldownActive):
+                institutional.fetch_t86_daily("20261110")
+
+    def test_accumulate_stops_remaining_dates_on_cooldown(self):
+        state = {"schema": 1, "paths": {"www.twse.com.tw/fund/T86": {"blocked_until": _FakeClock().t + 999}}}
+        self.state_path.write_text(json.dumps(state))
+        with self._patch_fetcher():
+            with mock.patch.object(
+                institutional, "get_weekday_dates", return_value=["20261101", "20261102", "20261103"]
+            ):
+                _, fetched = institutional.accumulate_institutional_data(["2330"], days_back=3)
+        self.assertEqual(fetched, 0)  # stopped before any date was fetched
+        # Only ONE attempt occurred (the first date), not one per date.
+        self.assertEqual(self.slept, [])
 
 
 def _host_path(url: str) -> str:
