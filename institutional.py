@@ -4,7 +4,6 @@
 從 TWSE T86 API 累積近一個月（約 20 個交易日）的外資/投信買賣超
 """
 
-import urllib.request
 import json
 import time
 from datetime import datetime, timedelta
@@ -16,11 +15,14 @@ from datetime import datetime, timedelta
 # helpers, all 46/46 PASS post-extraction).
 from reports.common.format import format_shares, format_net  # noqa: E402,F401
 
+from twse_fetcher import FetchCooldownActive  # noqa: E402
+
 # TWSE 限流治理：修改本模組或新增逐檔抓取前，先讀
 # docs/operations/TWSE_RATELIMIT_LOG.md（每輪必檢見 §2.4）。
 # T86 是單日全市場合併請求；觀察風險較低，不代表 0.3s 是安全速率。
-# 安全提示 HTML 應停止該路徑本輪請求、冷卻至少 30 分鐘再受控單次探測；
-# HTTP 307 單獨不足以認定限流。共用偵測／退避尚待實作（文件 §3）。
+# fetch_json 共用契約（治理檔 §3 已落地）：安全頁偵測、路徑級跨進程冷卻、
+# 受控單次探測、per-path 節流。遇 FetchCooldownActive 必須停止本輪剩餘
+# 日期請求（§2.2），不得立刻換參數連打；冷卻由 twse_fetcher state 統一管理。
 T86_URL = "https://www.twse.com.tw/fund/T86?response=json&date={date}&selectType=ALL"
 
 def get_weekday_dates(days_back=35):
@@ -36,45 +38,44 @@ def get_weekday_dates(days_back=35):
     return dates
 
 def fetch_t86_daily(date_str, timeout=15):
-    """Fetch T86 data for a single date. Returns dict of stock_code -> {foreign, prop, total}."""
+    """Fetch T86 data for a single date. Returns dict of stock_code -> {foreign, prop, total}.
+
+    Raises FetchCooldownActive when the T86 path is governed into cooldown
+    (twse_fetcher contract): accumulate_institutional_data stops the
+    remaining dates for this round rather than storming the endpoint.
+    """
     url = T86_URL.format(date=date_str)
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        resp = urllib.request.urlopen(req, timeout=timeout)
-        data = json.loads(resp.read().decode('utf-8'))
-        
-        if data.get('stat') != 'OK' or 'data' not in data:
-            return None
-        
-        result = {}
-        for row in data['data']:
-            if len(row) < 19:
-                continue
-            code = row[0].strip()
-            # row[4] = 外陸資買賣超(不含外資自營商)
-            # row[7] = 外資自營商買賣超
-            # row[10] = 投信買賣超
-            # row[18] = 三大法人買賣超合計
-            def parse_num(s):
-                if not s:
-                    return 0
-                try:
-                    return int(s.replace(',', '').replace(' ', ''))
-                except:
-                    return 0
-            
-            foreign = parse_num(row[4]) + parse_num(row[7])  # 外資(含自營商)
-            prop = parse_num(row[10])  # 投信
-            total = parse_num(row[18])  # 三大法人合計
-            
-            result[code] = {
-                'foreign': foreign,
-                'prop': prop,
-                'total': total,
-            }
-        return result
-    except Exception:
+    data = fetch_json(url, timeout=timeout)
+    if data is None:
         return None
+
+    result = {}
+    for row in data['data']:
+        if len(row) < 19:
+            continue
+        code = row[0].strip()
+        # row[4] = 外陸資買賣超(不含外資自營商)
+        # row[7] = 外資自營商買賣超
+        # row[10] = 投信買賣超
+        # row[18] = 三大法人買賣超合計
+        def parse_num(s):
+            if not s:
+                return 0
+            try:
+                return int(s.replace(',', '').replace(' ', ''))
+            except Exception:
+                return 0
+
+        foreign = parse_num(row[4]) + parse_num(row[7])  # 外資(含自營商)
+        prop = parse_num(row[10])  # 投信
+        total = parse_num(row[18])  # 三大法人合計
+
+        result[code] = {
+            'foreign': foreign,
+            'prop': prop,
+            'total': total,
+        }
+    return result
 
 def accumulate_institutional_data(target_codes, days_back=35):
     """
@@ -89,7 +90,20 @@ def accumulate_institutional_data(target_codes, days_back=35):
     successful_dates = 0
     
     for date_str in dates:
-        daily_data = fetch_t86_daily(date_str)
+        try:
+            daily_data = fetch_t86_daily(date_str)
+        except FetchCooldownActive as cooldown:
+            # §2.2: stop the remaining requests for this path this round;
+            # the cooldown state (shared across processes) will gate the
+            # next run's probe timing — do not sleep-loop here.
+            import sys
+
+            print(
+                f"[TWSE-LIMIT] T86 cooldown active at {date_str}: {cooldown}; "
+                f"stopping remaining {len(dates) - dates.index(date_str) - 1} dates this round",
+                file=sys.stderr,
+            )
+            break
         if daily_data is None:
             continue
         
@@ -101,10 +115,10 @@ def accumulate_institutional_data(target_codes, days_back=35):
                 acc[code]['prop'] += daily_data[code]['prop']
                 acc[code]['total'] += daily_data[code]['total']
                 acc[code]['days'] += 1
-        
-        # Rate limit: be nice to TWSE
-        time.sleep(0.3)
     
+    # Pacing between dates is owned by twse_fetcher (per-path gap); the
+    # legacy 0.3 s sleep here is no longer the floor for governed paths.
+
     # Add metadata
     for code in target_codes:
         acc[code]['trading_days_fetched'] = successful_dates

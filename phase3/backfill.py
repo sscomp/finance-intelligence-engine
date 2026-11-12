@@ -1066,6 +1066,7 @@ def fetch_institutional_range(
 
     try:
         import institutional  # type: ignore[import-not-found]
+        from twse_fetcher import FetchCooldownActive  # type: ignore[import-not-found]
     except Exception as e:
         return [], f"ERROR: {e}"
 
@@ -1087,7 +1088,13 @@ def fetch_institutional_range(
     while d <= d_end:
         if d.weekday() < 5:  # Mon-Fri only
             date_str = d.strftime("%Y%m%d")
-            daily_data = institutional.fetch_t86_daily(date_str)
+            try:
+                daily_data = institutional.fetch_t86_daily(date_str)
+            except FetchCooldownActive as cooldown:
+                # §2.2: stop the remaining requests for this path this
+                # round; the range is left partially filled and the caller
+                # can re-run later after the shared cooldown releases.
+                return [], f"TWSE cooled down: {cooldown}"
             if daily_data is not None:
                 for code in target_codes:
                     if code in daily_data:
@@ -1100,6 +1107,9 @@ def fetch_institutional_range(
                             "total_net": dd["total"],
                             "trading_days": 1,
                         })
+            # Pacing between dates owned by twse_fetcher (per-path gap)
+            # per governance §3; legacy 0.3 s sleep kept for non-governed
+            # defensive spacing parity.
             _time.sleep(0.3)  # Rate limit per governance §8.6
         d += _timedelta(days=1)
 

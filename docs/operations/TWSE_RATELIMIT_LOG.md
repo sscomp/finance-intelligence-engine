@@ -110,9 +110,9 @@ def parse_mi_index(payload):
 
 | 項目 | 程式現況／驗收目標 | 狀態 |
 |---|---|---|
-| 共用 TWSEFetcher：合併優先、路徑冷卻、退避及安全頁偵測 | 規格依 §2；`institutional.py` 仍以一般例外回傳 None，累積迴圈遇失敗仍繼續下一日期，0.3s sleep 不是保護契約；應驗證安全頁後不再發同路徑剩餘請求 | 待實作 |
-| 整合 T2 ingestion | `instances/t2/src/ingestion.py` 行情已用 `STOCK_DAY_ALL` 全市場路徑，非逐檔 STOCK_DAY；T86 逐日迴圈仍需納入統一治理。保留既有日期／欄位／覆蓋率契約 | 待實作 |
-| repo 外策略報告腳本 | 本機 `strategy_reports/scripts/fetch_close_20261111.py` 仍含逐檔 STOCK_DAY 與一般例外重試；依 §2 分別規劃單日行情合併、歷史快取及遇鎖中止 | 待處理，非本次已部署能力 |
+| 共用 TWSEFetcher：合併優先、路徑冷卻、退避及安全頁偵測 | **已實作（2026-11-12）：`twse_fetcher.py`**——安全頁核心字串偵測（§1.2）、路徑級跨進程冷卻（flock JSON state，預設 1800s、到期受控單次探測、失敗探測不延長冷卻）、per-path 節流（0.3s 下限）；網路／時鐘／sleep 全可注入，**測試以本機假端點驗證（tests/test_twse_fetcher.py 11/11，零真網路）**。`institutional.py` 與 `phase3/backfill.py` 的 T86 逐日迴圈已接入：遇 `FetchCooldownActive` 即停本輪剩餘日期（§2.2）；套件基線比對改動前後失敗清單相同（139=139，零新增失敗；既有失敗為 PG 依賴 baseline） | **已落地** |
+| 整合 T2 ingestion | `instances/t2/src/ingestion.py` 行情已用 `STOCK_DAY_ALL` 全市場路徑，非逐檔 STOCK_DAY；T86 逐日迴圈（rwd 前綴＋自有 reliability 契約）改走 twse_fetcher 為**後續工單**—需先驗證其 fetch() 快取與冷卻契約相容性，不躁進。保留既有日期／欄位／覆蓋率契約 | 待實作（後續工單） |
+| repo 外策略報告腳本 | 本機 `strategy_reports/scripts/fetch_close_20261111.py` 仍含逐檔 STOCK_DAY 與一般例外重試；依 §2 分別規劃單日行情合併、歷史快取及遇鎖中止（可引用 `twse_fetcher.fetch_json` 契約） | 待處理，非本次已部署能力 |
 | TPEx OpenAPI 驗證 | 先確認官方端點、回應 schema、日期、單位、覆蓋率、timeout／redirect 行為，再新增 adapter 與離線測試 | 待驗證 |
 | fetcher 級告警 | 安全頁與一般來源異常分開記錄；發生時即記 pipeline 事件並通知營運，不依賴報告缺檔才告警 | 待實作；現有 watchdog 僅部分覆蓋 |
 | 月回顧 | 彙總事件與冷卻實測，再調整暫行參數；未設自動排程 | 人工維護 |
@@ -130,6 +130,7 @@ def parse_mi_index(payload):
 | **2026-11-11（夜間 exit node 實測）** | 建置 tailnet exit node（操作者住宅寬頻出口）後受控單發：`exchangeReport/STOCK_DAY`（legacy 無 `/rwd/zh/` 前綴）自住宅出口 **200＋完整 JSON**（`stat: OK`、台積電 11/10 各日成交）；同刻自雲端出口同路徑 307 安全頁——解鎖歸因**來源 IP 變更**而非時間自然解除。`/rwd/zh/` 前綴同段自住宅出口 302→page-not-found（非安全頁）。MI_INDEX 自住宅出口 200（經 DERP 中繼 5.69MB 約 17.5s；同期雲端直連同參數 200／0.24s） | 切換→單發→立即還原，全程受控單發；測後出口還原雲端並驗證，無路由殘留 | 鎖在本輪雲端出口夜間持續（跨 4 小時+）；住宅出口當下可用——備援驗證有效，裁定預設不啟用（§2.3） |
 | **2026-11-12（出口事故追加）** | 實測夜後（00:30 台灣時間）本機 IPv4 default route 缺失、LLM API 與 GitHub IPv4 同時不通；時序與前一輪 exit node 切換／還原相關，未取得逐項路由變更紀錄（即時還原驗證當下曾通，路由缺失在其後浮現）。DNS 正常、IPv6 不受影響 | 依開機 vm_gw 參數補回 default route（eth0），未重啟服務、未動身分與憑證；驗證 LLM API 與 GitHub HTTPS 均 200 | 恢復；裁定升級為「不在共用產線主機直接切全機出口，程序級代理／隔離環境未驗證前不套用」；事故細節留本機文件，不隨 repo 發布 |
 | **2026-11-12（T86 觸點與品質對照）** | 晨間單發觸點：`fund/T86` legacy 路徑自雲端出口 307（0.56s，307 單獨不判限流、即停未重試（§1.2））。近 4 日品質對照：FIE 產線全綠（daily/weekly/monthly artifacts 零缺值、.err 全空）；策略報告線 307 影響集中 11-11/12 凌晨鎖窗——11-11 收盤版漲跌家數 DATA_UNAVAILABLE（FMTQIK 新版無家數欄＋MI_INDEX 同窗被鎖），picklist 報告 4 筆補核聲明；11-12 開盤 2 筆為欄位不存在的合約聲明非鎖所致 | 有鎖窗的數值皆依 §2.2 如實宣告或替代源補核，無冒充；觀察後不追加探測，避免累積路徑計數 | OVH 出口鎖窗跨日持續（11-11 日間至 11-12 晨間至少一次 307 復確認）；解除時間仍未知，待 04:50/16:20 管線觀察 |
+| **2026-11-12（TWSEFetcher 落地）** | §3 首項完成：`twse_fetcher.py`（安全頁偵測＋路徑冷卻＋受控探測＋跨進程 state）＋假端點測試 11/11 全綠（零真網路）；`institutional.py`／`phase3/backfill.py` T86 迴圈接入遇冷卻即停（§2.2）；全套件基線比對改動前後失敗清單相同（139=139，既有失敗為 PG 依賴 baseline、非本次引入） | fetcher 行為以 tests/test_twse_fetcher.py 鎖定；state 檔 gitignored、運行時才產生；T2 ingestion 迴圈整合列入後續工單 | 治理規格 §2.2 自此為程式契約而非文件約定；實戰遇鎖行為待下次管線事件驗證 |
 | （後續事件紀錄於此） | | | |
 
 ## 5. 關聯來源與版本控管範圍
